@@ -1,0 +1,113 @@
+#ifndef SERVO_AXIS_BASE_HPP
+#define SERVO_AXIS_BASE_HPP
+
+#include <ecrt.h>
+#include <string>
+#include <memory>
+#include <rclcpp/rclcpp.hpp>
+
+// 状态机状态定义
+enum class AxisState {
+    UNINITIALIZED = 0,
+    INITIALIZING = 1,
+    READY = 2,
+    MANUAL_MODE = 3,
+    AUTO_MODE = 4,
+    STOPPED = 5,
+    FAULT = 6
+};
+
+enum class OperationMode {
+    MANUAL = 0,
+    AUTO = 1
+};
+
+enum class AxisType {
+    AXIS1 = 0,
+    AXIS2 = 1
+};
+
+enum class DriveBrand {
+    LEISAI = 0,
+    HUICHUAN = 1
+};
+
+class ServoAxisBase {
+public:
+    ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand);
+    virtual ~ServoAxisBase() = default;
+
+    // 纯虚函数 - 必须由子类实现
+    virtual void configure(ec_master_t* master) = 0;
+    virtual void register_pdo_entries(ec_pdo_entry_reg_t* reg_list, int& index) = 0;
+    virtual void handle_state_machine(uint8_t* domain1_pd) = 0;
+    
+    // 虚函数 - 可以有默认实现
+    virtual void set_target_displacement(double displacement);
+    virtual void set_displacement_updated(bool updated);
+    virtual void stop();
+    virtual void start_manual_mode();
+    virtual void start_auto_mode();
+    virtual void clear_fault();
+    virtual void reset_axis();
+
+    // 获取函数
+    virtual std::string get_name() const;
+    virtual AxisState get_current_state() const;
+    virtual OperationMode get_operation_mode() const;
+    virtual bool is_ready() const;
+    virtual bool is_running() const;
+    virtual bool is_homing_completed() const;
+    virtual bool is_homing_in_progress() const;
+    virtual ec_slave_config_t* get_slave_config();
+    virtual unsigned int get_control_word_offset() const;
+    virtual int32_t get_actual_position() const;
+    virtual int32_t get_initial_position() const;
+    virtual DriveBrand get_brand() const;
+
+protected:
+    // 保护成员变量 - 子类可以访问
+    std::string axis_name_;
+    uint16_t slave_position_;
+    AxisType axis_type_;
+    DriveBrand brand_;
+    
+    ec_slave_config_t* sc_;
+    unsigned int control_word_;
+    unsigned int status_word_;
+    unsigned int off_target_position_;
+    unsigned int off_actual_position_;
+    unsigned int off_error_code_;
+    
+    AxisState current_state_;
+    OperationMode operation_mode_;
+    
+    bool position_initialized_;
+    int32_t target_pulses_;
+    double target_displacement_;
+    bool displacement_updated_;
+    int32_t joint_position_;
+    int32_t initial_position_;
+    
+    bool homing_in_progress_;
+    bool homing_completed_;
+    
+    // 控制标志
+    bool start_manual_requested_;
+    bool start_auto_requested_;
+    bool clear_fault_requested_;
+    bool reset_requested_;
+    bool fault_clearing_in_progress_;
+    int fault_clear_step_;
+    int fault_clear_counter_;
+
+    // 保护方法 - 子类可以重写或使用
+    virtual void initialize_members();
+    virtual int32_t displacement_to_pulses(double displacement_mm);
+    virtual double pulses_to_displacement(int32_t pulses);
+    virtual void check_state_changes(uint16_t read_status_word, uint16_t error_code);
+    virtual void handle_fault_clear(uint8_t* domain1_pd);
+    virtual void check_system_initialization();
+};
+
+#endif // SERVO_AXIS_BASE_HPP

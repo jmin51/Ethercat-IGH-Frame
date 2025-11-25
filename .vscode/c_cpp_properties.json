@@ -1,0 +1,52 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/jmin/ros2_ws/install/ethercat_msgs/include/**",
+        "/home/jmin/ros2_ws/install/ethercat_generic_cia402_drive/include/**",
+        "/home/jmin/ros2_ws/install/ethercat_generic_slave/include/**",
+        "/home/jmin/ros2_ws/install/ethercat_driver/include/**",
+        "/home/jmin/ros2_ws/install/ethercat_interface/include/**",
+        "/opt/ros/humble/include/**",
+        "/home/jmin/dev_ws/install/rviz_marker_tools/include/**",
+        "/home/jmin/dev_ws/install/moveit_task_constructor_msgs/include/**",
+        "/home/jmin/dev_ws/install/learning_interface/include/**",
+        "/home/jmin/dev_ws/IGH-YKD/IGH-test/ethercat_control/include/**",
+        "/home/jmin/dev_ws/IGH-YKD/sv660n-IGH-test/ethercat_control/include/**",
+        "/home/jmin/dev_ws/arm2_ethercat_sv660n/planar2_ethercat_ws/src/planar2_ethercat/include/**",
+        "/home/jmin/dev_ws/ethercat-ros2/ethercat_driver_ros2-humble/ethercat_driver/include/**",
+        "/home/jmin/dev_ws/ethercat-ros2/ethercat_driver_ros2-humble/ethercat_generic_plugins/ethercat_generic_cia402_drive/include/**",
+        "/home/jmin/dev_ws/ethercat-ros2/ethercat_driver_ros2-humble/ethercat_generic_plugins/ethercat_generic_slave/include/**",
+        "/home/jmin/dev_ws/ethercat-ros2/ethercat_driver_ros2-humble/ethercat_interface/include/**",
+        "/home/jmin/dev_ws/ethercat-ros2/ethercat_driver_ros2-humble/ethercat_manager/include/**",
+        "/home/jmin/dev_ws/light_lift_arm_3dof-master/light_lift_arm _3dof_ubunut_c++/include/**",
+        "/home/jmin/dev_ws/light_lift_arm_3dof-master/light_lift_arm_3dof_ros2_ws/src/light_lift_arm/include/**",
+        "/home/jmin/dev_ws/moveit_joint_velocity/include/**",
+        "/home/jmin/dev_ws/ros2_package-main/orbbec_cam_pkg/include/**",
+        "/home/jmin/dev_ws/serial_test/src/cpp_header/include/**",
+        "/home/jmin/dev_ws/src/add_cylinder/include/**",
+        "/home/jmin/dev_ws/src/display_so_arm100_rviz/include/**",
+        "/home/jmin/dev_ws/src/fishbot_description/include/**",
+        "/home/jmin/dev_ws/src/moveit_joint_velocity/include/**",
+        "/home/jmin/dev_ws/test2-motion-interface/motion_vision_interface/include/**",
+        "/home/jmin/dev_ws/test2/motion_vision_interface/include/**",
+        "/home/jmin/dev_ws/workspace/Ethercat-IGH-Frame/ethercat_controller/include/**",
+        "/home/jmin/dev_ws/ws_moveit2/src/moveit_task_constructor/core/include/**",
+        "/home/jmin/dev_ws/ws_moveit2/src/moveit_task_constructor/demo/include/**",
+        "/home/jmin/dev_ws/ws_moveit2/src/moveit_task_constructor/rviz_marker_tools/include/**",
+        "/home/jmin/dev_ws/ws_moveit2/src/mtc_tutorial/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}
