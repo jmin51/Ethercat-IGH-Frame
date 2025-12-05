@@ -130,24 +130,189 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
         printf("轴 %s 执行重置，回到未初始化状态\n", axis_name_.c_str());
     }
 
+    // // 状态转换逻辑
+    // switch (current_state_) {
+    //     case AxisState::UNINITIALIZED:
+    //             current_state_ = AxisState::INITIALIZING;
+    //             printf("轴 %s 进入初始化状态\n", axis_name_.c_str());
+    //         break;
+            
+    //     case AxisState::INITIALIZING:
+    //         handle_leisai_initialization(domain1_pd, read_status_word);
+    //         break;
+            
+    //     case AxisState::READY:
+    //         handle_leisai_ready_state(domain1_pd, read_status_word);
+    //         break;
+            
+    //     case AxisState::MANUAL_MODE:
+    //         if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
+    //             current_state_ = AxisState::INITIALIZING;
+    //             printf("轴 %s 退出手动模式\n", axis_name_.c_str());
+    //         } else {
+    //             handle_leisai_manual_operation(domain1_pd, current_pos);
+    //         }
+    //         break;
+            
+    //     case AxisState::AUTO_MODE:
+    //         if (read_status_word != 0x1637) {
+    //             current_state_ = AxisState::INITIALIZING;
+    //             printf("轴 %s 退出自动模式\n", axis_name_.c_str());
+    //         } else {
+    //             handle_leisai_auto_operation(domain1_pd, current_pos);
+    //         }
+    //         break;
+         
+    //     case AxisState::STOPPED:
+    //         // 停止状态：保持当前位置，等待回到INITIALIZING
+    //         EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+    //         EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+
+    //         // 检查是否可以回到READY状态
+    //         // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
+    //         if (read_status_word == 0x1637 ) {
+    //             current_state_ = AxisState::INITIALIZING;
+    //             printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
+    //         }
+    //         break;
+            
+    //     case AxisState::FAULT:
+    //         // 检查是否是821b通讯错误的自动清除流程
+    //         if (error_code == 0x821b && fault_clearing_in_progress_) {
+    //             handle_fault_clear(domain1_pd);
+
+    //             // 故障清除完成后，回到初始化状态
+    //             if (!fault_clearing_in_progress_) {
+    //                 current_state_ = AxisState::INITIALIZING;
+    //                 printf("轴 %s 821b故障清除完成，回到初始化状态\n", axis_name_.c_str());
+    //             }
+    //         }
+    //         // 原有的故障处理逻辑保持不变
+    //         else if (clear_fault_requested_ && current_state_ == AxisState::FAULT) {
+    //             clear_fault_requested_ = false;
+    //             fault_clearing_in_progress_ = true;
+    //             fault_clear_step_ = 0;
+    //             fault_clear_counter_ = 0;
+    //             printf("轴 %s 开始清除故障流程\n", axis_name_.c_str());
+    //         }
+
+    //         if (fault_clearing_in_progress_) {
+    //             handle_fault_clear(domain1_pd);
+    //         } else {
+    //             EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+    //         }
+    //         break;
+    // }
     // 状态转换逻辑
     switch (current_state_) {
         case AxisState::UNINITIALIZED:
-            if (read_status_word == 0x1650) {
+            // if (read_status_word == 0x1650) { 可以延迟1s后进入下个状态机
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 进入初始化状态\n", axis_name_.c_str());
-            }
+            // }
             break;
             
         case AxisState::INITIALIZING:
-            handle_leisai_initialization(domain1_pd, read_status_word);
+            static unsigned int init_delay = 0;
+            init_delay++;
+            
+            // 前100个周期只观察状态，不发送控制命令
+            if (init_delay < 100) {
+                break;
+            }
+            // 新增：检查821b通讯错误并自动清除
+            if (error_code == 0x821b) {
+                printf("轴 %s 检测到通讯错误0x821b，开始自动清除故障流程\n", axis_name_.c_str());
+                fault_clearing_in_progress_ = true;
+                fault_clear_step_ = 0;
+                fault_clear_counter_ = 0;
+                current_state_ = AxisState::FAULT;
+                break;
+            }
+
+            // 执行初始化序列至1633状态
+            if (read_status_word == 0x0250 || read_status_word == 0x0650 || read_status_word == 0x0670 || read_status_word == 0x0770) {
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+                printf("发送状态转换命令: 0x0006\n");
+            } else if (read_status_word == 0x0631 || read_status_word == 0x0731) {
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0007);
+                printf("发送状态转换命令: 0x0007\n");
+            } else if (read_status_word == 0x0633 || read_status_word == 0x0733) {
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x001F);
+                printf("发送状态转换命令: 0x001F\n");
+                current_state_ = AxisState::READY;
+                printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
+            } else if (read_status_word == 0x1637 || read_status_word == 0x1237 || read_status_word == 0x16b7) {
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                current_state_ = AxisState::READY;
+                printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
+            }
+            // else {
+            //     current_state_ = AxisState::FAULT;
+            //     printf("轴 %s 初始化失败，进入故障状态\n", axis_name_.c_str());
+            // }
             break;
             
         case AxisState::READY:
-            handle_leisai_ready_state(domain1_pd, read_status_word);
+            // 处理启动请求
+            if (start_manual_requested_ && (read_status_word == 0x1637 || read_status_word == 0x1237)) {
+                start_manual_requested_ = false;
+                operation_mode_ = OperationMode::MANUAL;
+                current_state_ = AxisState::MANUAL_MODE;
+                printf("轴 %s 进入手动模式\n", axis_name_.c_str());
+
+                // 初始化手动模式位置 增加
+                position_initialized_ = false;
+            } 
+            else if (start_auto_requested_ && (read_status_word == 0x1637 || read_status_word == 0x1237)) {
+                start_auto_requested_ = false;
+                operation_mode_ = OperationMode::AUTO;
+                current_state_ = AxisState::AUTO_MODE;
+
+                // // 新增：进入自动模式时重置位移状态
+                // position_initialized_ = false;
+                // // 重置位移状态
+                // target_displacement_ = 0.0;
+                // displacement_updated = false;
+                // target_reached_ = false;
+
+                printf("轴 %s 进入自动模式\n", axis_name_.c_str());
+
+                // 自动模式需要执行回零
+                if (!homing_completed_) {
+                    // start_homing_sequence(domain1_pd, current_pos); // 12.04
+                }
+            }
+            else {
+                // 保持在READY状态，保持当前位置
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+
+                // 如果有启动请求但状态字不满足，检查是否状态异常
+                if (start_manual_requested_ || start_auto_requested_) {
+                    static int warning_counter = 0;
+                    if (warning_counter++ % 100 == 0) {
+                        printf("轴 %s 等待状态字0x1637才能进入模式切换，当前状态字: 0x%04x\n", 
+                            axis_name_.c_str(), read_status_word);
+                    }
+                    
+                    // 新增：如果状态字异常（非0x1637），自动跳转回初始化
+                    if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
+                        printf("轴 %s 检测到异常状态字0x%04x，自动跳转回初始化状态\n", 
+                            axis_name_.c_str(), read_status_word);
+                        current_state_ = AxisState::INITIALIZING;
+                        
+                        // 可选：清除启动请求标志，避免重复触发
+                        // start_manual_requested_ = false;
+                        // start_auto_requested_ = false;
+                    }
+                }
+            }
             break;
             
         case AxisState::MANUAL_MODE:
+            // 手动模式处理
             if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 退出手动模式\n", axis_name_.c_str());
@@ -157,6 +322,7 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             break;
             
         case AxisState::AUTO_MODE:
+            // 自动模式处理
             if (read_status_word != 0x1637) {
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 退出自动模式\n", axis_name_.c_str());
@@ -165,11 +331,47 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             }
             break;
             
-        case AxisState::FAULT:
-            handle_leisai_fault_state(domain1_pd, error_code);
+        case AxisState::STOPPED:
+            // 停止状态：保持当前位置，等待回到INITIALIZING
+            EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+            EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+
+            // 检查是否可以回到READY状态
+            // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
+            if (read_status_word == 0x1637 ) {
+                current_state_ = AxisState::INITIALIZING;
+                printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
+            }
             break;
-    }
-    
+            
+        case AxisState::FAULT:
+            // 检查是否是821b通讯错误的自动清除流程
+            if (error_code == 0x821b && fault_clearing_in_progress_) {
+                handle_fault_clear(domain1_pd);
+
+                // 故障清除完成后，回到初始化状态
+                if (!fault_clearing_in_progress_) {
+                    current_state_ = AxisState::INITIALIZING;
+                    printf("轴 %s 821b故障清除完成，回到初始化状态\n", axis_name_.c_str());
+                }
+            }
+            // 原有的故障处理逻辑保持不变
+            else if (clear_fault_requested_ && current_state_ == AxisState::FAULT) {
+                clear_fault_requested_ = false;
+                fault_clearing_in_progress_ = true;
+                fault_clear_step_ = 0;
+                fault_clear_counter_ = 0;
+                printf("轴 %s 开始清除故障流程\n", axis_name_.c_str());
+            }
+
+            if (fault_clearing_in_progress_) {
+                handle_fault_clear(domain1_pd);
+            } else {
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+            }
+            break;
+    }    
+
     check_state_changes(read_status_word, error_code);
 }
 
@@ -217,18 +419,147 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
     if (!position_initialized_) {
         joint_position_ = current_pos;
         initial_position_ = current_pos;
+        target_pulses_ = current_pos;
         position_initialized_ = true;
+        printf("轴 %s 手动模式位置初始化完成\n", axis_name_.c_str());
     }
-    // ... 其他逻辑
+    
+    // 处理点动控制
+    if (jog_forward_requested_) {
+        // 正转
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        target_pulses_ += speed_pulses;
+    } else if (jog_reverse_requested_) {
+        // 反转
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        target_pulses_ -= speed_pulses;
+    } else if (jog_stop_requested_) {
+        // 停止
+        target_pulses_ = current_pos;
+        jog_stop_requested_ = false;
+    }
+
+    // 手动模式：直接使用位移指令作为目标位置 可能要删除
+    if (displacement_updated_) {
+        displacement_updated_ = false;
+
+        // 手动模式使用相对位移（增量控制）
+        int32_t displacement_pulses = displacement_to_pulses(target_displacement_);
+        // target_pulses_ = joint_position_ + displacement_pulses;
+        target_pulses_ = initial_position_ + displacement_pulses;
+
+        // printf("轴 %s 手动位移: %.3fmm -> 目标脉冲 %d\n",
+        //        axis_name_.c_str(), target_displacement_, target_pulses_);
+    }
+    
+    // 平滑移动到目标位置
+    static int position_counter = 0;
+    if (position_counter++ >= 10) {
+        position_counter = 0;
+        
+        const int32_t TOLERANCE = 100; //PULSE_Tolerance;
+        int32_t error = target_pulses_ - joint_position_;
+        
+        // // 渐进式移动，避免突变
+        // if (abs(error) > TOLERANCE) {
+        //     int32_t step = error / 100; // 分10步移动
+        //     if (abs(step) < 1) step = (error > 0) ? 1 : -1;
+
+        //     joint_position_ += step;
+        // } else {
+        //     joint_position_ = target_pulses_;
+        // }
+        // 基于速度的匀速移动（单位：脉冲/周期）
+        if (abs(error) > TOLERANCE) {
+            const int32_t VELOCITY = 150; // 速度值，可根据需要调整
+            int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
+            
+            // 如果剩余距离小于步长，直接到达目标
+            if (abs(error) <= abs(step)) {
+                joint_position_ = target_pulses_;
+            } else {
+                joint_position_ += step;
+            }
+        } else {
+            joint_position_ = target_pulses_;
+        }
+
+        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+    }
 }
 
 void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {
     // 实现自动模式操作逻辑
     if (!homing_completed_) {
-        // 回零逻辑
+        // handle_homing_sequence(domain1_pd, current_pos); //待完善12.04
+
+        // 新增：回零期间忽略位移更新
+        if (displacement_updated_) {
+            displacement_updated_ = false;
+            printf("轴 %s 回零期间忽略位移指令，等待回零完成\n", axis_name_.c_str());
+        }
         return;
     }
-    // ... 其他逻辑
+    
+    if (!position_initialized_) {
+        joint_position_ = current_pos;
+        initial_position_ = current_pos;
+        target_pulses_ = current_pos;
+        position_initialized_ = true;
+        printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
+    }
+    
+    // 自动模式：使用绝对位置控制
+    if (displacement_updated_) {
+        // printf("轴 %s 检测到位移更新标志，目标位移: %.6fmm\n", 
+        //        axis_name_.c_str(), target_displacement_);
+        displacement_updated_ = false;
+
+        // 自动模式使用绝对位移
+        target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+
+        // 新增：安全检测 - 检查目标位置与当前位置的差值
+        const int32_t MAX_SAFE_DELTA = 3000; // 最大安全脉冲差值，可根据需要调整
+        int32_t position_delta = abs(target_pulses_ - joint_position_);
+
+        if (position_delta > MAX_SAFE_DELTA) {
+            // 触发故障模式
+            current_state_ = AxisState::FAULT;
+            printf("轴 %s 运动控制错误：目标位置与当前位置差值过大(%d脉冲)，可能发生飞车！\n", 
+                   axis_name_.c_str(), position_delta);
+            printf("轴 %s 进入故障模式，需要手动清除故障\n", axis_name_.c_str());
+
+            // 发布错误状态
+            if (global_node) {
+                auto status_msg = std_msgs::msg::String();
+                status_msg.data = "轴 " + axis_name_ + " 运动控制错误：目标位置与当前位置差值过大";
+                // global_node->system_status_pub_->publish(status_msg); // 需要添加system_status_pub_的访问权限
+            }
+            
+            return; // 直接返回，不执行后续运动控制
+        }
+    }
+    
+    // 直接移动到目标位置
+    static int position_counter = 0;
+    if (position_counter++ >= 10) {
+        position_counter = 0;
+        
+        const int32_t TOLERANCE = 100; // PULSE_Tolerance;
+
+        if (abs(joint_position_ - target_pulses_) > TOLERANCE) {
+            // 自动模式使用更直接的移动
+            joint_position_ = target_pulses_;
+        }
+
+        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+
+        // 检查是否到达目标
+        if (abs(joint_position_ - target_pulses_) <= TOLERANCE && !target_reached_) {
+            target_reached_ = true;
+            printf("轴 %s 已到达目标位置 %d!\n", axis_name_.c_str(), target_pulses_);
+        }
+    }
 }
 
 void LeisaiServoAxis::handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code) {

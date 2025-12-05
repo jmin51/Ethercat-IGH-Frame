@@ -60,6 +60,12 @@ void EthercatNode::initialize_node() {
         [this](const std_msgs::msg::String::SharedPtr msg) {
             handle_control_command_msg(msg);
         });
+    // 添加点动指令订阅
+    jog_command_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/jog_command", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            handle_jog_command(msg);
+        });
         
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
 }
@@ -242,14 +248,14 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::Float64Multi
             double delta = requested_displacement - last_displacement;
             
             // 限制变化率
-            if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
+            // if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
                 RCLCPP_WARN(this->get_logger(), 
-                            "轴%zu位移变化率过大(%.6fmm/ms)，限制为%.6fmm/ms", 
+                            "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
                             i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
                 
                 double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
                 requested_displacement = last_displacement + limited_delta;
-            }
+            // }
             
             handle_axis_command(i, requested_displacement);
             last_displacements[i] = requested_displacement;
@@ -272,4 +278,22 @@ double EthercatNode::pulses_to_displacement(int32_t pulses, int32_t initial_puls
     const double GEAR_RATIO = 1.0;
     const int PULSES_PER_REV = 10000;
     return static_cast<double>((pulses - initial_pulses) * SCREW_LEAD / (GEAR_RATIO * PULSES_PER_REV));
+}
+
+void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg) {
+    std::string command = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到点动命令: %s", command.c_str());
+    
+    for (auto& axis : servo_axes_) {
+        if (command == "forward") {
+            axis->jog_forward();
+            RCLCPP_INFO(this->get_logger(), "轴 %s 开始正转", axis->get_name().c_str());
+        } else if (command == "reverse") {
+            axis->jog_reverse();
+            RCLCPP_INFO(this->get_logger(), "轴 %s 开始反转", axis->get_name().c_str());
+        } else if (command == "stop") {
+            axis->jog_stop();
+            RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
+        }
+    }
 }

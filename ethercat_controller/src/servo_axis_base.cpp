@@ -24,6 +24,7 @@ void ServoAxisBase::initialize_members() {
     displacement_updated_ = false;
     joint_position_ = 0;
     initial_position_ = 0;
+    target_reached_ = 0;
     
     homing_in_progress_ = false;
     homing_completed_ = false;
@@ -35,6 +36,12 @@ void ServoAxisBase::initialize_members() {
     fault_clearing_in_progress_ = false;
     fault_clear_step_ = 0;
     fault_clear_counter_ = 0;
+
+    // 添加速度控制初始化
+    jog_speed_ = DEFAULT_JOG_SPEED;
+    jog_forward_requested_ = false;
+    jog_reverse_requested_ = false;
+    jog_stop_requested_ = false;
 }
 
 // 基类的默认实现

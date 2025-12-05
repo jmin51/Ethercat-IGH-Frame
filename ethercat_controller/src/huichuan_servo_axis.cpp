@@ -85,17 +85,101 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
     uint16_t read_status_word = EC_READ_U16(domain1_pd + status_word_);
     uint16_t error_code = EC_READ_U16(domain1_pd + off_error_code_);
     
+    // switch (current_state_) {
+    //     case AxisState::UNINITIALIZED:
+    //             current_state_ = AxisState::INITIALIZING;
+    //             RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
+    //                        "汇川轴 %s 进入初始化状态", axis_name_.c_str());
+    //         break;
+            
+    //     case AxisState::INITIALIZING:
+    //         // handle_huichuan_initialization(domain1_pd, read_status_word);
+    //         static unsigned int init_delay = 0;
+    //         init_delay++;
+            
+    //         // 前100个周期只观察状态，不发送控制命令
+    //         if (init_delay < 100) {
+    //             break;
+    //         }
+    //         // 执行初始化序列至1633状态
+    //         if (read_status_word == 0x1650) {
+    //             EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+    //         } else if (read_status_word == 0x1631) {
+    //             EC_WRITE_U16(domain1_pd + control_word_, 0x0007);
+    //         } else if (read_status_word == 0x1633) {
+    //             EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+    //             EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+    //             current_state_ = AxisState::READY;
+    //             printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
+    //         } else if (read_status_word == 0x1637) {
+    //             EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+    //             current_state_ = AxisState::READY;
+    //             printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
+    //         }
+    //         break;
+            
+    //     case AxisState::READY:
+    //         if (start_manual_requested_ && read_status_word == 0x1637) {
+    //             start_manual_requested_ = false;
+    //             operation_mode_ = OperationMode::MANUAL;
+    //             current_state_ = AxisState::MANUAL_MODE;
+    //             RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
+    //                        "汇川轴 %s 进入手动模式", axis_name_.c_str());
+    //         } 
+    //         else if (start_auto_requested_ && read_status_word == 0x1637) {
+    //             start_auto_requested_ = false;
+    //             operation_mode_ = OperationMode::AUTO;
+    //             current_state_ = AxisState::AUTO_MODE;
+    //             RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
+    //                        "汇川轴 %s 进入自动模式", axis_name_.c_str());
+    //         }
+    //         break;
+            
+    //     case AxisState::MANUAL_MODE:
+    //         handle_huichuan_manual_operation(domain1_pd, current_pos);
+    //         break;
+            
+    //     case AxisState::AUTO_MODE:
+    //         handle_huichuan_auto_operation(domain1_pd, current_pos);
+    //         break;
+            
+    //     case AxisState::FAULT:
+    //         // 汇川特有的故障处理
+    //         if (error_code == 0x821b) {
+    //             RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
+    //                        "汇川轴 %s 检测到通讯错误0x821b，自动清除", axis_name_.c_str());
+    //             fault_clearing_in_progress_ = true;
+    //             fault_clear_step_ = 0;
+    //         }
+    //         if (fault_clearing_in_progress_) {
+    //             handle_fault_clear(domain1_pd);
+    //         }
+    //         break;
+    // }
+    // 检查故障清除请求
+    if (clear_fault_requested_ && current_state_ == AxisState::FAULT) {
+        clear_fault_requested_ = false;
+        fault_clearing_in_progress_ = true;
+        fault_clear_step_ = 0;
+        fault_clear_counter_ = 0;
+        printf("轴 %s 开始清除故障流程\n", axis_name_.c_str());
+    }
+
+    // 检查重置请求
+    if (reset_requested_) {
+        reset_requested_ = false;
+        current_state_ = AxisState::UNINITIALIZED;
+        printf("轴 %s 执行重置，回到未初始化状态\n", axis_name_.c_str());
+    }
+
+    // 状态转换逻辑
     switch (current_state_) {
         case AxisState::UNINITIALIZED:
-            if (read_status_word == 0x1650) {
                 current_state_ = AxisState::INITIALIZING;
-                RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                           "汇川轴 %s 进入初始化状态", axis_name_.c_str());
-            }
+                printf("轴 %s 进入初始化状态\n", axis_name_.c_str());                          
             break;
             
         case AxisState::INITIALIZING:
-            // handle_huichuan_initialization(domain1_pd, read_status_word);
             static unsigned int init_delay = 0;
             init_delay++;
             
@@ -117,44 +201,128 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
                 current_state_ = AxisState::READY;
                 printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
+            } else if (read_status_word == 0x1638) {
+                // 读取错误代码并打印详细故障信息
+                uint16_t huichuang_error_code = EC_READ_U16(domain1_pd + off_error_code_);
+                
+                // 特殊处理：0x0E08错误代码完全忽略，继续初始化
+                if (huichuang_error_code == 0x0E08) {
+                    printf("轴 %s 忽略错误代码0x0E08，继续初始化流程\n", axis_name_.c_str());
+                    // 不改变current_state_，继续执行初始化序列
+                } else {
+                    // 其他错误代码正常进入故障模式
+                    current_state_ = AxisState::FAULT;
+                    printf("轴 %s 检测到故障状态字0x1638，错误代码: 0x%04X\n", 
+                        axis_name_.c_str(), huichuang_error_code);
+                }
             }
             break;
             
         case AxisState::READY:
+            // 处理启动请求
             if (start_manual_requested_ && read_status_word == 0x1637) {
                 start_manual_requested_ = false;
                 operation_mode_ = OperationMode::MANUAL;
                 current_state_ = AxisState::MANUAL_MODE;
-                RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                           "汇川轴 %s 进入手动模式", axis_name_.c_str());
+                printf("轴 %s 进入手动模式\n", axis_name_.c_str());
+
+                // 初始化手动模式位置 增加
+                position_initialized_ = false;
             } 
             else if (start_auto_requested_ && read_status_word == 0x1637) {
                 start_auto_requested_ = false;
                 operation_mode_ = OperationMode::AUTO;
                 current_state_ = AxisState::AUTO_MODE;
-                RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                           "汇川轴 %s 进入自动模式", axis_name_.c_str());
+
+                // // 新增：进入自动模式时重置位移状态
+                // position_initialized_ = false;
+                // // 重置位移状态
+                // target_displacement = 0.0;
+                // displacement_updated = false;
+                // target_reached_ = false;
+
+                printf("轴 %s 进入自动模式\n", axis_name_.c_str());
+                
+                // 自动模式需要执行回零
+                if (!homing_completed_) {
+                    // start_homing_sequence(domain1_pd, current_pos);
+                }
+            }
+            else {
+                // 保持在READY状态，保持当前位置
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                
+                // 新增：检测故障状态字
+                if (read_status_word == 0x1638) {
+                    printf("轴 %s 检测到故障状态字0x1638，进入故障模式\n", 
+                        axis_name_.c_str());
+                    current_state_ = AxisState::FAULT;
+                    // 记录故障信息
+                    break; // 立即跳出，不再执行后续逻辑
+                }
+
+                // 如果有启动请求但状态字不满足，检查是否状态异常
+                if (start_manual_requested_ || start_auto_requested_) {
+                    static int warning_counter = 0;
+                    if (warning_counter++ % 100 == 0) {
+                        printf("轴 %s 等待状态字0x1637才能进入模式切换，当前状态字: 0x%04x\n", 
+                            axis_name_.c_str(), read_status_word);
+                    }
+                    
+                    // 新增：如果状态字异常（非0x1637），自动跳转回初始化
+                    if (read_status_word != 0x1637) {
+                        printf("轴 %s 检测到异常状态字0x%04x，自动跳转回初始化状态\n", 
+                            axis_name_.c_str(), read_status_word);
+                        current_state_ = AxisState::INITIALIZING;
+                        
+                        // 可选：清除启动请求标志，避免重复触发
+                        // start_manual_requested_ = false;
+                        // start_auto_requested_ = false;
+                    }
+                }
             }
             break;
             
         case AxisState::MANUAL_MODE:
-            handle_huichuan_manual_operation(domain1_pd, current_pos);
+            // 手动模式处理
+            if (read_status_word != 0x1637) {
+                current_state_ = AxisState::INITIALIZING;
+                printf("轴 %s 退出手动模式\n", axis_name_.c_str());
+            } else {
+                handle_huichuan_manual_operation(domain1_pd, current_pos);
+            }
             break;
             
         case AxisState::AUTO_MODE:
-            handle_huichuan_auto_operation(domain1_pd, current_pos);
+            // 自动模式处理
+            if (read_status_word != 0x1637) {
+                current_state_ = AxisState::INITIALIZING;
+                printf("轴 %s 退出自动模式\n", axis_name_.c_str());
+            } else {
+                handle_huichuan_auto_operation(domain1_pd, current_pos);
+            }
+            break;
+            
+        case AxisState::STOPPED:
+            // 停止状态：保持当前位置，等待回到INITIALIZING
+            EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+            EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+            
+            // 检查是否可以回到READY状态
+            // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
+            if (read_status_word == 0x1637 ) {
+                current_state_ = AxisState::INITIALIZING;
+                printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
+            }
             break;
             
         case AxisState::FAULT:
-            // 汇川特有的故障处理
-            if (error_code == 0x821b) {
-                RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                           "汇川轴 %s 检测到通讯错误0x821b，自动清除", axis_name_.c_str());
-                fault_clearing_in_progress_ = true;
-                fault_clear_step_ = 0;
-            }
+            // 故障状态处理
             if (fault_clearing_in_progress_) {
                 handle_fault_clear(domain1_pd);
+            } else {
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
             }
             break;
     }
@@ -214,33 +382,41 @@ void HuichuanServoAxis::handle_huichuan_homing(uint8_t* domain1_pd, int32_t curr
 }
 
 void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, int32_t current_pos) {
-    // 汇川手动模式特有逻辑
     if (!position_initialized_) {
         joint_position_ = current_pos;
-        initial_position_ = current_pos;
-        target_pulses_ = current_pos;
         position_initialized_ = true;
     }
     
-    if (displacement_updated_) {
-        displacement_updated_ = false;
-        int32_t displacement_pulses = displacement_to_pulses(target_displacement_);
-        target_pulses_ = joint_position_ + displacement_pulses; // 相对位移
+    // 处理点动控制
+    if (jog_forward_requested_) {
+        // 正转：每个周期增加固定脉冲数
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        target_pulses_ += speed_pulses;
+    } else if (jog_reverse_requested_) {
+        // 反转：每个周期减少固定脉冲数
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        target_pulses_ -= speed_pulses;
+    } else if (jog_stop_requested_) {
+        // 停止：保持当前位置
+        target_pulses_ = current_pos;
+        jog_stop_requested_ = false; // 重置停止标志
     }
     
-    // 汇川特有的速度限制
-    static int position_counter = 0;
-    if (position_counter++ >= 5) { // 更快的控制周期
-        position_counter = 0;
-        
-        const int32_t MAX_STEP = 50; // 汇川速度限制
-        int32_t error = target_pulses_ - joint_position_;
-        int32_t step = (abs(error) > MAX_STEP) ? 
-                      ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
-        
-        joint_position_ += step;
-        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    }
+    // // 原有的位移指令处理（可选保留或注释掉）
+    // if (displacement_updated_) {
+    //     displacement_updated_ = false;
+    //     int32_t displacement_pulses = displacement_to_pulses(target_displacement_);
+    //     target_pulses_ = joint_position_ + displacement_pulses;
+    // }
+    
+    // 限制最大速度
+    const int32_t MAX_STEP = 50;
+    int32_t error = target_pulses_ - joint_position_;
+    int32_t step = (abs(error) > MAX_STEP) ? 
+                  ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+    
+    joint_position_ += step;
+    EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
 }
 
 void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {

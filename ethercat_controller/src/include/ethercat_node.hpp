@@ -58,6 +58,11 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr system_status_pub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr displacement_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
+    // 添加点动指令订阅器
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
+    
+    // 添加点动指令处理函数
+    void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
 };
 
 // 全局变量声明

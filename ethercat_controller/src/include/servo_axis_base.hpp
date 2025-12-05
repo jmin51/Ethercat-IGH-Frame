@@ -64,6 +64,28 @@ public:
     virtual int32_t get_actual_position() const;
     virtual int32_t get_initial_position() const;
     virtual DriveBrand get_brand() const;
+    // 添加点动控制方法
+    virtual void jog_forward() { 
+        jog_forward_requested_ = true;
+        jog_reverse_requested_ = false;
+        jog_stop_requested_ = false;
+    }
+    
+    virtual void jog_reverse() {
+        jog_reverse_requested_ = true; 
+        jog_forward_requested_ = false;
+        jog_stop_requested_ = false;
+    }
+    
+    virtual void jog_stop() {
+        jog_stop_requested_ = true;
+        jog_forward_requested_ = false;
+        jog_reverse_requested_ = false;
+    }
+    
+    virtual bool is_jogging() const {
+        return jog_forward_requested_ || jog_reverse_requested_;
+    }
 
 protected:
     // 保护成员变量 - 子类可以访问
@@ -88,6 +110,7 @@ protected:
     bool displacement_updated_;
     int32_t joint_position_;
     int32_t initial_position_;
+    int32_t target_reached_;
     
     bool homing_in_progress_;
     bool homing_completed_;
@@ -108,6 +131,15 @@ protected:
     virtual void check_state_changes(uint16_t read_status_word, uint16_t error_code);
     virtual void handle_fault_clear(uint8_t* domain1_pd);
     virtual void check_system_initialization();
+
+    // 速度控制相关
+    double jog_speed_;           // 点动速度 (mm/s)
+    bool jog_forward_requested_; // 正转请求
+    bool jog_reverse_requested_; // 反转请求
+    bool jog_stop_requested_;    // 停止请求
+    
+    // 速度控制参数
+    const double DEFAULT_JOG_SPEED = 0.262; // 默认点动速度 0.262mm/s 或者是 50rpm/min
 };
 
 #endif // SERVO_AXIS_BASE_HPP
