@@ -384,6 +384,7 @@ void HuichuanServoAxis::handle_huichuan_homing(uint8_t* domain1_pd, int32_t curr
 void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, int32_t current_pos) {
     if (!position_initialized_) {
         joint_position_ = current_pos;
+        target_pulses_ = current_pos;
         position_initialized_ = true;
     }
     
