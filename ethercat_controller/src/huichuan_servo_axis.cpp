@@ -206,13 +206,13 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 uint16_t huichuang_error_code = EC_READ_U16(domain1_pd + off_error_code_);
                 
                 // 特殊处理：0x0E08错误代码完全忽略，继续初始化
-                if (huichuang_error_code == 0x0E08) {
-                    printf("轴 %s 忽略错误代码0x0E08，继续初始化流程\n", axis_name_.c_str());
+                if (huichuang_error_code == 0x0E08 || huichuang_error_code == 0x0000) {
+                    printf("轴 %s -----", axis_name_.c_str());
                     // 不改变current_state_，继续执行初始化序列
                 } else {
                     // 其他错误代码正常进入故障模式
                     current_state_ = AxisState::FAULT;
-                    printf("轴 %s 检测到故障状态字0x1638，错误代码: 0x%04X\n", 
+                    printf("轴 %s 检测到故障状态字0x1638,错误代码: 0x%04X\n", 
                         axis_name_.c_str(), huichuang_error_code);
                 }
             }

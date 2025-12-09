@@ -63,6 +63,8 @@ private:
     
     // 添加点动指令处理函数
     void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
+
+    std::atomic<bool> node_shutting_down_;
 };
 
 // 全局变量声明

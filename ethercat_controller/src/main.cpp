@@ -92,50 +92,124 @@ void check_master_state(void) {
 
 // 信号处理
 void signal_handler(int signum) {
+    static std::atomic<bool> shutdown_initiated{false};
+    
+    // 防止重复调用
+    if (shutdown_initiated.exchange(true)) {
+        return;
+    }
     printf("\n收到信号 %d, 开始安全关闭...\n", signum);
     running = 0;
     g_should_exit = true;
-    rclcpp::shutdown();
 }
 
 // 安全关闭
 void safe_shutdown() {
-    printf("\n执行安全关闭...\n");
+    static std::atomic<bool> shutdown_in_progress{false};
     
-    // 停止Modbus线程
+    if (shutdown_in_progress.exchange(true)) {
+        printf("关闭流程已在执行中...\n");
+        return;
+    }
+    
+    printf("\n开始安全关闭流程...\n");
+    // 1. 先关闭ROS2执行器（最重要的一步）
+    if (rclcpp::ok()) {
+        // 强制中断ROS2执行器
+        rclcpp::shutdown();
+        
+        // 等待ROS2线程完全退出
+        usleep(200000); // 200ms等待
+    } else {
+    }
+    
+    // 1. 先设置退出标志
+    running = 0;
+    g_should_exit.store(true);
+    
+    printf("[DEBUG] 步骤2: 等待100ms让实时线程检测退出标志\n");
+    usleep(100000); // 100ms
+    
+    // 2. 处理实时线程
+    if (thread) {
+        printf("[DEBUG] 步骤3: 开始处理实时线程\n");
+        
+        // 先尝试温和的等待
+        int wait_count = 0;
+        const int max_wait = 30; // 3秒超时
+        
+        while (wait_count < max_wait) {
+            int result = pthread_tryjoin_np(thread, NULL);
+            if (result == 0) {
+                printf("[DEBUG] 实时线程正常退出\n");
+                break;
+            } else if (result == EBUSY) {
+                printf("[DEBUG] 实时线程仍在运行，等待计数: %d/%d\n", wait_count + 1, max_wait);
+                usleep(100000); // 100ms
+                wait_count++;
+            } else {
+                printf("[DEBUG] pthread_tryjoin_np错误: %d\n", result);
+                break;
+            }
+        }
+        
+        if (wait_count >= max_wait) {
+            printf("[DEBUG] 超时，强制取消实时线程\n");
+            pthread_cancel(thread);
+            pthread_join(thread, NULL);
+        }
+        
+        thread = 0;
+        printf("[DEBUG] 实时线程处理完成\n");
+    } else {
+        printf("[DEBUG] 实时线程句柄为空\n");
+    }
+    
+    printf("[DEBUG] 步骤4: 处理Modbus线程\n");
+    // 3. 停止Modbus线程
+    modbus_running = 0;
+    if (modbus_thread) {
+        printf("等待Modbus线程退出...\n");
+        pthread_join(modbus_thread, nullptr);
+        modbus_thread = 0;
+        printf("Modbus线程已退出\n");
+    }
+
+    // 4. 停止Modbus线程
     modbus_running = 0;
     if (modbus_thread) {
         pthread_join(modbus_thread, nullptr);
-    }
-    
-    // 停止实时线程
-    if (thread) {
-        pthread_cancel(thread);
-        pthread_join(thread, NULL);
+        modbus_thread = 0;
     }
 
-    // 禁用所有驱动器
+    // 5. 禁用驱动器
     if (master && global_node && domain1_pd) {
         printf("禁用所有驱动器...\n");
         auto& axes = global_node->get_servo_axes();
         for (auto& axis : axes) {
             unsigned int offset = axis->get_control_word_offset();
-            EC_WRITE_U16(domain1_pd + offset, 0x0006);
+            EC_WRITE_U16(domain1_pd + offset, 0x0006); // 禁用命令
         }
-        ecrt_domain_queue(domain1);
-        ecrt_master_send(master);
+        
+        // 发送最后一次命令 - 修复这里
+        ecrt_domain_queue(domain1);  // 直接调用，不检查返回值
+        // ecrt_master_send(master);
         usleep(10000);
     }
+    
+    printf("安全关闭完成...\n释放EtherCAT资源...\n");
 
-    // 释放资源
-    printf("释放EtherCAT资源...\n");
     if (master) {
         ecrt_release_master(master);
         master = nullptr;
     }
-    
     printf("解除内存锁定...\n");
     munlockall();
+    
+    // 最后清理全局节点
+    if (global_node) {
+        global_node.reset();
+    }
     
     printf("安全关闭完成\n");
 }
@@ -335,15 +409,17 @@ int main(int argc, char **argv) {
     executor.add_node(global_node);
     
     printf("启动ROS2执行器...\n");
-    executor.spin();
-    
-    // 清理
+    // 使用非阻塞的spin方式
+    while (rclcpp::ok() && !g_should_exit) {
+        executor.spin_some(std::chrono::milliseconds(100));
+        
+        // 定期检查退出标志
+        if (g_should_exit) {
+            break;
+        }
+    }
     printf("ROS2执行器已退出，开始清理...\n");
-    running = 0;
-    g_should_exit = true;
-    
     safe_shutdown();
-    rclcpp::shutdown();
     
     return 0;
 }

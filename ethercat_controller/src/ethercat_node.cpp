@@ -11,6 +11,7 @@ ec_master_t *master = nullptr;
 ec_domain_t *domain1 = nullptr;
 uint8_t *domain1_pd = nullptr;
 std::atomic<bool> g_should_exit(false);
+std::atomic<bool> node_shutting_down_{false};
 
 // 添加缺失的常量定义
 const int HOMING_TOLERANCE = 100;
@@ -39,7 +40,7 @@ EthercatNode::EthercatNode(std::string name) : Node(name) {
 }
 
 EthercatNode::~EthercatNode() {
-    safe_shutdown();
+    node_shutting_down_.store(true);
 }
 
 void EthercatNode::initialize_node() {
@@ -139,6 +140,11 @@ std::vector<ec_slave_config_t*> EthercatNode::get_all_slave_configs() {
 }
 
 void EthercatNode::publish_joint_states() {
+    // 添加关闭检查
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+
     auto msg = sensor_msgs::msg::JointState();
     msg.header.stamp = this->now();
     msg.header.frame_id = "base_link";
@@ -165,11 +171,15 @@ void EthercatNode::publish_joint_states() {
 }
 
 void EthercatNode::handle_control_command(const std::string& command) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
     RCLCPP_INFO(this->get_logger(), "收到控制命令: %s", command.c_str());
     
     // 发布系统状态
     auto status_msg = std_msgs::msg::String();
     status_msg.data = "执行命令: " + command;
+
     system_status_pub_->publish(status_msg);
 
     if (command == CMD_START_MANUAL) {
