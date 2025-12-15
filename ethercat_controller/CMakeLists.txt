@@ -29,7 +29,8 @@ find_library(MODBUS_LIBRARY modbus)
 # 包含目录
 include_directories(
   src/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/include  # 修复路径
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/io_modules  # 新增IO模块路径
 )
 
 # 源文件
@@ -40,6 +41,7 @@ set(SOURCES
   src/leisai_servo_axis.cpp
   src/huichuan_servo_axis.cpp
   src/servo_axis_factory.cpp
+  src/io_modules/io_interface.cpp  # 新增IO模块
 )
 
 # 创建可执行文件
@@ -70,8 +72,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/include")
   install(DIRECTORY src/include/
     DESTINATION include/${PROJECT_NAME}
   )
-else()
-  message(WARNING "src/include directory not found, skipping header installation")
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/io_modules")
+  install(DIRECTORY src/io_modules/
+    DESTINATION include/${PROJECT_NAME}/io_modules
+  )
 endif()
 
 # 安装脚本文件（如果存在）
@@ -92,6 +98,7 @@ endif()
 # 导出依赖
 ament_export_dependencies(rclcpp std_msgs sensor_msgs)
 ament_export_include_directories(src/include)
+ament_export_include_directories(src/io_modules)
 
 ament_package()
 

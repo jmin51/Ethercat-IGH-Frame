@@ -4,6 +4,8 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <modbus/modbus.h>
+#include <string>
+#include <sstream>
 
 // 全局变量定义
 std::shared_ptr<EthercatNode> global_node = nullptr;
@@ -41,6 +43,7 @@ EthercatNode::EthercatNode(std::string name) : Node(name) {
 
 EthercatNode::~EthercatNode() {
     node_shutting_down_.store(true);
+    stop_io_monitoring();  // 停止IO监控
 }
 
 void EthercatNode::initialize_node() {
@@ -49,6 +52,7 @@ void EthercatNode::initialize_node() {
     // 创建发布器和订阅器
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 50);
     system_status_pub_ = this->create_publisher<std_msgs::msg::String>("/system_status", 10);
+    io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/io_status", 10);  // 新增IO状态发布器
 
     displacement_sub_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/displacement_command", rclcpp::QoS(10).reliable(),
@@ -68,6 +72,9 @@ void EthercatNode::initialize_node() {
             handle_jog_command(msg);
         });
         
+    // 初始化IO互斥锁
+    pthread_mutex_init(&io_mutex_, nullptr);
+    
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
 }
 
@@ -306,4 +313,132 @@ void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg
             RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
         }
     }
+}
+
+// ========== IO模块相关函数 ==========
+
+void EthercatNode::start_io_monitoring() {
+    if (io_running_.load()) {
+        RCLCPP_WARN(this->get_logger(), "IO监控线程已在运行");
+        return;
+    }
+    
+    // 初始化Modbus接口
+    const char* di_ip = is_di_module_enabled() ? DI_DEVICE_IP : NULL;
+    const char* do_ip = is_do_module_enabled() ? DO_DEVICE_IP : NULL;
+    
+    if (init_modbus_interface(di_ip, MODBUS_PORT, MODBUS_SLAVE_ID,
+                             do_ip, MODBUS_PORT, MODBUS_SLAVE_ID) != 0) {
+        RCLCPP_ERROR(this->get_logger(), "Modbus初始化失败");
+        return;
+    }
+    
+    io_running_.store(true);
+    
+    // 创建IO监控线程
+    if (pthread_create(&io_thread_, nullptr, io_monitor_thread, this) != 0) {
+        RCLCPP_ERROR(this->get_logger(), "创建IO监控线程失败");
+        io_running_.store(false);
+        cleanup_modbus_interface();
+        return;
+    }
+    
+    pthread_setname_np(io_thread_, "io-monitor");
+    RCLCPP_INFO(this->get_logger(), "IO监控线程启动成功");
+}
+
+void EthercatNode::stop_io_monitoring() {
+    if (!io_running_.load()) {
+        return;
+    }
+    
+    io_running_.store(false);
+    
+    if (io_thread_) {
+        pthread_join(io_thread_, nullptr);
+        io_thread_ = 0;
+    }
+    
+    cleanup_modbus_interface();
+    pthread_mutex_destroy(&io_mutex_);
+    RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
+}
+
+void EthercatNode::handle_io_signals(DI_Interface di) {
+    // 这里可以添加IO信号处理逻辑
+    // 例如：根据DI信号状态控制伺服轴
+    
+    pthread_mutex_lock(&io_mutex_);
+    current_di_status_ = di;
+    pthread_mutex_unlock(&io_mutex_);
+    
+    // 发布IO状态
+    publish_io_status();
+}
+
+void EthercatNode::publish_io_status() {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    pthread_mutex_lock(&io_mutex_);
+    ss << "DI状态: 启动按钮=" << (current_di_status_.start_button ? "按下" : "释放")
+       << ", 急停=" << (current_di_status_.emergency_stop ? "激活" : "正常");
+    
+    DO_Interface do_status = get_current_do_state();
+    ss << " | DO状态: 启动灯=" << (do_status.start_button_light ? "亮" : "灭")
+       << ", 绿灯=" << (do_status.green_light ? "亮" : "灭");
+    pthread_mutex_unlock(&io_mutex_);
+    
+    msg.data = ss.str();
+    io_status_pub_->publish(msg);
+}
+
+// IO监控线程函数
+void* io_monitor_thread(void* arg) {
+    EthercatNode* node = static_cast<EthercatNode*>(arg);
+    time_t last_display = time(NULL);
+    
+    RCLCPP_INFO(node->get_logger(), "IO监控线程开始运行");
+    
+    while (node->is_io_running() && !g_should_exit.load()) {
+        // 读取DI信号（如果启用）
+        DI_Interface di;
+#if ENABLE_DI_MODULE
+        di = read_all_di_signals();
+#else
+        // DI禁用时使用空结构体
+        di = (DI_Interface){0};
+#endif
+        
+        // 获取当前DO状态
+        DO_Interface do_control = get_current_do_state();
+        
+        // 每1秒显示一次状态，避免刷屏
+        if (should_execute_sequence(&last_display, 1)) {
+#if ENABLE_DI_MODULE
+            print_di_status(di);
+#else
+            printf("\n--- DI模块已禁用 ---\n");
+#endif
+            
+#if ENABLE_DO_MODULE
+            // print_do_status(do_control);
+#else
+            // printf("\n--- DO模块已禁用 ---\n");
+#endif
+            // printf("\n----------------------------------------\n");
+        }
+        
+        // 处理IO信号
+        node->handle_io_signals(di);
+        
+        usleep(100000); // 100ms刷新周期
+    }
+    
+    RCLCPP_INFO(node->get_logger(), "IO监控线程退出");
+    return nullptr;
 }

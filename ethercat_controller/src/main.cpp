@@ -359,6 +359,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    // 启动IO监控
+    printf("启动IO监控模块...\n");
+    global_node->start_io_monitoring();
+    
     // 设置实时线程属性
     pthread_attr_t attr;
     struct sched_param param;
@@ -408,7 +412,16 @@ int main(int argc, char **argv) {
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(global_node);
     
-    printf("启动ROS2执行器...\n");
+    printf("=== EtherCAT控制系统启动完成 ===\n");
+    printf("系统状态:\n");
+    printf("  - EtherCAT主站: 已激活\n");
+    printf("  - 实时线程: 运行中\n");
+    printf("  - IO监控: %s\n", global_node->is_io_running() ? "已启动" : "未启动");
+    printf("  - 伺服轴数量: %zu\n", global_node->get_servo_axes().size());
+    printf("  - DI模块: %s\n", is_di_module_enabled() ? "启用" : "禁用");
+    printf("  - DO模块: %s\n", is_do_module_enabled() ? "启用" : "禁用");
+    printf("按Ctrl+C退出程序\n\n");
+    
     // 使用非阻塞的spin方式
     while (rclcpp::ok() && !g_should_exit) {
         executor.spin_some(std::chrono::milliseconds(100));

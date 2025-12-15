@@ -3,11 +3,15 @@
 <package format="3">
   <name>ethercat_controller</name>
   <version>1.0.0</version>
-  <description>Multi-vendor EtherCAT servo controller with polymorphic architecture</description>
+  <description>Multi-vendor EtherCAT servo controller with IO module integration</description>
   <maintainer email="jmin@todo.todo">jmin</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

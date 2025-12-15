@@ -3,6 +3,7 @@
 
 #include "servo_axis_base.hpp"
 #include "servo_axis_factory.hpp"
+#include "io_interface.hpp"  // 新增IO模块头文件
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -43,6 +44,12 @@ public:
     // 工具函数
     void publish_joint_states();
     void handle_control_command(const std::string& command);
+    
+    // IO模块相关
+    void start_io_monitoring();
+    void stop_io_monitoring();
+    void handle_io_signals(DI_Interface di);
+    bool is_io_running() const { return io_running_.load(); }
 
 private:
     void initialize_node();
@@ -50,21 +57,29 @@ private:
     void handle_control_command_msg(const std_msgs::msg::String::SharedPtr msg);
     void handle_axis_command(size_t axis_index, double newTargetPosition);
     double pulses_to_displacement(int32_t pulses, int32_t initial_pulses);
+    void publish_io_status();  // 新增：发布IO状态
+    // 添加点动指令处理函数
+    void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
 
     std::vector<std::shared_ptr<ServoAxisBase>> servo_axes_;
     std::vector<double> last_target_positions_;
     
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr system_status_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr io_status_pub_;  // 新增IO状态发布器
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr displacement_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
     // 添加点动指令订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
-    
-    // 添加点动指令处理函数
-    void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
 
     std::atomic<bool> node_shutting_down_;
+    
+    // IO模块相关
+    pthread_t io_thread_;
+    std::atomic<bool> io_running_{false};
+    DI_Interface current_di_status_;
+    DO_Interface current_do_control_;
+    pthread_mutex_t io_mutex_;
 };
 
 // 全局变量声明
@@ -78,5 +93,6 @@ extern std::atomic<bool> g_should_exit;
 void signal_handler(int signum);
 void safe_shutdown();
 void* rt_task_wrapper(void* arg);
+void* io_monitor_thread(void* arg);  // 新增IO监控线程
 
 #endif // ETHERCAT_NODE_HPP
