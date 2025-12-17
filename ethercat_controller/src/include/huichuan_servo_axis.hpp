@@ -27,6 +27,7 @@ public:
     // 汇川特有功能
     void set_huichuan_specific_parameter(double param);
     double get_huichuan_specific_parameter() const;
+    void complete_homing_sequence(uint8_t* domain1_pd);
 
 private:
     // 汇川特有实现

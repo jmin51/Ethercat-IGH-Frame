@@ -140,6 +140,21 @@ protected:
     
     // 速度控制参数
     const double DEFAULT_JOG_SPEED = 0.262; // 默认点动速度 0.262mm/s 或者是 50rpm/min
+
+    // 新增逐步逼近相关变量
+    int32_t target_offset_;           // 目标偏移量
+    int direction_flag_;              // 0: 无方向 1: 正转 -1: 反转
+    int32_t new_target_;              // 新目标位置
+    
+    void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
+        const int32_t MAX_STEP = 50; // 最大步进脉冲数
+        int32_t error = target_pulses - joint_position_;
+        int32_t step = (abs(error) > MAX_STEP) ? 
+                      ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+        
+        joint_position_ += step;
+        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+    }
 };
 
 #endif // SERVO_AXIS_BASE_HPP

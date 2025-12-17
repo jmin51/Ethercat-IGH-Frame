@@ -16,8 +16,8 @@ std::atomic<bool> g_should_exit(false);
 std::atomic<bool> node_shutting_down_{false};
 
 // 添加缺失的常量定义
-const int HOMING_TOLERANCE = 100;
-const int HOMING_STEP = 50;
+// const int HOMING_TOLERANCE = 100;
+// const int HOMING_STEP = 50;
 bool running = true;  // 添加缺失的running变量
 
 // 其他全局变量
@@ -82,12 +82,11 @@ void EthercatNode::init_axes(ec_master_t* master) {
     RCLCPP_INFO(this->get_logger(), "开始初始化伺服轴");
     
     // 通过工厂创建不同品牌的伺服轴
-    // 示例：创建雷赛X轴和汇川Y轴
-    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "joint1", 0, AxisType::AXIS1));
-        
+    // 示例：创建汇川轴     
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "joint2", 0, AxisType::AXIS2));
+        DriveBrand::HUICHUAN, "axis1", 0, AxisType::AXIS1));
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::HUICHUAN, "axis2", 1, AxisType::AXIS2)); // 添加第二个轴
     
     // 配置每个轴
     for (auto& axis : servo_axes_) {
@@ -251,13 +250,15 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::Float64Multi
     // 防止dt为0或负值
     if (dt <= 0) dt = 0.01;
     
-    // 最大允许变化率：0.01mm/ms = 10mm/s
-    const double MAX_RATE_MM_PER_MS = 0.01;
-    const double MAX_DELTA_PER_CYCLE = MAX_RATE_MM_PER_MS * dt * 1000;
+    // // 最大允许变化率：0.01mm/ms = 10mm/s
+    // const double MAX_RATE_MM_PER_MS = 0.01;
+    // const double MAX_DELTA_PER_CYCLE = MAX_RATE_MM_PER_MS * dt * 1000;
     
     // 处理每个轴的位移命令
     for (size_t i = 0; i < servo_axes_.size(); ++i) {
         if (i >= msg->data.size()) break;
+        
+        printf("收到位移指令: axis%zu = %.6fmm\n", i, msg->data[i]);
         
         if (servo_axes_[i]->is_running()) {
             double requested_displacement = msg->data[i];
@@ -266,12 +267,12 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::Float64Multi
             
             // 限制变化率
             // if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
-                RCLCPP_WARN(this->get_logger(), 
-                            "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
-                            i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
+            //     RCLCPP_WARN(this->get_logger(), 
+            //                 "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
+            //                 i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
                 
-                double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
-                requested_displacement = last_displacement + limited_delta;
+            //     double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
+            //     requested_displacement = last_displacement + limited_delta;
             // }
             
             handle_axis_command(i, requested_displacement);

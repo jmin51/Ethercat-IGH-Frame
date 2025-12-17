@@ -118,8 +118,11 @@ double ServoAxisBase::pulses_to_displacement(int32_t pulses) {
 }
 
 void ServoAxisBase::check_state_changes(uint16_t read_status_word, uint16_t error_code) {
-    // 基类实现可以记录状态变化
-    static uint16_t last_status_word = 0;
+    // 为每个轴单独记录状态字
+    static std::map<std::string, uint16_t> last_status_words;
+    
+    uint16_t& last_status_word = last_status_words[axis_name_];
+    
     if (read_status_word != last_status_word) {
         std::cout << "轴 " << axis_name_ << " 状态字变化: 0x" 
                   << std::hex << last_status_word << " -> 0x" << read_status_word << std::dec << std::endl;

@@ -234,19 +234,7 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 operation_mode_ = OperationMode::AUTO;
                 current_state_ = AxisState::AUTO_MODE;
 
-                // // 新增：进入自动模式时重置位移状态
-                // position_initialized_ = false;
-                // // 重置位移状态
-                // target_displacement = 0.0;
-                // displacement_updated = false;
-                // target_reached_ = false;
-
                 printf("轴 %s 进入自动模式\n", axis_name_.c_str());
-                
-                // 自动模式需要执行回零
-                if (!homing_completed_) {
-                    // start_homing_sequence(domain1_pd, current_pos);
-                }
             }
             else {
                 // 保持在READY状态，保持当前位置
@@ -331,52 +319,58 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
 }
 
 void HuichuanServoAxis::handle_huichuan_initialization(uint8_t* domain1_pd, uint16_t status_word) {
-    // // 汇川特有的初始化序列
-    // static unsigned int init_counter = 0;
-    // init_counter++;
+    /* 特有的初始化序列
+    static unsigned int init_counter = 0;
+    init_counter++;
     
-    // if (status_word == 0x0250) {
-    //     EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
-    // } else if (status_word == 0x0631) {
-    //     EC_WRITE_U16(domain1_pd + control_word_, 0x0007);
-    // } else if (status_word == 0x0633) {
-    //     int32_t current_pos = EC_READ_S32(domain1_pd + off_actual_position_);
-    //     EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-    //     EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+    if (status_word == 0x0250) {
+        EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+    } else if (status_word == 0x0631) {
+        EC_WRITE_U16(domain1_pd + control_word_, 0x0007);
+    } else if (status_word == 0x0633) {
+        int32_t current_pos = EC_READ_S32(domain1_pd + off_actual_position_);
+        EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+        EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
         
-    //     if (init_counter > 50) { // 汇川需要更长的初始化时间
-    //         current_state_ = AxisState::READY;
-    //         RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-    //                    "汇川轴 %s 进入就绪状态", axis_name_.c_str());
-    //     }
-    // }
+        if (init_counter > 50) { // 汇川需要更长的初始化时间
+            current_state_ = AxisState::READY;
+            RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
+                       "汇川轴 %s 进入就绪状态", axis_name_.c_str());
+        }
+    } */
 }
 
 void HuichuanServoAxis::handle_huichuan_homing(uint8_t* domain1_pd, int32_t current_pos) {
-    // 汇川特有的回零逻辑
-    if (!homing_in_progress_) {
-        homing_in_progress_ = true;
-        home_target_position_ = current_pos;
-        RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                   "汇川轴 %s 开始回零，当前位置: %d", axis_name_.c_str(), current_pos);
+    // 已经回零完成退出回零逻辑
+    if (homing_completed_) {
+        return;
     }
     
-    // 汇川采用不同的回零策略
-    int32_t target = 0;
-    int32_t error = current_pos - target;
+    // 开始回零序列
+    if (!homing_in_progress_) {
+        if (current_pos != 0) {
+            homing_in_progress_ = true;
+            home_target_position_ = current_pos;
+            printf("轴 %s 开始软件回零，当前位置: %d\n", axis_name_.c_str(), current_pos);
+        } else {
+            complete_homing_sequence(domain1_pd);
+        }
+        return;
+    }
     
+    // 执行回零运动
+    int32_t error = current_pos;
+    printf("轴 %s 回零中 - 当前位置: %d, 目标: 0, 误差: %d\n", 
+           axis_name_.c_str(), current_pos, error);
+
     if (abs(error) < HOMING_TOLERANCE) {
-        homing_in_progress_ = false;
-        homing_completed_ = true;
-        EC_WRITE_S32(domain1_pd + off_target_position_, target);
-        RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                   "汇川轴 %s 回零完成", axis_name_.c_str());
+        complete_homing_sequence(domain1_pd);
     } else {
-        // 汇川采用比例控制
-        int32_t step = error / 10;
-        if (abs(step) < 1) step = (error > 0) ? 1 : -1;
-        
-        home_target_position_ -= step;
+        if (home_target_position_ > 0) {
+            home_target_position_ -= std::min(HOMING_STEP, home_target_position_);
+        } else if (home_target_position_ < 0) {
+            home_target_position_ += std::min(HOMING_STEP, -home_target_position_);
+        }
         EC_WRITE_S32(domain1_pd + off_target_position_, home_target_position_);
     }
 }
@@ -421,6 +415,13 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
 }
 
 void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {
+    // 添加调试信息
+    static int debug_counter = 0;
+    if (debug_counter++ % 100 == 0) {
+        printf("轴 %s - 当前位置: %d, 目标位置: %d, 初始位置: %d, 误差: %d\n",
+               axis_name_.c_str(), current_pos, target_pulses_, initial_position_, 
+               target_pulses_ - current_pos);
+    }
     // 汇川自动模式特有逻辑
     if (!homing_completed_) {
         handle_huichuan_homing(domain1_pd, current_pos);
@@ -434,30 +435,65 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     
     if (!position_initialized_) {
         joint_position_ = current_pos;
-        initial_position_ = current_pos;
+        initial_position_ = 0; //current_pos;
         target_pulses_ = current_pos;
         position_initialized_ = true;
+        printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
     }
-    
+
     if (displacement_updated_) {
         displacement_updated_ = false;
+        target_reached_ = false;
+
+        // 绝对位置模式：直接计算目标脉冲数
         target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+        printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d)\n", 
+                axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_);
         
-        // 汇川特有的安全检测
-        const int32_t MAX_SAFE_DELTA = 2500;
-        int32_t position_delta = abs(target_pulses_ - joint_position_);
-        if (position_delta > MAX_SAFE_DELTA) {
-            current_state_ = AxisState::FAULT;
-            RCLCPP_ERROR(rclcpp::get_logger("huichuan_servo"), 
-                        "汇川轴 %s 运动控制错误：差值过大(%d脉冲)", 
-                        axis_name_.c_str(), position_delta);
-            return;
-        }
+        // // 安全检测
+        // const int32_t MAX_SAFE_DELTA = 2500;
+        // int32_t position_delta = abs(target_pulses_ - joint_position_);
+        // if (position_delta > MAX_SAFE_DELTA) {
+        //     current_state_ = AxisState::FAULT;
+        //     RCLCPP_ERROR(rclcpp::get_logger("huichuan_servo"), 
+        //                 "汇川轴 %s 运动控制错误：差值过大(%d脉冲)", 
+        //                 axis_name_.c_str(), position_delta);
+        //     return;
+        // }
     }
     
-    // 汇川直接位置控制
-    EC_WRITE_S32(domain1_pd + off_target_position_, target_pulses_);
-    joint_position_ = target_pulses_;
+    // 使用逐步逼近
+    if (target_pulses_ != joint_position_) {
+        gradual_approach(target_pulses_, domain1_pd);
+        
+        // 检查是否到达目标
+        const int32_t TOLERANCE = 100;
+        if (abs(joint_position_ - target_pulses_) <= TOLERANCE) {
+            if (!target_reached_) {
+                printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
+                target_reached_ = true;
+            }
+        }
+    }
+    // if (displacement_updated_) {
+    //     displacement_updated_ = false;
+    //     target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+        
+    //     // 汇川特有的安全检测
+    //     const int32_t MAX_SAFE_DELTA = 2500;
+    //     int32_t position_delta = abs(target_pulses_ - joint_position_);
+    //     if (position_delta > MAX_SAFE_DELTA) {
+    //         current_state_ = AxisState::FAULT;
+    //         RCLCPP_ERROR(rclcpp::get_logger("huichuan_servo"), 
+    //                     "汇川轴 %s 运动控制错误：差值过大(%d脉冲)", 
+    //                     axis_name_.c_str(), position_delta);
+    //         return;
+    //     }
+    // }
+    
+    // // 汇川直接位置控制
+    // EC_WRITE_S32(domain1_pd + off_target_position_, target_pulses_);
+    // joint_position_ = target_pulses_;
 }
 
 void HuichuanServoAxis::set_huichuan_specific_parameter(double param) {
@@ -466,4 +502,13 @@ void HuichuanServoAxis::set_huichuan_specific_parameter(double param) {
 
 double HuichuanServoAxis::get_huichuan_specific_parameter() const {
     return huichuan_specific_param_;
+}
+
+void HuichuanServoAxis::complete_homing_sequence(uint8_t* domain1_pd) {
+    home_target_position_ = 0;
+    EC_WRITE_S32(domain1_pd + off_target_position_, home_target_position_);
+    homing_in_progress_ = false;
+    homing_completed_ = true;
+    printf("轴 %s 回零完成\n", axis_name_.c_str());
+    check_system_initialization();
 }
