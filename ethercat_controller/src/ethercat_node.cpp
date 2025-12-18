@@ -302,18 +302,48 @@ void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg
     std::string command = msg->data;
     RCLCPP_INFO(this->get_logger(), "收到点动命令: %s", command.c_str());
     
-    for (auto& axis : servo_axes_) {
-        if (command == "forward") {
-            axis->jog_forward();
-            RCLCPP_INFO(this->get_logger(), "轴 %s 开始正转", axis->get_name().c_str());
-        } else if (command == "reverse") {
-            axis->jog_reverse();
-            RCLCPP_INFO(this->get_logger(), "轴 %s 开始反转", axis->get_name().c_str());
-        } else if (command == "stop") {
-            axis->jog_stop();
-            RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
-        }
+//     for (auto& axis : servo_axes_) {
+//         if (command == "forward") {
+//             axis->jog_forward();
+//             RCLCPP_INFO(this->get_logger(), "轴 %s 开始正转", axis->get_name().c_str());
+//         } else if (command == "reverse") {
+//             axis->jog_reverse();
+//             RCLCPP_INFO(this->get_logger(), "轴 %s 开始反转", axis->get_name().c_str());
+//         } else if (command == "stop") {
+//             axis->jog_stop();
+//             RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
+//         }
+//     }
+    // 解析格式："axis1:forward" 或 "all:stop"
+    size_t colon_pos = command.find(':');
+    if (colon_pos == std::string::npos) {
+        RCLCPP_ERROR(this->get_logger(), "无效命令格式，应为 '轴名:命令'");
+        return;
     }
+    
+    std::string axis_name = command.substr(0, colon_pos);
+    std::string jog_cmd = command.substr(colon_pos + 1);
+    
+    // if (axis_name == "all") {
+    //     // 控制所有轴
+    //     for (auto& axis : servo_axes_) {
+    //         execute_jog_command(axis, jog_cmd);
+    //     }
+    // } else {
+        // 控制指定轴
+        for (auto& axis : servo_axes_) {
+            if (axis->get_name() == axis_name) {
+                if (jog_cmd == "forward") {
+                    axis->jog_forward();
+                } else if (jog_cmd == "reverse") {
+                    axis->jog_reverse();
+                } else if (jog_cmd == "stop") {
+                    axis->jog_stop();
+                }
+                break;
+            }
+        }
+    // }
 }
 
 // ========== IO模块相关函数 ==========
