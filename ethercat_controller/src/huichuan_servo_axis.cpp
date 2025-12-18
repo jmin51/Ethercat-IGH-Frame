@@ -26,7 +26,7 @@ ec_sync_info_t huichuan_slave_syncs[] = {
 };
 // 添加缺失的全局变量声明
 const int HOMING_TOLERANCE = 100;
-const int HOMING_STEP = 50;
+const int HOMING_STEP = 20;
 
 HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type)
     : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN),
@@ -226,7 +226,10 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 current_state_ = AxisState::MANUAL_MODE;
                 printf("轴 %s 进入手动模式\n", axis_name_.c_str());
 
-                // 初始化手动模式位置 增加
+                // 初始化手动模式位置
+                // 退出自动模式时重置回零状态
+                homing_completed_ = false;
+                homing_in_progress_ = false;
                 position_initialized_ = false;
             } 
             else if (start_auto_requested_ && read_status_word == 0x1637) {
