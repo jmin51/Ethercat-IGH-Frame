@@ -4,6 +4,7 @@
 #include "servo_axis_base.hpp"
 #include "servo_axis_factory.hpp"
 #include "io_interface.hpp"  // 新增IO模块头文件
+#include "BusinessLogicProcessor.hpp"  // 添加这行
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -80,6 +81,15 @@ private:
     DI_Interface current_di_status_;
     DO_Interface current_do_control_;
     pthread_mutex_t io_mutex_;
+
+    // 业务逻辑处理器 - 负责DI信号到轴控制的映射逻辑
+    std::unique_ptr<BusinessLogicProcessor> business_processor_;
+    std::vector<AxisCommand> last_executed_commands_;
+    /**
+     * @brief 初始化业务逻辑处理器
+     * 创建处理器实例并配置标准的DI-轴映射关系
+     */
+    void initialize_business_logic();
 };
 
 // 全局变量声明

@@ -76,6 +76,11 @@ void EthercatNode::initialize_node() {
     pthread_mutex_init(&io_mutex_, nullptr);
     
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
+
+    // 初始化业务逻辑处理器
+    RCLCPP_INFO(this->get_logger(), "开始初始化业务逻辑模块");
+    initialize_business_logic();
+    RCLCPP_INFO(this->get_logger(), "业务逻辑模块初始化完成");
 }
 
 void EthercatNode::init_axes(ec_master_t* master) {
@@ -288,6 +293,10 @@ void EthercatNode::handle_axis_command(size_t axis_index, double newTargetPositi
         
         RCLCPP_DEBUG(this->get_logger(), "轴[%zu] 位移指令: %.3fmm", 
                      axis_index, newTargetPosition);
+        // 详细状态检查
+        RCLCPP_INFO(this->get_logger(), "运行状态=%s, 当前状态=%d", 
+                axis->is_running() ? "是" : "否",
+                static_cast<int>(axis->get_current_state()));
     }
 }
 
@@ -395,6 +404,20 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
+void EthercatNode::initialize_business_logic() {
+    /// 创建并配置业务逻辑处理器
+    business_processor_ = std::make_unique<BusinessLogicProcessor>(this->get_logger());
+    
+    // 初始化处理器(传入轴数量用于验证)
+    size_t num_axes = servo_axes_.size();
+    business_processor_->initialize(num_axes);
+    
+    // 启用业务逻辑处理
+    business_processor_->enable(); //disable
+    
+    RCLCPP_INFO(this->get_logger(), "业务逻辑处理器准备就绪，已配置 %zu 个轴的映射关系", num_axes);
+}
+
 void EthercatNode::handle_io_signals(DI_Interface di) {
     // 这里可以添加IO信号处理逻辑
     // 例如：根据DI信号状态控制伺服轴
@@ -402,7 +425,33 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     pthread_mutex_lock(&io_mutex_);
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
-    
+
+    // 步骤1: 如果有业务逻辑处理器且已启用，处理自动控制逻辑
+    if (business_processor_ && business_processor_->is_enabled()) {
+        // 将DI信号传递给业务逻辑处理器进行分析
+        business_processor_->process_io_signals(di);
+        
+        // 获取业务逻辑生成的轴控制命令
+        auto commands = business_processor_->get_pending_commands();
+        
+        RCLCPP_INFO(this->get_logger(), "生成 %zu 个业务逻辑命令", commands.size());
+        // 执行所有生成的命令
+        for (const auto& cmd : commands) {
+            RCLCPP_INFO(this->get_logger(), "命令详情: 轴=%s, 位置=%.3fmm", 
+                       cmd.axis_name.c_str(), cmd.target_position);
+            
+            // 控制指定轴
+            for (size_t i = 0; i < servo_axes_.size(); ++i) {
+                if (servo_axes_[i]->get_name() == cmd.axis_name) {
+                    handle_axis_command(i, cmd.target_position);
+                    break;
+                }
+            }
+        }
+        
+        // 清空已处理的命令
+        business_processor_->clear_pending_commands();
+    }
     // 发布IO状态
     publish_io_status();
 }

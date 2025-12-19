@@ -420,7 +420,7 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
 void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {
     // 添加调试信息
     static int debug_counter = 0;
-    if (debug_counter++ % 100 == 0) {
+    if (debug_counter++ % 200 == 0) {
         printf("轴 %s - 当前位置: %d, 目标位置: %d, 初始位置: %d, 误差: %d\n",
                axis_name_.c_str(), current_pos, target_pulses_, initial_position_, 
                target_pulses_ - current_pos);

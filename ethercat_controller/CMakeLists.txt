@@ -31,6 +31,7 @@ include_directories(
   src/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src/io_modules  # 新增IO模块路径
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/business  # 新增业务逻辑模块路径
 )
 
 # 源文件
@@ -42,6 +43,7 @@ set(SOURCES
   src/huichuan_servo_axis.cpp
   src/servo_axis_factory.cpp
   src/io_modules/io_interface.cpp  # 新增IO模块
+  src/business/BusinessLogicProcessor.cpp  # 新增业务逻辑模块
 )
 
 # 创建可执行文件
@@ -80,6 +82,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/io_modules")
   )
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/business")
+  install(DIRECTORY src/business/
+    DESTINATION include/${PROJECT_NAME}/business
+  )
+endif()
+
 # 安装脚本文件（如果存在）
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/scripts/set_permissions.sh")
   install(PROGRAMS src/scripts/set_permissions.sh
@@ -99,6 +107,7 @@ endif()
 ament_export_dependencies(rclcpp std_msgs sensor_msgs)
 ament_export_include_directories(src/include)
 ament_export_include_directories(src/io_modules)
+ament_export_include_directories(src/business)
 
 ament_package()
 

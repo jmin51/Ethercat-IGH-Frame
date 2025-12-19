@@ -105,7 +105,7 @@ protected:
     OperationMode operation_mode_;
     
     bool position_initialized_;
-    int32_t target_pulses_;
+    volatile int32_t target_pulses_;  // 告诉编译器"这个变量可能被外部访问"
     double target_displacement_;
     bool displacement_updated_;
     int32_t joint_position_;
