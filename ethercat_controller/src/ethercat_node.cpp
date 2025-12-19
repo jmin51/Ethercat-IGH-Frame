@@ -293,10 +293,10 @@ void EthercatNode::handle_axis_command(size_t axis_index, double newTargetPositi
         
         RCLCPP_DEBUG(this->get_logger(), "轴[%zu] 位移指令: %.3fmm", 
                      axis_index, newTargetPosition);
-        // 详细状态检查
-        RCLCPP_INFO(this->get_logger(), "运行状态=%s, 当前状态=%d", 
-                axis->is_running() ? "是" : "否",
-                static_cast<int>(axis->get_current_state()));
+        // // 详细状态检查
+        // RCLCPP_INFO(this->get_logger(), "运行状态=%s, 当前状态=%d", 
+        //         axis->is_running() ? "是" : "否",
+        //         static_cast<int>(axis->get_current_state()));
     }
 }
 
