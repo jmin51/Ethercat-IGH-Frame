@@ -29,11 +29,16 @@ const int HOMING_TOLERANCE = 100;
 const int HOMING_STEP = 20;
 
 HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type)
-    : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN),
-      huichuan_specific_param_(0.0) {
+    : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN, HUICHUAN_PRODUCT_CODE) {
     
     std::cout << "创建汇川伺服轴: " << name << std::endl;
 }
+// HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type)
+//     : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN),
+//       huichuan_specific_param_(0.0) {
+    
+//     std::cout << "创建汇川伺服轴: " << name << std::endl;
+// }
 
 void HuichuanServoAxis::configure(ec_master_t* master) {
     sc_ = ecrt_master_slave_config(master, 0, slave_position_,

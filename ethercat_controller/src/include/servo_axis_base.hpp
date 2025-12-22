@@ -34,8 +34,10 @@ enum class DriveBrand {
 
 class ServoAxisBase {
 public:
-    ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand);
+    ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand, uint32_t product_code);
     virtual ~ServoAxisBase() = default;
+    // 添加获取产品号的虚函数
+    virtual uint32_t get_product_code() const = 0;
 
     // 纯虚函数 - 必须由子类实现
     virtual void configure(ec_master_t* master) = 0;
@@ -93,6 +95,7 @@ protected:
     uint16_t slave_position_;
     AxisType axis_type_;
     DriveBrand brand_;
+    uint32_t product_code_;  // 在基类中存储产品号
     
     ec_slave_config_t* sc_;
     unsigned int control_word_;

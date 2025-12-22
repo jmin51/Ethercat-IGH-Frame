@@ -2,8 +2,9 @@
 #include <iostream>
 
 ServoAxisBase::ServoAxisBase(const std::string& name, uint16_t position, 
-                           AxisType axis_type, DriveBrand brand)
-    : axis_name_(name), slave_position_(position), axis_type_(axis_type), brand_(brand) {
+                           AxisType axis_type, DriveBrand brand, uint32_t product_code)
+    : axis_name_(name), slave_position_(position), axis_type_(axis_type), 
+      brand_(brand), product_code_(product_code) {
     initialize_members();
 }
 
@@ -131,24 +132,59 @@ void ServoAxisBase::check_state_changes(uint16_t read_status_word, uint16_t erro
 }
 
 void ServoAxisBase::handle_fault_clear(uint8_t* domain1_pd) {
-    // 基类提供通用的故障清除流程
     fault_clear_counter_++;
-    uint16_t current_status = 0; // 需要从domain_pd读取
+    uint16_t current_status = EC_READ_U16(domain1_pd + status_word_);
     
     switch (fault_clear_step_) {
         case 0:
-            // 发送故障复位命令
-            fault_clear_step_ = 1;
+            // 第一步：写0x0080（故障复位）
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0080);
+            printf("轴 %s 故障清除步骤%d: 发送0x0080\n", axis_name_.c_str(), fault_clear_step_);
+            if (fault_clear_counter_ > 10) {
+                fault_clear_step_ = 1;
+                fault_clear_counter_ = 0;
+            }
             break;
+            
         case 1:
-            // 发送准备使能命令
-            fault_clear_step_ = 2;
+            // 第二步：写0x0000（准备使能）
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0000);
+            printf("轴 %s 故障清除步骤%d: 发送0x0000\n", axis_name_.c_str(), fault_clear_step_);
+            if (fault_clear_counter_ > 5) {
+                fault_clear_step_ = 2;
+                fault_clear_counter_ = 0;
+            }
             break;
+            
         case 2:
-            // 检查状态确认故障清除
-            if (current_status == 0x0631 || current_status == 0x0633) {
+            // 第三步：写0x0006（切换到准备开关ON）
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+            printf("轴 %s 故障清除步骤%d: 发送0x0006\n", axis_name_.c_str(), fault_clear_step_);
+            if (fault_clear_counter_ > 5) {
+                fault_clear_step_ = 3;
+                fault_clear_counter_ = 0;
+            }
+            break;
+            
+        case 3:
+            // 第四步：检查状态字，确认故障已清除
+            if (current_status == 0x0631 || current_status == 0x0633 || current_status == 0x0670 ||
+                current_status == 0x0250 || current_status == 0x0650) {
                 fault_clearing_in_progress_ = false;
-                current_state_ = AxisState::READY;
+                
+                // 重置位置信息
+                int32_t current_pos = EC_READ_S32(domain1_pd + off_actual_position_);
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                initial_position_ = current_pos;
+
+                printf("轴 %s 故障清除完成，状态字: 0x%04x\n",
+                    axis_name_.c_str(), current_status);
+            } else if (fault_clear_counter_ > 100) {
+                // 超时处理
+                fault_clearing_in_progress_ = false;
+                printf("轴 %s 故障清除超时，当前状态字: 0x%04x\n",
+                    axis_name_.c_str(), current_status);
             }
             break;
     }

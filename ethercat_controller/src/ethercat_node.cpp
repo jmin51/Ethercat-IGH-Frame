@@ -88,10 +88,16 @@ void EthercatNode::init_axes(ec_master_t* master) {
     
     // 通过工厂创建不同品牌的伺服轴
     // 示例：创建汇川轴     
-    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis1", 0, AxisType::AXIS1));
     // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::HUICHUAN, "axis2", 1, AxisType::AXIS2)); // 添加第二个轴
+    //     DriveBrand::LEISAI, "axis1", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1));
+    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1));
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2));
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1));
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
     
     // 配置每个轴
     for (auto& axis : servo_axes_) {
@@ -413,7 +419,7 @@ void EthercatNode::initialize_business_logic() {
     business_processor_->initialize(num_axes);
     
     // 启用业务逻辑处理
-    business_processor_->enable(); //disable
+    business_processor_->disable(); //disable
     
     RCLCPP_INFO(this->get_logger(), "业务逻辑处理器准备就绪，已配置 %zu 个轴的映射关系", num_axes);
 }
@@ -500,9 +506,9 @@ void* io_monitor_thread(void* arg) {
         // 每1秒显示一次状态，避免刷屏
         if (should_execute_sequence(&last_display, 1)) {
 #if ENABLE_DI_MODULE
-            print_di_status(di);
+            // print_di_status(di);
 #else
-            printf("\n--- DI模块已禁用 ---\n");
+            // printf("\n--- DI模块已禁用 ---\n");
 #endif
             
 #if ENABLE_DO_MODULE

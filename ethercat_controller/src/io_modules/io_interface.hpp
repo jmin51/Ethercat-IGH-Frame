@@ -6,7 +6,7 @@
 #include <time.h>  // 添加time.h头文件
 
 // 宏开关配置 - 根据实际需求开启或关闭
-#define ENABLE_DI_MODULE    1  // 1:启用DI模块 0:禁用DI模块
+#define ENABLE_DI_MODULE    0  // 1:启用DI模块 0:禁用DI模块
 #define ENABLE_DO_MODULE    0  // 1:启用DO模块 0:禁用DO模块
 
 // 设备IP配置

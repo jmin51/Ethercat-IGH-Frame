@@ -2,15 +2,32 @@
 #include <stdexcept>
 
 std::unique_ptr<ServoAxisBase> ServoAxisFactory::create_servo_axis(
-    DriveBrand brand, const std::string& name, uint16_t position, AxisType axis_type) {
+    DriveBrand brand, const std::string& name, uint16_t position, 
+    AxisType axis_type, uint32_t product_code) {  // 更新函数签名    
+    // 如果没有指定产品号，使用默认值
+    if (product_code == 0) {
+        product_code = get_default_product_code(brand);
+    }
     
     switch (brand) {
         case DriveBrand::LEISAI:
-            return std::make_unique<LeisaiServoAxis>(name, position, axis_type);
+            return std::make_unique<LeisaiServoAxis>(name, position, axis_type, product_code);
         case DriveBrand::HUICHUAN:
+            // 汇川使用固定产品号，忽略传入的product_code
             return std::make_unique<HuichuanServoAxis>(name, position, axis_type);
         default:
             throw std::invalid_argument("未知的驱动器品牌");
+    }
+}
+
+uint32_t ServoAxisFactory::get_default_product_code(DriveBrand brand) {
+    switch (brand) {
+        case DriveBrand::LEISAI:
+            return LEISAI_PRODUCT_CODE_DEFAULT;
+        case DriveBrand::HUICHUAN:
+            return HUICHUAN_PRODUCT_CODE;
+        default:
+            return 0;
     }
 }
 

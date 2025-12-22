@@ -28,6 +28,8 @@ public:
     void set_huichuan_specific_parameter(double param);
     double get_huichuan_specific_parameter() const;
     void complete_homing_sequence(uint8_t* domain1_pd);
+    // 获取产品号
+    uint32_t get_product_code() const override { return HUICHUAN_PRODUCT_CODE; }
 
 private:
     // 汇川特有实现

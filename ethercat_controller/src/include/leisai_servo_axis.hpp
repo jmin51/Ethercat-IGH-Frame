@@ -5,8 +5,11 @@
 #include <ecrt.h>
 
 // 雷赛伺服驱动器配置
-#define LEISAI_VENDOR_ID 0x00100000
-#define LEISAI_PRODUCT_CODE 0x000c010d
+#define LEISAI_VENDOR_ID 0x00004321
+#define LEISAI_PRODUCT_CODE_1 0x0000a400
+#define LEISAI_PRODUCT_CODE_2 0x00002700
+// 默认产品号（可根据需要选择其中一个作为默认）
+#define LEISAI_PRODUCT_CODE_DEFAULT LEISAI_PRODUCT_CODE_1
 
 // 雷赛PDO配置
 extern ec_pdo_entry_info_t leisai_slave_pdo_entries[];
@@ -15,7 +18,7 @@ extern ec_sync_info_t leisai_slave_syncs[];
 
 class LeisaiServoAxis : public ServoAxisBase {
 public:
-    LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type);
+    LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code = LEISAI_PRODUCT_CODE_DEFAULT);
     virtual ~LeisaiServoAxis() = default;
 
     // 实现基类纯虚函数
@@ -26,6 +29,8 @@ public:
     // 雷赛特有功能
     void set_leisai_specific_parameter(int param);
     int get_leisai_specific_parameter() const;
+    // 添加产品号获取函数
+    uint32_t get_product_code() const override { return product_code_; }
 
 private:
     // 雷赛特有实现
@@ -38,6 +43,7 @@ private:
     void handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code);
 
     int leisai_specific_param_;
+    uint32_t product_code_;  // 存储实际使用的产品号
 };
 
 #endif // LEISAI_SERVO_AXIS_HPP
