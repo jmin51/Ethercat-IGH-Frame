@@ -9,7 +9,7 @@
 
 class ServoAxisFactory {
 public:
-    static std::unique_ptr<ServoAxisBase> create_servo_axis(
+    static std::shared_ptr<ServoAxisBase> create_servo_axis(
         DriveBrand brand,
         const std::string& name,
         uint16_t position,

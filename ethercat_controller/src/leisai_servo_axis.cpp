@@ -587,3 +587,55 @@ void LeisaiServoAxis::handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t er
         handle_fault_clear(domain1_pd);
     }
 }
+
+void LeisaiServoAxis::handle_sync_motor_control(uint8_t* domain1_pd, int32_t current_pos) {
+    // 双轴同步控制逻辑
+    if (sync_position_updated_) {
+        sync_position_updated_ = false;
+        
+        // 设置当前轴的目标位置
+        EC_WRITE_S32(domain1_pd + off_target_position_, sync_target_position_);
+        
+        // 同步设置另一个轴的目标位置
+        if (sync_axis_) {
+            auto sync_domain_pd = domain1_pd; // 同一个从站，使用相同的domain1_pd
+            EC_WRITE_S32(sync_domain_pd + sync_axis_->off_target_position_, sync_target_position_);
+        }
+        
+        RCLCPP_DEBUG(rclcpp::get_logger("ethercat_controller"),
+                    "双轴同步控制: %s 和 %s 目标位置: %d",
+                    axis_name_.c_str(), sync_axis_->get_name().c_str(), sync_target_position_);
+    }
+    
+    // 保持控制字更新
+    EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+}
+
+void LeisaiServoAxis::update_sync_target_position(int32_t target_pos) {
+    sync_target_position_ = target_pos;
+    sync_position_updated_ = true;
+}
+
+// 双轴管理器实现
+void LeisaiDualAxisManager::register_dual_axis(uint16_t slave_position,
+                                             std::shared_ptr<LeisaiServoAxis> axis1,
+                                             std::shared_ptr<LeisaiServoAxis> axis2) {
+    dual_axes_map_[slave_position] = {axis1, axis2};
+    
+    // 设置同步关系
+    axis1->set_sync_axis(axis2);
+    axis2->set_sync_axis(axis1);
+}
+
+std::pair<std::shared_ptr<LeisaiServoAxis>, std::shared_ptr<LeisaiServoAxis>>
+LeisaiDualAxisManager::get_dual_axis(uint16_t slave_position) {
+    auto it = dual_axes_map_.find(slave_position);
+    if (it != dual_axes_map_.end()) {
+        return it->second;
+    }
+    return {nullptr, nullptr};
+}
+
+bool LeisaiDualAxisManager::is_dual_axis_configured(uint16_t slave_position) const {
+    return dual_axes_map_.find(slave_position) != dual_axes_map_.end();
+}

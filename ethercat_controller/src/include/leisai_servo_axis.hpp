@@ -3,6 +3,8 @@
 
 #include "servo_axis_base.hpp"
 #include <ecrt.h>
+#include <map>
+#include <memory>
 
 // 雷赛伺服驱动器配置
 #define LEISAI_VENDOR_ID 0x00004321
@@ -32,18 +34,55 @@ public:
     // 添加产品号获取函数
     uint32_t get_product_code() const override { return product_code_; }
 
+    // 双轴控制相关方法
+    void set_sync_motor_enabled(bool enabled) { sync_motor_enabled_ = enabled; }
+    bool is_sync_motor_enabled() const { return sync_motor_enabled_; }
+    void set_sync_axis(std::shared_ptr<LeisaiServoAxis> sync_axis) { sync_axis_ = sync_axis; }
+    std::shared_ptr<LeisaiServoAxis> get_sync_axis() const { return sync_axis_; }
+    void update_sync_target_position(int32_t target_pos);
+
 private:
     // 雷赛特有实现
     void handle_leisai_initialization(uint8_t* domain1_pd, uint16_t status_word);
-    void handle_leisai_homing(uint8_t* domain1_pd, int32_t current_pos);
     void handle_leisai_manual_operation(uint8_t* domain1_pd, int32_t current_pos);
     void handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos);
     
     void handle_leisai_ready_state(uint8_t* domain1_pd, uint16_t status_word);
     void handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code);
+    
+    // 双轴同步控制
+    void handle_sync_motor_control(uint8_t* domain1_pd, int32_t current_pos);
 
     int leisai_specific_param_;
     uint32_t product_code_;  // 存储实际使用的产品号
+    
+    // 双轴控制相关成员
+    bool sync_motor_enabled_ = false;
+    std::shared_ptr<LeisaiServoAxis> sync_axis_;
+    int32_t sync_target_position_ = 0;
+    bool sync_position_updated_ = false;
+};
+
+// 双轴管理器类
+class LeisaiDualAxisManager {
+public:
+    static LeisaiDualAxisManager& getInstance() {
+        static LeisaiDualAxisManager instance;
+        return instance;
+    }
+    
+    void register_dual_axis(uint16_t slave_position, 
+                           std::shared_ptr<LeisaiServoAxis> axis1,
+                           std::shared_ptr<LeisaiServoAxis> axis2);
+    std::pair<std::shared_ptr<LeisaiServoAxis>, std::shared_ptr<LeisaiServoAxis>> 
+    get_dual_axis(uint16_t slave_position);
+    
+    bool is_dual_axis_configured(uint16_t slave_position) const;
+
+private:
+    LeisaiDualAxisManager() = default;
+    std::map<uint16_t, std::pair<std::shared_ptr<LeisaiServoAxis>, 
+                                std::shared_ptr<LeisaiServoAxis>>> dual_axes_map_;
 };
 
 #endif // LEISAI_SERVO_AXIS_HPP

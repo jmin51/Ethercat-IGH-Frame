@@ -88,6 +88,8 @@ public:
     virtual bool is_jogging() const {
         return jog_forward_requested_ || jog_reverse_requested_;
     }
+    // 最新移动从protected
+    virtual int32_t displacement_to_pulses(double displacement_mm);
 
 protected:
     // 保护成员变量 - 子类可以访问
@@ -129,7 +131,7 @@ protected:
 
     // 保护方法 - 子类可以重写或使用
     virtual void initialize_members();
-    virtual int32_t displacement_to_pulses(double displacement_mm);
+    // virtual int32_t displacement_to_pulses(double displacement_mm);
     virtual double pulses_to_displacement(int32_t pulses);
     virtual void check_state_changes(uint16_t read_status_word, uint16_t error_code);
     virtual void handle_fault_clear(uint8_t* domain1_pd);

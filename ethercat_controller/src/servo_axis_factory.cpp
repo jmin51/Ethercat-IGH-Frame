@@ -1,7 +1,7 @@
 #include "servo_axis_factory.hpp"
 #include <stdexcept>
 
-std::unique_ptr<ServoAxisBase> ServoAxisFactory::create_servo_axis(
+std::shared_ptr<ServoAxisBase> ServoAxisFactory::create_servo_axis(
     DriveBrand brand, const std::string& name, uint16_t position, 
     AxisType axis_type, uint32_t product_code) {  // 更新函数签名    
     // 如果没有指定产品号，使用默认值
