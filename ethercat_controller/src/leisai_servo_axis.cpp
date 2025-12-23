@@ -459,11 +459,11 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
     // 处理点动控制
     if (jog_forward_requested_) {
         // 正转
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
         target_pulses_ += speed_pulses;
     } else if (jog_reverse_requested_) {
         // 反转
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
         target_pulses_ -= speed_pulses;
     } else if (jog_stop_requested_) {
         // 停止

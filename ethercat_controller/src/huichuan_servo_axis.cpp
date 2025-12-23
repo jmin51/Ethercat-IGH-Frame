@@ -393,11 +393,11 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
     // 处理点动控制
     if (jog_forward_requested_) {
         // 正转：每个周期增加固定脉冲数
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
         target_pulses_ += speed_pulses;
     } else if (jog_reverse_requested_) {
         // 反转：每个周期减少固定脉冲数
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ / FREQUENCY);
+        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
         target_pulses_ -= speed_pulses;
     } else if (jog_stop_requested_) {
         // 停止：保持当前位置
@@ -443,7 +443,7 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     
     if (!position_initialized_) {
         joint_position_ = current_pos;
-        initial_position_ = 0; //current_pos;
+        initial_position_ = current_pos; //current_pos;
         target_pulses_ = current_pos;
         position_initialized_ = true;
         printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
@@ -455,8 +455,8 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
 
         // 绝对位置模式：直接计算目标脉冲数
         target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
-        printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d)\n", 
-                axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_);
+        printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d, 当前: %d)\n", 
+                axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_, joint_position_);
         
         // // 安全检测
         // const int32_t MAX_SAFE_DELTA = 2500;

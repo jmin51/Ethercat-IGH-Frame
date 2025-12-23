@@ -105,14 +105,14 @@ DriveBrand ServoAxisBase::get_brand() const { return brand_; }
 
 // 保护方法实现
 int32_t ServoAxisBase::displacement_to_pulses(double displacement_mm) {
-    const double SCREW_LEAD = 0.314;
+    const double SCREW_LEAD = 10.0;
     const double GEAR_RATIO = 1.0;
     const int PULSES_PER_REV = 10000;
     return static_cast<int32_t>((displacement_mm / SCREW_LEAD) * GEAR_RATIO * PULSES_PER_REV);
 }
 
 double ServoAxisBase::pulses_to_displacement(int32_t pulses) {
-    const double SCREW_LEAD = 0.314;
+    const double SCREW_LEAD = 10.0;
     const double GEAR_RATIO = 1.0;
     const int PULSES_PER_REV = 10000;
     return static_cast<double>(pulses * SCREW_LEAD / (GEAR_RATIO * PULSES_PER_REV));

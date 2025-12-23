@@ -86,50 +86,52 @@ void EthercatNode::initialize_node() {
 void EthercatNode::init_axes(ec_master_t* master) {
     RCLCPP_INFO(this->get_logger(), "开始初始化伺服轴");
     
-    auto& dual_axis_manager = LeisaiDualAxisManager::getInstance();
+    // auto& dual_axis_manager = LeisaiDualAxisManager::getInstance();
     
-    // 添加从站1：第二个雷赛双轴驱动器
-    auto axis1_1 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
-    auto axis1_2 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
+    // // 添加从站1：第二个雷赛双轴驱动器
+    // auto axis1_1 = ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
+    // auto axis1_2 = ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
 
-    // 注册从站1的双轴关系
-    dual_axis_manager.register_dual_axis(0,  // 从站位置1
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1),
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2));
+    // // 注册从站1的双轴关系
+    // dual_axis_manager.register_dual_axis(0,  // 从站位置1
+    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1),
+    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2));
 
-    // 启用从站3的双轴同步
-    auto leisai_axis1_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1);
-    auto leisai_axis1_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2);
-    leisai_axis1_1->set_sync_motor_enabled(true);
-    leisai_axis1_2->set_sync_motor_enabled(true);
+    // // 启用从站3的双轴同步
+    // auto leisai_axis1_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1);
+    // auto leisai_axis1_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2);
+    // leisai_axis1_1->set_sync_motor_enabled(true);
+    // leisai_axis1_2->set_sync_motor_enabled(true);
 
-    servo_axes_.push_back(std::move(axis1_1));
-    servo_axes_.push_back(std::move(axis1_2));
-    // 创建雷赛双轴驱动器 - 从站2
-    auto axis2_1 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
-    auto axis2_2 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
+    // servo_axes_.push_back(std::move(axis1_1));
+    // servo_axes_.push_back(std::move(axis1_2));
+    // // 创建雷赛双轴驱动器 - 从站2
+    // auto axis2_1 = ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
+    // auto axis2_2 = ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
     
-    // 注册双轴关系
-    dual_axis_manager.register_dual_axis(1, 
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1),
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2));
+    // // 注册双轴关系
+    // dual_axis_manager.register_dual_axis(1, 
+    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1),
+    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2));
     
-    // 启用双轴同步
-    auto leisai_axis2_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1);
-    auto leisai_axis2_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2);
-    leisai_axis2_1->set_sync_motor_enabled(true);
-    leisai_axis2_2->set_sync_motor_enabled(true);
+    // // 启用双轴同步
+    // auto leisai_axis2_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1);
+    // auto leisai_axis2_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2);
+    // leisai_axis2_1->set_sync_motor_enabled(true);
+    // leisai_axis2_2->set_sync_motor_enabled(true);
 
-    servo_axes_.push_back(std::move(axis2_1));
-    servo_axes_.push_back(std::move(axis2_2));
+    // servo_axes_.push_back(std::move(axis2_1));
+    // servo_axes_.push_back(std::move(axis2_2));
 
     // 可以继续添加其他轴
     // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::HUICHUAN, "axis3", 1, AxisType::AXIS1));
+    //     DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1));
+    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+        DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
     // 配置每个轴
     for (auto& axis : servo_axes_) {
         axis->configure(master);
