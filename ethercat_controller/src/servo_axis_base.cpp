@@ -2,9 +2,9 @@
 #include <iostream>
 
 ServoAxisBase::ServoAxisBase(const std::string& name, uint16_t position, 
-                           AxisType axis_type, DriveBrand brand, uint32_t product_code)
+                           AxisType axis_type, DriveBrand brand, uint32_t product_code, double gear_ratio)
     : axis_name_(name), slave_position_(position), axis_type_(axis_type), 
-      brand_(brand), product_code_(product_code) {
+      brand_(brand), product_code_(product_code), gear_ratio_(gear_ratio) {
     initialize_members();
 }
 
@@ -105,17 +105,21 @@ DriveBrand ServoAxisBase::get_brand() const { return brand_; }
 
 // 保护方法实现
 int32_t ServoAxisBase::displacement_to_pulses(double displacement_mm) {
-    const double SCREW_LEAD = 10.0;
-    const double GEAR_RATIO = 1.0;
-    const int PULSES_PER_REV = 10000;
-    return static_cast<int32_t>((displacement_mm / SCREW_LEAD) * GEAR_RATIO * PULSES_PER_REV);
+    const double SCREW_LEAD = 10.0;  // 丝杠导程10mm
+    const int PULSES_PER_REV = 10000;  // 每转脉冲数
+    
+    // 考虑减速比: 实际电机转数 = 位移 / 导程 × 减速比
+    double revolutions = (displacement_mm / SCREW_LEAD) * gear_ratio_;
+    return static_cast<int32_t>(revolutions * PULSES_PER_REV);
 }
 
 double ServoAxisBase::pulses_to_displacement(int32_t pulses) {
     const double SCREW_LEAD = 10.0;
-    const double GEAR_RATIO = 1.0;
     const int PULSES_PER_REV = 10000;
-    return static_cast<double>(pulses * SCREW_LEAD / (GEAR_RATIO * PULSES_PER_REV));
+    
+    double revolutions = static_cast<double>(pulses) / PULSES_PER_REV;
+    // 考虑减速比: 实际位移 = 电机转数 / 减速比 × 导程
+    return (revolutions / gear_ratio_) * SCREW_LEAD;
 }
 
 void ServoAxisBase::check_state_changes(uint16_t read_status_word, uint16_t error_code) {

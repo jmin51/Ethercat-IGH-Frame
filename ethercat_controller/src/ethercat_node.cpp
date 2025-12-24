@@ -128,8 +128,8 @@ void EthercatNode::init_axes(ec_master_t* master) {
     // servo_axes_.push_back(std::move(axis2_2));
 
     // 可以继续添加其他轴
-    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1));
+    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+        DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 9.0));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
     // 配置每个轴

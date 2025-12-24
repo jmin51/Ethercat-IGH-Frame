@@ -28,17 +28,11 @@ ec_sync_info_t huichuan_slave_syncs[] = {
 const int HOMING_TOLERANCE = 100;
 const int HOMING_STEP = 20;
 
-HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type)
-    : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN, HUICHUAN_PRODUCT_CODE) {
+HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type, double gear_ratio)
+    : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN, HUICHUAN_PRODUCT_CODE, gear_ratio) {
     
-    std::cout << "创建汇川伺服轴: " << name << std::endl;
+    std::cout << "创建汇川伺服轴: " << name << ", 减速比: " << gear_ratio << std::endl;
 }
-// HuichuanServoAxis::HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type)
-//     : ServoAxisBase(name, position, axis_type, DriveBrand::HUICHUAN),
-//       huichuan_specific_param_(0.0) {
-    
-//     std::cout << "创建汇川伺服轴: " << name << std::endl;
-// }
 
 void HuichuanServoAxis::configure(ec_master_t* master) {
     sc_ = ecrt_master_slave_config(master, 0, slave_position_,
@@ -444,7 +438,7 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     if (!position_initialized_) {
         joint_position_ = current_pos;
         initial_position_ = current_pos; //current_pos;
-        target_pulses_ = current_pos;
+        target_pulses_ = initial_position_;
         position_initialized_ = true;
         printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
     }
@@ -517,6 +511,7 @@ void HuichuanServoAxis::complete_homing_sequence(uint8_t* domain1_pd) {
     EC_WRITE_S32(domain1_pd + off_target_position_, home_target_position_);
     homing_in_progress_ = false;
     homing_completed_ = true;
-    printf("轴 %s 回零完成\n", axis_name_.c_str());
+    printf("轴 %s 回零完成, 初始化前target_pulses_: %d\n", 
+        axis_name_.c_str(), target_pulses_);
     check_system_initialization();
 }

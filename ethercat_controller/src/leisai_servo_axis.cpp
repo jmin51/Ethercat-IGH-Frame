@@ -47,8 +47,8 @@ const int HOMING_STEP = 50;
 // extern ec_domain_t *domain1;
 // extern uint8_t *domain1_pd;  // 统一使用domain1_pd
 
-LeisaiServoAxis::LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code)
-    : ServoAxisBase(name, position, axis_type, DriveBrand::LEISAI, product_code), 
+LeisaiServoAxis::LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code, double gear_ratio)
+    : ServoAxisBase(name, position, axis_type, DriveBrand::LEISAI, product_code, gear_ratio), 
       leisai_specific_param_(0),
       product_code_(product_code) {  // 存储产品号
 }

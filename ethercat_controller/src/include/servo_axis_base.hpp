@@ -34,7 +34,7 @@ enum class DriveBrand {
 
 class ServoAxisBase {
 public:
-    ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand, uint32_t product_code);
+    ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand, uint32_t product_code, double gear_ratio = 1.0);
     virtual ~ServoAxisBase() = default;
     // 添加获取产品号的虚函数
     virtual uint32_t get_product_code() const = 0;
@@ -98,6 +98,7 @@ protected:
     AxisType axis_type_;
     DriveBrand brand_;
     uint32_t product_code_;  // 在基类中存储产品号
+    double gear_ratio_; // 添加减速比成员变量
     
     ec_slave_config_t* sc_;
     unsigned int control_word_;
@@ -136,6 +137,9 @@ protected:
     virtual void check_state_changes(uint16_t read_status_word, uint16_t error_code);
     virtual void handle_fault_clear(uint8_t* domain1_pd);
     virtual void check_system_initialization();
+    // 添加获取减速比的方法
+    virtual double get_gear_ratio() const { return gear_ratio_; }
+    virtual void set_gear_ratio(double ratio) { gear_ratio_ = ratio; }
 
     // 速度控制相关
     double jog_speed_;           // 点动速度 (mm/s)
@@ -152,7 +156,7 @@ protected:
     int32_t new_target_;              // 新目标位置
     
     void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
-        const int32_t MAX_STEP = 50; // 最大步进脉冲数
+        const int32_t MAX_STEP = 20; // 最大步进脉冲数
         int32_t error = target_pulses - joint_position_;
         int32_t step = (abs(error) > MAX_STEP) ? 
                       ((error > 0) ? MAX_STEP : -MAX_STEP) : error;

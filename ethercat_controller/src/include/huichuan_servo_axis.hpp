@@ -16,7 +16,7 @@ extern ec_sync_info_t huichuan_slave_syncs[];
 
 class HuichuanServoAxis : public ServoAxisBase {
 public:
-    HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type);
+    HuichuanServoAxis(const std::string& name, uint16_t position, AxisType axis_type, double gear_ratio = 1.0);
     virtual ~HuichuanServoAxis() = default;
 
     // 实现基类纯虚函数

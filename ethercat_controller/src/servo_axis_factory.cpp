@@ -3,7 +3,7 @@
 
 std::shared_ptr<ServoAxisBase> ServoAxisFactory::create_servo_axis(
     DriveBrand brand, const std::string& name, uint16_t position, 
-    AxisType axis_type, uint32_t product_code) {  // 更新函数签名    
+    AxisType axis_type, uint32_t product_code, double gear_ratio) {  // 更新函数签名    
     // 如果没有指定产品号，使用默认值
     if (product_code == 0) {
         product_code = get_default_product_code(brand);
@@ -11,10 +11,10 @@ std::shared_ptr<ServoAxisBase> ServoAxisFactory::create_servo_axis(
     
     switch (brand) {
         case DriveBrand::LEISAI:
-            return std::make_unique<LeisaiServoAxis>(name, position, axis_type, product_code);
+            return std::make_shared<LeisaiServoAxis>(name, position, axis_type, product_code, gear_ratio);
         case DriveBrand::HUICHUAN:
             // 汇川使用固定产品号，忽略传入的product_code
-            return std::make_unique<HuichuanServoAxis>(name, position, axis_type);
+            return std::make_shared<HuichuanServoAxis>(name, position, axis_type, gear_ratio);
         default:
             throw std::invalid_argument("未知的驱动器品牌");
     }

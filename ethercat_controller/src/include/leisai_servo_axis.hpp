@@ -20,7 +20,7 @@ extern ec_sync_info_t leisai_slave_syncs[];
 
 class LeisaiServoAxis : public ServoAxisBase {
 public:
-    LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code = LEISAI_PRODUCT_CODE_DEFAULT);
+    LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code = LEISAI_PRODUCT_CODE_DEFAULT, double gear_ratio = 1.0);
     virtual ~LeisaiServoAxis() = default;
 
     // 实现基类纯虚函数

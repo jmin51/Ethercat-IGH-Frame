@@ -14,7 +14,8 @@ public:
         const std::string& name,
         uint16_t position,
         AxisType axis_type = AxisType::AXIS1,
-        uint32_t product_code = 0  // 新增参数，0表示使用默认值
+        uint32_t product_code = 0,  // 新增参数，0表示使用默认值
+        double gear_ratio = 1.0  // 新增减速比参数
     );
     
     static DriveBrand string_to_brand(const std::string& brand_str);
