@@ -76,56 +76,67 @@ void EthercatNode::initialize_node() {
     pthread_mutex_init(&io_mutex_, nullptr);
     
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
+}
 
+// 新增：在轴初始化后调用的方法
+void EthercatNode::initialize_after_axes() {
+    RCLCPP_INFO(this->get_logger(), "开始初始化业务逻辑模块（延迟初始化）");
+    
+    // 检查轴是否已初始化
+    if (servo_axes_.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "伺服轴未初始化，无法初始化业务逻辑模块");
+        return;
+    }
+    
     // 初始化业务逻辑处理器
-    RCLCPP_INFO(this->get_logger(), "开始初始化业务逻辑模块");
     initialize_business_logic();
+    initialize_layer_processor();
     RCLCPP_INFO(this->get_logger(), "业务逻辑模块初始化完成");
 }
 
 void EthercatNode::init_axes(ec_master_t* master) {
     RCLCPP_INFO(this->get_logger(), "开始初始化伺服轴");
     
-    // auto& dual_axis_manager = LeisaiDualAxisManager::getInstance();
+    auto& dual_axis_manager = LeisaiDualAxisManager::getInstance();
     
-    // // 添加从站1：第二个雷赛双轴驱动器
-    // auto axis1_1 = ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
-    // auto axis1_2 = ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
+    // 添加从站1：第二个雷赛双轴驱动器
+    auto axis1_1 = ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
+    auto axis1_2 = ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
 
-    // // 注册从站1的双轴关系
-    // dual_axis_manager.register_dual_axis(0,  // 从站位置1
-    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1),
-    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2));
+    // 注册从站1的双轴关系
+    dual_axis_manager.register_dual_axis(0,  // 从站位置1
+        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1),
+        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2));
 
-    // // 启用从站3的双轴同步
-    // auto leisai_axis1_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1);
-    // auto leisai_axis1_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2);
-    // leisai_axis1_1->set_sync_motor_enabled(true);
-    // leisai_axis1_2->set_sync_motor_enabled(true);
+    // 启用从站3的双轴同步
+    auto leisai_axis1_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1);
+    auto leisai_axis1_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2);
+    leisai_axis1_1->set_sync_motor_enabled(true);
+    leisai_axis1_2->set_sync_motor_enabled(true);
 
-    // servo_axes_.push_back(std::move(axis1_1));
-    // servo_axes_.push_back(std::move(axis1_2));
-    // // 创建雷赛双轴驱动器 - 从站2
-    // auto axis2_1 = ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
-    // auto axis2_2 = ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
+    servo_axes_.push_back(std::move(axis1_1));
+    servo_axes_.push_back(std::move(axis1_2));
+    // 创建雷赛双轴驱动器 - 从站2
+    auto axis2_1 = ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
+    auto axis2_2 = ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
     
-    // // 注册双轴关系
-    // dual_axis_manager.register_dual_axis(1, 
-    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1),
-    //     std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2));
+    // 注册双轴关系
+    dual_axis_manager.register_dual_axis(1, 
+        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1),
+        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2));
     
-    // // 启用双轴同步
-    // auto leisai_axis2_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1);
-    // auto leisai_axis2_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2);
-    // leisai_axis2_1->set_sync_motor_enabled(true);
-    // leisai_axis2_2->set_sync_motor_enabled(true);
+    // 启用双轴同步
+    auto leisai_axis2_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1);
+    auto leisai_axis2_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2);
+    leisai_axis2_1->set_sync_motor_enabled(true);
+    leisai_axis2_2->set_sync_motor_enabled(true);
 
-    // servo_axes_.push_back(std::move(axis2_1));
-    // servo_axes_.push_back(std::move(axis2_2));
+    servo_axes_.push_back(std::move(axis2_1));
+    servo_axes_.push_back(std::move(axis2_2));
 
     // 可以继续添加其他轴
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
@@ -277,11 +288,12 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::Float64Multi
         return;
     }
 
-    if (msg->data.size() < servo_axes_.size()) {
-        RCLCPP_WARN(this->get_logger(), "指令轴数(%zu)少于系统轴数(%zu)", 
-                    msg->data.size(), servo_axes_.size());
-        return;
-    }
+    // 12.24调试屏蔽，不影响功能
+    // if (msg->data.size() < servo_axes_.size()) {
+    //     RCLCPP_WARN(this->get_logger(), "指令轴数(%zu)少于系统轴数(%zu)", 
+    //                 msg->data.size(), servo_axes_.size());
+    //     return;
+    // }
     
     // 添加位移变化率限制
     static std::vector<double> last_displacements(servo_axes_.size(), 0.0);
@@ -298,54 +310,69 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::Float64Multi
     // const double MAX_RATE_MM_PER_MS = 0.01;
     // const double MAX_DELTA_PER_CYCLE = MAX_RATE_MM_PER_MS * dt * 1000;
     
-    // 处理每个轴的位移命令
+    // // 处理每个轴的位移命令
+    // for (size_t i = 0; i < servo_axes_.size(); ++i) {
+    //     if (i >= msg->data.size()) break;
+        
+    //     printf("收到位移指令: axis%zu = %.6fmm\n", i, msg->data[i]);
+        
+    //     // 检查是否为雷赛双轴
+    //     auto leisai_axis = std::dynamic_pointer_cast<LeisaiServoAxis>(servo_axes_[i]);
+    //     if (leisai_axis && leisai_axis->is_sync_motor_enabled()) {
+    //         // 双轴同步控制：只需要处理其中一个轴，另一个会自动同步
+    //         if (leisai_axis->get_sync_axis()) {
+    //             double requested_displacement = msg->data[i];
+    //             int32_t target_pulses = leisai_axis->get_initial_position() + 
+    //                                    leisai_axis->displacement_to_pulses(requested_displacement);
+                
+    //             // 更新同步目标位置
+    //             leisai_axis->update_sync_target_position(target_pulses);
+                
+    //             RCLCPP_DEBUG(this->get_logger(), 
+    //                        "双轴同步控制: %s 和 %s 目标位移: %.3fmm, 脉冲: %d",
+    //                        leisai_axis->get_name().c_str(),
+    //                        leisai_axis->get_sync_axis()->get_name().c_str(),
+    //                        requested_displacement, target_pulses);
+                
+    //             // 跳过同步轴的处理
+    //             i++; // 跳过下一个轴（同步轴）
+    //             continue;
+    //         }
+    //     }
+        
+    //     if (servo_axes_[i]->is_running()) {
+    //         double requested_displacement = msg->data[i];
+    //         double last_displacement = last_displacements[i];
+    //         double delta = requested_displacement - last_displacement;
+            
+    //         // 限制变化率
+    //         // if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
+    //         //     RCLCPP_WARN(this->get_logger(), 
+    //         //                 "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
+    //         //                 i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
+                
+    //         //     double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
+    //         //     requested_displacement = last_displacement + limited_delta;
+    //         // }
+            
+    //         handle_axis_command(i, requested_displacement);
+    //         last_displacements[i] = requested_displacement;
+    //     }
+    // }
+    // 只处理汇川电机
     for (size_t i = 0; i < servo_axes_.size(); ++i) {
         if (i >= msg->data.size()) break;
         
-        printf("收到位移指令: axis%zu = %.6fmm\n", i, msg->data[i]);
-        
-        // 检查是否为雷赛双轴
-        auto leisai_axis = std::dynamic_pointer_cast<LeisaiServoAxis>(servo_axes_[i]);
-        if (leisai_axis && leisai_axis->is_sync_motor_enabled()) {
-            // 双轴同步控制：只需要处理其中一个轴，另一个会自动同步
-            if (leisai_axis->get_sync_axis()) {
-                double requested_displacement = msg->data[i];
-                int32_t target_pulses = leisai_axis->get_initial_position() + 
-                                       leisai_axis->displacement_to_pulses(requested_displacement);
-                
-                // 更新同步目标位置
-                leisai_axis->update_sync_target_position(target_pulses);
-                
-                RCLCPP_DEBUG(this->get_logger(), 
-                           "双轴同步控制: %s 和 %s 目标位移: %.3fmm, 脉冲: %d",
-                           leisai_axis->get_name().c_str(),
-                           leisai_axis->get_sync_axis()->get_name().c_str(),
-                           requested_displacement, target_pulses);
-                
-                // 跳过同步轴的处理
-                i++; // 跳过下一个轴（同步轴）
-                continue;
+        // 检查是否为汇川电机
+        if (servo_axes_[i]->get_brand() == DriveBrand::HUICHUAN) {
+            printf("收到汇川电机位移指令: %s = %.6fmm\n", 
+                   servo_axes_[i]->get_name().c_str(), msg->data[i]);
+            
+            if (servo_axes_[i]->is_running()) {
+                handle_axis_command(i, msg->data[i]);
             }
         }
-        
-        if (servo_axes_[i]->is_running()) {
-            double requested_displacement = msg->data[i];
-            double last_displacement = last_displacements[i];
-            double delta = requested_displacement - last_displacement;
-            
-            // 限制变化率
-            // if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
-            //     RCLCPP_WARN(this->get_logger(), 
-            //                 "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
-            //                 i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
-                
-            //     double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
-            //     requested_displacement = last_displacement + limited_delta;
-            // }
-            
-            handle_axis_command(i, requested_displacement);
-            last_displacements[i] = requested_displacement;
-        }
+        // 跳过雷赛电机
     }
 }
 
@@ -386,7 +413,7 @@ void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg
 //             RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
 //         }
 //     }
-    // 解析格式："axis1:forward" 或 "all:stop"
+    // 解析格式："axis1_1:forward" 或 "axis1_1:reverse" 或 "axis1_1:stop"
     size_t colon_pos = command.find(':');
     if (colon_pos == std::string::npos) {
         RCLCPP_ERROR(this->get_logger(), "无效命令格式，应为 '轴名:命令'");
@@ -584,4 +611,71 @@ void* io_monitor_thread(void* arg) {
     
     RCLCPP_INFO(node->get_logger(), "IO监控线程退出");
     return nullptr;
+}
+
+void EthercatNode::initialize_layer_processor() {
+    // 创建层指令处理器
+    layer_processor_ = std::make_unique<LayerCommandProcessor>(this);
+    
+    // 查找axis5的索引 - 需要正确找到axis5的位置
+    size_t axis5_index = 0;
+    bool axis5_found = false;
+    
+    for (size_t i = 0; i < servo_axes_.size(); ++i) {
+        if (servo_axes_[i]->get_name() == "axis5") {
+            axis5_index = i;
+            axis5_found = true;
+            RCLCPP_INFO(this->get_logger(), "找到axis5，索引位置: %zu", axis5_index);
+            break;
+        }
+    }
+    
+    if (!axis5_found) {
+        RCLCPP_ERROR(this->get_logger(), "未找到axis5，使用默认索引0");
+        axis5_index = 0; // 如果找不到，可能需要调整这个默认值
+    }
+    // // 查找axis5的索引
+    // size_t axis5_index = 0;
+    // for (size_t i = 0; i < servo_axes_.size(); ++i) {
+    //     if (servo_axes_[i]->get_name() == "axis5") {
+    //         axis5_index = i;
+    //         RCLCPP_INFO(this->get_logger(), "找到axis5，索引位置: %zu", axis5_index);
+    //         break;
+    //     }
+    // }
+    
+    // 初始化处理器
+    layer_processor_->initialize(axis5_index);
+    
+    // 配置自定义层高（可选）
+    std::map<uint8_t, double> layer_heights;
+    for (uint8_t layer = 1; layer <= 10; ++layer) {
+        layer_heights[layer] = (layer - 1) * 25.0;  // 每层25mm
+    }
+    layer_processor_->set_layer_heights(layer_heights);
+    
+    // 创建层指令订阅器
+    layer_command_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+        "/layer_command", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+            handle_layer_command(msg);
+        });
+    
+    RCLCPP_INFO(this->get_logger(), "层指令处理器初始化完成");
+}
+
+void EthercatNode::handle_layer_command(const std_msgs::msg::UInt8::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "收到层指令: 第%d层", msg->data);
+    layer_processor_->process_layer_command(msg->data);
+    // 调试信息：打印当前所有轴的状态
+    RCLCPP_INFO(this->get_logger(), "当前轴数量: %zu", servo_axes_.size());
+    for (size_t i = 0; i < servo_axes_.size(); ++i) {
+        RCLCPP_INFO(this->get_logger(), "轴[%zu]: %s", i, servo_axes_[i]->get_name().c_str());
+    }
+    
+    layer_processor_->process_layer_command(msg->data);
 }

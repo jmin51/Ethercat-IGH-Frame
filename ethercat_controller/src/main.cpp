@@ -362,6 +362,8 @@ int main(int argc, char **argv) {
     // 启动IO监控
     printf("启动IO监控模块...\n");
     global_node->start_io_monitoring();
+    // 在轴初始化后初始化业务逻辑和层处理器
+    global_node->initialize_after_axes();
     
     // 设置实时线程属性
     pthread_attr_t attr;

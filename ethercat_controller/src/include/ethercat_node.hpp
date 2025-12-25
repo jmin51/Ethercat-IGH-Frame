@@ -5,6 +5,8 @@
 #include "servo_axis_factory.hpp"
 #include "io_interface.hpp"  // 新增IO模块头文件
 #include "BusinessLogicProcessor.hpp"  // 添加这行
+#include "LayerCommandProcessor.hpp" 
+#include <std_msgs/msg/u_int8.hpp> 
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -47,11 +49,18 @@ public:
     void publish_joint_states();
     void handle_control_command(const std::string& command);
     
+    // 添加延迟初始化方法
+    void initialize_after_axes();
+    
     // IO模块相关
     void start_io_monitoring();
     void stop_io_monitoring();
     void handle_io_signals(DI_Interface di);
     bool is_io_running() const { return io_running_.load(); }
+
+    // 层指令相关方法
+    void handle_layer_command(const std_msgs::msg::UInt8::SharedPtr msg);
+    uint8_t get_current_layer() const { return layer_processor_->get_current_layer(); }
 
 private:
     void initialize_node();
@@ -86,11 +95,15 @@ private:
     // 业务逻辑处理器 - 负责DI信号到轴控制的映射逻辑
     std::unique_ptr<BusinessLogicProcessor> business_processor_;
     std::vector<AxisCommand> last_executed_commands_;
+    // 层指令处理器
+    std::unique_ptr<LayerCommandProcessor> layer_processor_;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr layer_command_sub_;
     /**
      * @brief 初始化业务逻辑处理器
-     * 创建处理器实例并配置标准的DI-轴映射关系
+     * 创建处理器实例并配置标准的DI-轴映射关系，初始化层指令处理器
      */
     void initialize_business_logic();
+    void initialize_layer_processor();
 };
 
 // 全局变量声明
