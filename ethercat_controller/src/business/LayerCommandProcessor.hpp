@@ -4,7 +4,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/u_int8.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/string.hpp>  // 改为String
 #include <map>
 #include <atomic>
 #include <memory>
@@ -45,11 +45,9 @@ public:
      */
     bool is_moving() const { return is_moving_; }
     
-    /**
-     * @brief 生成位移指令消息
-     */
-    std_msgs::msg::Float64MultiArray create_displacement_command(
-        const std::vector<double>& base_displacements);
+    // 移除或修改以下函数，因为不再使用Float64MultiArray
+    // std_msgs::msg::Float64MultiArray create_displacement_command(
+    //     const std::vector<double>& base_displacements);
     
     /**
      * @brief 设置层高配置
@@ -66,7 +64,7 @@ public:
 
 private:
     rclcpp::Node* node_;
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr displacement_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr displacement_pub_;  // 改为String
     
     std::map<uint8_t, double> layer_heights_;  // 层高映射表
     size_t axis5_index_;                        // axis5索引
@@ -99,6 +97,9 @@ private:
      * @brief 发布位移指令
      */
     void publish_displacement_command(double axis5_target);
+    
+    // 新增：格式化位移指令为字符串
+    std::string format_displacement_command(double axis5_target);
 };
 
 #endif // LAYER_COMMAND_PROCESSOR_HPP

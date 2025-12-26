@@ -261,7 +261,7 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::AUTO_MODE:
             // 自动模式处理
-            if (read_status_word != 0x1637) {
+            if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 退出自动模式\n", axis_name_.c_str());
             } else {

@@ -64,7 +64,12 @@ public:
 
 private:
     void initialize_node();
-    void handle_displacement_command(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void handle_displacement_command(const std_msgs::msg::String::SharedPtr msg);
+
+    // 添加新的解析方法
+    bool parse_displacement_command(const std::string& command, 
+                                    std::vector<std::pair<std::string, double>>& axis_commands);
+
     void handle_control_command_msg(const std_msgs::msg::String::SharedPtr msg);
     void handle_axis_command(size_t axis_index, double newTargetPosition);
     double pulses_to_displacement(int32_t pulses, int32_t initial_pulses);
@@ -78,7 +83,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr system_status_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr io_status_pub_;  // 新增IO状态发布器
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr displacement_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr displacement_sub_;  // 从Float64MultiArray改为String
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
     // 添加点动指令订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
@@ -104,6 +109,7 @@ private:
      */
     void initialize_business_logic();
     void initialize_layer_processor();
+    void monitor_di_changes(const DI_Interface& current_di);
 };
 
 // 全局变量声明

@@ -26,7 +26,7 @@ struct timespec timespec_add(struct timespec time1, struct timespec time2) {
 
 // Modbus线程函数
 void* modbus_read_thread(void *arg) {
-    mb_ctx = modbus_new_tcp("192.168.1.12", 502);
+    mb_ctx = modbus_new_tcp("192.168.3.12", 502);
     if (mb_ctx == nullptr) {
         fprintf(stderr, "无法创建Modbus上下文\n");
         return nullptr;

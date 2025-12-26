@@ -1,0 +1,20 @@
+作业流程
+一、初始状态
+（1）IO：入料产品检测 为未到位    且（2）IO：缓存架入料到位检测 为未到位    且（3）IO：缓存架出料到位检测 为未到位
+二、收到入库信息（包括层号）
+检测：（1）IO：缓存架入料产品到位检测 为到位  且（2）IO：缓存架出料产品到位检测 为未到位
+执行:（1）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_1:forward'" --once
+（2）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_2:forward'" --once
+（3）ros2 topic pub /layer_command std_msgs/msg/UInt8 "data: 1" --once
+检测：（1）IO：缓存架入料产品到位检测 为未到位  且（2）IO：缓存架出料产品到位检测 为到位
+持续执行：（1）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_1:forward'" --once
+（2）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_2:forward'" --once
+直到检测到（1）IO：接驳台入料产品到位检测 为到位  且（2）IO：接驳台出料产品到位检测 为未到位
+执行：（1）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_1:stop'" --once
+（2）ros2 topic pub /jog_command std_msgs/String "data: 'axis1_2:stop'" --once
+（3）ros2 topic pub /layer_command std_msgs/msg/UInt8 "data: 层号" --once
+运动到对应层号后再执行：（1）ros2 topic pub /jog_command std_msgs/String "data: 'axis2_1:reverse'" --once
+（2）ros2 topic pub /jog_command std_msgs/String "data: 'axis2_2:reverse'" --once
+检测：（1）IO：接驳台入料产品到位检测   为未到位 
+后执行（1）ros2 topic pub /layer_command std_msgs/msg/UInt8 "data: 1" --once
+运动完成

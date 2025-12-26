@@ -1,13 +1,15 @@
 // LayerCommandProcessor.cpp
 #include "LayerCommandProcessor.hpp"
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
 
 LayerCommandProcessor::LayerCommandProcessor(rclcpp::Node* node) 
     : node_(node), axis5_index_(0), current_layer_(1), target_layer_(1), 
       is_moving_(false), motion_speed_(10.0), motion_acceleration_(50.0) {
     
-    // 创建位移指令发布器
-    displacement_pub_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>(
+    // 创建位移指令发布器，使用String类型
+    displacement_pub_ = node_->create_publisher<std_msgs::msg::String>(
         "/displacement_command", rclcpp::QoS(10).reliable());
     
     // 初始化层高配置
@@ -87,36 +89,35 @@ double LayerCommandProcessor::calculate_layer_height(uint8_t layer) {
 }
 
 void LayerCommandProcessor::publish_displacement_command(double axis5_target) {
-    // 创建位移指令
-    auto msg = std_msgs::msg::Float64MultiArray();
-    
-    // 这里需要根据实际轴数量初始化数组
-    // 假设有5个轴，其他轴保持当前位置
-    msg.data.resize(5, 0.0);  // 根据实际轴数量调整
-    
-    // 设置axis5的目标位移
-    if (axis5_index_ < msg.data.size()) {
-        msg.data[axis5_index_] = axis5_target;
-    }
+    // 创建字符串位移指令
+    auto msg = std_msgs::msg::String();
+    msg.data = format_displacement_command(axis5_target);
     
     displacement_pub_->publish(msg);
     
     RCLCPP_DEBUG(node_->get_logger(), 
-                "发布位移指令: axis5 = %.2fmm", axis5_target);
+                "发布位移指令: %s", msg.data.c_str());
 }
 
-std_msgs::msg::Float64MultiArray LayerCommandProcessor::create_displacement_command(
-    const std::vector<double>& base_displacements) {
-    
-    auto msg = std_msgs::msg::Float64MultiArray();
-    msg.data = base_displacements;
-    
-    if (axis5_index_ < msg.data.size()) {
-        msg.data[axis5_index_] = calculate_layer_height(target_layer_);
-    }
-    
-    return msg;
+std::string LayerCommandProcessor::format_displacement_command(double axis5_target) {
+    std::stringstream ss;
+    ss << "axis5:" << std::fixed << std::setprecision(2) << axis5_target;
+    return ss.str();
 }
+
+// 移除或注释掉原来的create_displacement_command函数
+// std_msgs::msg::Float64MultiArray LayerCommandProcessor::create_displacement_command(
+//     const std::vector<double>& base_displacements) {
+//     
+//     auto msg = std_msgs::msg::Float64MultiArray();
+//     msg.data = base_displacements;
+//     
+//     if (axis5_index_ < msg.data.size()) {
+//         msg.data[axis5_index_] = calculate_layer_height(target_layer_);
+//     }
+//     
+//     return msg;
+// }
 
 void LayerCommandProcessor::set_layer_heights(const std::map<uint8_t, double>& layer_heights) {
     layer_heights_ = layer_heights;
