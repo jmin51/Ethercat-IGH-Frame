@@ -1,0 +1,11 @@
+作业流程
+一、收到出库信息（包括层号）
+检测：（1）IO：缓存架入料产品到位检测 为未到位  且（2）IO：缓存架出料产品到位检测 为未到位 且（3）IO：接驳台入料产品到位检测 为未到位 且（4）IO：接驳台出料产品到位检测 为未到位
+执行:（1）ros2 topic pub /layer_command std_msgs/msg/UInt8 "data: 2" --once
+（2）ros2 topic pub /jog_command std_msgs/String "data: 'axis2_1:reverse'" --once
+（3）ros2 topic pub /jog_command std_msgs/String "data: 'axis2_2:reverse'" --once
+检测: （1）IO：接驳台出料产品到位检测 为到位
+执行: ros2 topic pub /layer_command std_msgs/msg/UInt8 "data: 1" --once
+检测: （1）IO：接驳台出料产品到位检测 为未到位
+执行:
+运动完成

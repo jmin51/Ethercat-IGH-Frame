@@ -6,6 +6,7 @@
 #include <modbus/modbus.h>
 #include <string>
 #include <sstream>
+#include <std_msgs/msg/empty.hpp>  // 添加这行
 
 // 全局变量定义
 std::shared_ptr<EthercatNode> global_node = nullptr;
@@ -70,6 +71,30 @@ void EthercatNode::initialize_node() {
         "/jog_command", rclcpp::QoS(10).reliable(),
         [this](const std_msgs::msg::String::SharedPtr msg) {
             handle_jog_command(msg);
+        });
+    // 添加入库流程话题订阅器
+    warehouse_start_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+        "/warehouse_start", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+            handle_warehouse_start(msg);
+        });
+        
+    warehouse_stop_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+        "/warehouse_stop", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::Empty::SharedPtr msg) {
+            handle_warehouse_stop(msg);
+        });
+    // 添加出库流程话题订阅器
+    outbound_start_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+        "/outbound_start", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+            handle_outbound_start(msg);
+        });
+        
+    outbound_stop_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+        "/outbound_stop", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::Empty::SharedPtr msg) {
+            handle_outbound_stop(msg);
         });
         
     // 初始化IO互斥锁
@@ -284,84 +309,6 @@ void EthercatNode::handle_control_command_msg(const std_msgs::msg::String::Share
     handle_control_command(msg->data);
 }
 
-// void EthercatNode::handle_displacement_command(const std_msgs::msg::String::SharedPtr msg) {  
-//     if (servo_axes_.empty()) {
-//         RCLCPP_DEBUG(this->get_logger(), "等待伺服轴初始化...");
-//         return;
-//     }
-
-//     // 12.24调试屏蔽，不影响功能
-//     // if (msg->data.size() < servo_axes_.size()) {
-//     //     RCLCPP_WARN(this->get_logger(), "指令轴数(%zu)少于系统轴数(%zu)", 
-//     //                 msg->data.size(), servo_axes_.size());
-//     //     return;
-//     // }
-    
-//     // 添加位移变化率限制
-//     static std::vector<double> last_displacements(servo_axes_.size(), 0.0);
-//     static auto last_time = this->now();
-    
-//     auto current_time = this->now();
-//     double dt = (current_time - last_time).seconds();
-//     last_time = current_time;
-    
-//     // 防止dt为0或负值
-//     if (dt <= 0) dt = 0.01;
-    
-//     // // 最大允许变化率：0.01mm/ms = 10mm/s
-//     // const double MAX_RATE_MM_PER_MS = 0.01;
-//     // const double MAX_DELTA_PER_CYCLE = MAX_RATE_MM_PER_MS * dt * 1000;
-    
-//     // 处理每个轴的位移命令
-//     for (size_t i = 0; i < servo_axes_.size(); ++i) {
-//         if (i >= msg->data.size()) break;
-        
-//         printf("收到位移指令: axis%zu = %.6fmm\n", i, msg->data[i]);
-        
-//         // 检查是否为雷赛双轴
-//         auto leisai_axis = std::dynamic_pointer_cast<LeisaiServoAxis>(servo_axes_[i]);
-//         if (leisai_axis && leisai_axis->is_sync_motor_enabled()) {
-//             // 双轴同步控制：只需要处理其中一个轴，另一个会自动同步
-//             if (leisai_axis->get_sync_axis()) {
-//                 double requested_displacement = msg->data[i];
-//                 int32_t target_pulses = leisai_axis->get_initial_position() + 
-//                                        leisai_axis->displacement_to_pulses(requested_displacement);
-                
-//                 // 更新同步目标位置
-//                 leisai_axis->update_sync_target_position(target_pulses);
-                
-//                 RCLCPP_DEBUG(this->get_logger(), 
-//                            "双轴同步控制: %s 和 %s 目标位移: %.3fmm, 脉冲: %d",
-//                            leisai_axis->get_name().c_str(),
-//                            leisai_axis->get_sync_axis()->get_name().c_str(),
-//                            requested_displacement, target_pulses);
-                
-//                 // 跳过同步轴的处理
-//                 i++; // 跳过下一个轴（同步轴）
-//                 continue;
-//             }
-//         }
-        
-//         if (servo_axes_[i]->is_running()) {
-//             double requested_displacement = msg->data[i];
-//             double last_displacement = last_displacements[i];
-//             double delta = requested_displacement - last_displacement;
-            
-//             // 限制变化率
-//             // if (std::abs(delta) > MAX_DELTA_PER_CYCLE) {
-//             //     RCLCPP_WARN(this->get_logger(), 
-//             //                 "轴%zu位移变化率过大屏蔽(%.6fmm/ms)，限制为%.6fmm/ms", 
-//             //                 i, std::abs(delta)/dt/1000, MAX_RATE_MM_PER_MS);
-                
-//             //     double limited_delta = (delta > 0) ? MAX_DELTA_PER_CYCLE : -MAX_DELTA_PER_CYCLE;
-//             //     requested_displacement = last_displacement + limited_delta;
-//             // }
-            
-//             handle_axis_command(i, requested_displacement);
-//             last_displacements[i] = requested_displacement;
-//         }
-//     }
-// }
 // 实现新的位移指令处理函数
 void EthercatNode::handle_displacement_command(const std_msgs::msg::String::SharedPtr msg) {  
     if (servo_axes_.empty()) {
@@ -603,9 +550,9 @@ void EthercatNode::initialize_business_logic() {
     // 初始化处理器(传入轴数量用于验证)
     size_t num_axes = servo_axes_.size();
     business_processor_->initialize(num_axes);
-    
-    // 设置固定目标层为2
-    business_processor_->set_target_layer(2);
+
+    // 设置固定目标层为1
+    business_processor_->set_target_layer(1);
 
     // 启用业务逻辑处理
     business_processor_->enable(); //disable

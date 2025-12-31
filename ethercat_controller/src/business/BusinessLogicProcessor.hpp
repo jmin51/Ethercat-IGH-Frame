@@ -8,9 +8,7 @@
 #include <functional>
 #include "io_interface.hpp"
 
-/**
- * @brief 命令类型定义
- */
+//命令类型定义
 enum class CommandType {
     POSITION,  // 位置控制
     JOG,       // 点动控制
@@ -18,10 +16,7 @@ enum class CommandType {
     STOP       // 停止命令
 };
 
-/**
- * @brief DI信号控制动作定义
- * 描述当DI信号触发时要执行的具体轴控制动作
- */
+// DI信号控制动作定义   描述当DI信号触发时要执行的具体轴控制动作
 struct ControlAction {
     CommandType type;           ///< 命令类型
     std::string axis_name;      ///< 控制的轴名称
@@ -31,9 +26,7 @@ struct ControlAction {
     std::string description;    ///< 动作描述
 };
 
-/**
- * @brief 入库流程状态
- */
+// 入库流程状态
 enum class WarehouseState {
     IDLE,               // 空闲状态
     WAIT_FOR_ENTRY,     // 等待入库
@@ -42,9 +35,16 @@ enum class WarehouseState {
     COMPLETED           // 完成
 };
 
-/**
- * @brief DI信号配置定义
- */
+// 出库流程状态
+enum class OutboundState {
+    IDLE,               // 空闲状态
+    WAIT_FOR_EXIT,      // 等待出库
+    LIFT_MOVING,        // 提升机运行
+    CONVEYOR_MOVING,    // 输送带运行
+    COMPLETED           // 完成
+};
+
+// DI信号配置定义
 struct DIConfig {
     std::string di_name;
     std::function<bool(const DI_Interface&)> getter;
@@ -56,10 +56,7 @@ struct DIConfig {
     WarehouseState current_state = WarehouseState::IDLE;
 };
 
-/**
- * @brief 轴控制命令
- * 业务逻辑处理器生成的待执行命令
- */
+// 轴控制命令 业务逻辑处理器生成的待执行命令
 struct AxisCommand {
     CommandType type;
     std::string axis_name;
@@ -68,9 +65,7 @@ struct AxisCommand {
     bool immediate;
 };
 
-/**
- * @brief 业务逻辑处理器 - 支持入库流程
- */
+// 业务逻辑处理器 - 支持入库流程
 class BusinessLogicProcessor {
 public:
     explicit BusinessLogicProcessor(rclcpp::Logger logger);
@@ -78,14 +73,10 @@ public:
     
     void initialize(size_t num_axes);
     
-    /**
-     * @brief 配置入库流程DI信号
-     */
+    //配置入库流程DI信号
     void configure_warehouse_process();
     
-    /**
-     * @brief 处理IO信号变化，生成入库控制命令
-     */
+    // 处理IO信号变化，生成入库控制命令
     void process_io_signals(const DI_Interface& di_signals);
     
     std::vector<AxisCommand> get_pending_commands();
@@ -100,29 +91,37 @@ public:
     void set_debounce_time(int ms) { debounce_time_ms_ = ms; }
     std::vector<std::string> get_configured_di_signals() const;
 
-    /**
-     * @brief 设置当前层号(用于入库流程)
-     */
+    // 设置当前层号(用于入库流程)
     void set_current_layer(uint8_t layer) { current_layer_ = layer; }
     uint8_t get_current_layer() const { return current_layer_; }
     void set_target_layer(uint8_t layer) { target_layer_ = layer; }
     uint8_t get_target_layer() const { return target_layer_; }
 
+    void start_warehouse_process(uint8_t target_layer); // 启动入库流程
+    void stop_warehouse_process();  // 停止入库流程
+    bool is_warehouse_running() const { return warehouse_state_ != WarehouseState::IDLE; }  // 检查是否在运行入库流程
+    void start_outbound_process(uint8_t source_layer); // 启动出库流程
+    void stop_outbound_process();  // 停止出库流程
+    bool is_outbound_running() const { return outbound_state_ != OutboundState::IDLE; }  // 检查是否在运行出库流程
+
 private:
     std::map<std::string, DIConfig> di_configs_;  ///< DI信号配置映射表
     std::vector<AxisCommand> pending_commands_;   ///< 待执行的轴控制命令队列
     
+    bool enabled_ = false;
+    bool initialized_ = false;
+    int debounce_time_ms_ = 50;
+    rclcpp::Logger logger_;
+
     // 入库流程状态
     WarehouseState warehouse_state_ = WarehouseState::IDLE;
     uint8_t current_layer_ = 1;
     uint8_t target_layer_ = 1;
     bool waiting_for_entry_ = false;
     bool waiting_for_exit_ = false;
-    
-    bool enabled_ = false;
-    bool initialized_ = false;
-    int debounce_time_ms_ = 50;
-    rclcpp::Logger logger_;
+    // 添加入库流程控制标志
+    bool warehouse_process_requested_ = false;
+    bool warehouse_process_stop_requested_ = false;
     
     // 内部处理函数
     void process_warehouse_logic(const DI_Interface& di_signals);
@@ -130,9 +129,7 @@ private:
     void add_command(const ControlAction& action);
     bool check_debounce(DIConfig& config, int64_t current_time);
     
-    /**
-     * @brief 检查入库条件
-     */
+    // 检查入库条件
     bool check_entry_condition(const DI_Interface& di);
     bool check_exit_condition(const DI_Interface& di);
     bool check_completion_condition(const DI_Interface& di);
@@ -143,6 +140,25 @@ private:
     bool delay_condition_triggered_ = false;  // 新增：标记条件是否已触发
     static constexpr int DELAY_BEFORE_STOP_MS = 5000;  // 5秒延迟
     static constexpr int DELAY_COUNTER_MAX = DELAY_BEFORE_STOP_MS / 100;  // 每100ms计数一次
+    
+    // 出库流程状态
+    OutboundState outbound_state_ = OutboundState::IDLE;
+    uint8_t source_layer_ = 1;  // 出库源层号
+    
+    // 出库流程控制标志
+    bool outbound_process_requested_ = false;
+    bool outbound_process_stop_requested_ = false;
+    
+    // 内部处理函数
+    void process_outbound_logic(const DI_Interface& di_signals);
+    bool check_outbound_condition(const DI_Interface& di);
+    bool check_outbound_completion_condition(const DI_Interface& di);
+    
+    // 出库延迟停止相关变量
+    int outbound_delay_counter_ = 0;
+    bool outbound_delay_started_ = false;
+    bool outbound_delay_condition_triggered_ = false;
+
 };
 
 #endif // BUSINESS_LOGIC_PROCESSOR_HPP

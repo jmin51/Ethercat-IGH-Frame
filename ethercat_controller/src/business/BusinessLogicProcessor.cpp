@@ -32,8 +32,28 @@ void BusinessLogicProcessor::process_io_signals(const DI_Interface& di_signals) 
     
     // 处理入库业务流程
     process_warehouse_logic(di_signals);
+    // 处理出库业务流程
+    process_outbound_logic(di_signals);
     
     RCLCPP_DEBUG(logger_, "本次IO信号处理生成 %zu 个控制命令", pending_commands_.size());
+}
+
+void BusinessLogicProcessor::start_warehouse_process(uint8_t target_layer) {
+    if (warehouse_state_ != WarehouseState::IDLE) {
+        RCLCPP_WARN(logger_, "入库流程已在运行中，无法重复启动");
+        return;
+    }
+    
+    target_layer_ = target_layer;
+    warehouse_process_requested_ = true;
+    warehouse_process_stop_requested_ = false;
+    
+    RCLCPP_INFO(logger_, "收到入库流程启动请求，目标层: %d", target_layer_);
+}
+
+void BusinessLogicProcessor::stop_warehouse_process() {
+    warehouse_process_stop_requested_ = true;
+    RCLCPP_INFO(logger_, "收到入库流程停止请求");
 }
 
 void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_signals) {
@@ -41,9 +61,6 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
     bool buffer_out = di_signals.buffer_out_position; // DI15
     bool conveyor_in = di_signals.conveyor_in_position;  // DI14
     bool conveyor_out = di_signals.conveyor_out_position; // DI15
-
-    // 固定目标层为2
-    target_layer_ = 2;
     
     RCLCPP_DEBUG(logger_, "入库流程状态: %d, DI14: %s, DI15: %s, 当前层: %d, 目标层: %d",
                 static_cast<int>(warehouse_state_),
@@ -51,11 +68,22 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 conveyor_out ? "到位" : "未到位",
                 current_layer_, target_layer_);
     
+    // 处理停止请求
+    if (warehouse_process_stop_requested_) {
+        warehouse_state_ = WarehouseState::IDLE;
+        warehouse_process_stop_requested_ = false;
+        warehouse_process_requested_ = false;
+        RCLCPP_INFO(logger_, "入库流程已停止");
+        return;
+    }
+
     switch (warehouse_state_) {
         case WarehouseState::IDLE:
-            if (!buffer_in && !buffer_out && !conveyor_in && !conveyor_out) {
+            // 等待话题启动信号
+            if (warehouse_process_requested_ && !buffer_in && !buffer_out && !conveyor_in && !conveyor_out) {
                 warehouse_state_ = WarehouseState::WAIT_FOR_ENTRY;
-                RCLCPP_INFO(logger_, "进入等待入库状态");
+                warehouse_process_requested_ = false; // 重置请求标志
+                RCLCPP_INFO(logger_, "入库流程启动，进入等待入库状态，目标层: %d", target_layer_);
             }
             break;
             
@@ -92,7 +120,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
             
         case WarehouseState::CONVEYOR_MOVING:
             // 检测出料到位
-            if (conveyor_in && buffer_out) {
+            if (buffer_out) {
                 write_single_do_signal(812, true); // 激活DO13皮带正转
                 RCLCPP_INFO(logger_, "检测到运行至:缓存架出料和接驳台入料位，等待提升机运行");
             }
@@ -117,8 +145,8 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 ControlAction target_layer_action;
                 target_layer_action.type = CommandType::LAYER;
                 target_layer_action.axis_name = "axis5";
-                target_layer_action.command_value = "2";  // 固定为第2层
-                target_layer_action.description = "移动到目标层2";
+                target_layer_action.command_value = std::to_string(target_layer_);
+                target_layer_action.description = "移动到目标层" + std::to_string(target_layer_);
                 add_command(target_layer_action);
                 
                 write_single_do_signal(812, false); // 停止DO13皮带正转
@@ -146,7 +174,8 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 axis2_action2.command_value = "reverse";
                 axis2_action2.description = "启动轴2_2反转";
                 add_command(axis2_action2);
-                
+                write_single_do_signal(811, true); // 激活DO信号
+
                 // 检测停止条件（只需检测一次）
                 if (!delay_started_ && !delay_condition_triggered_ && conveyor_in && !conveyor_out) {
                     delay_condition_triggered_ = true;  // 标记条件已触发
@@ -179,7 +208,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                         stop_action2.command_value = "stop";
                         stop_action2.description = "轴2_2停止";
                         add_command(stop_action2);
-                        
+                        write_single_do_signal(811, false); 
                         RCLCPP_INFO(logger_, "延迟结束，停止轴2并进入完成状态");
                     } else {
                         // 延迟中，每5秒记录一次剩余时间
@@ -213,6 +242,202 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
             }
             break;
     }
+}
+
+void BusinessLogicProcessor::start_outbound_process(uint8_t source_layer) {
+    if (outbound_state_ != OutboundState::IDLE) {
+        RCLCPP_WARN(logger_, "出库流程已在运行中，无法重复启动");
+        return;
+    }
+    
+    source_layer_ = source_layer;
+    outbound_process_requested_ = true;
+    outbound_process_stop_requested_ = false;
+    
+    RCLCPP_INFO(logger_, "收到出库流程启动请求，源层: %d", source_layer_);
+}
+
+void BusinessLogicProcessor::stop_outbound_process() {
+    outbound_process_stop_requested_ = true;
+    RCLCPP_INFO(logger_, "收到出库流程停止请求");
+}
+
+void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signals) {
+    bool buffer_in = di_signals.buffer_in_position;  // DI12
+    bool buffer_out = di_signals.buffer_out_position; // DI13
+    bool conveyor_in = di_signals.conveyor_in_position;  // DI14
+    bool conveyor_out = di_signals.conveyor_out_position; // DI15
+    
+    RCLCPP_DEBUG(logger_, "出库流程状态: %d, DI12: %s, DI13: %s, DI14: %s, DI15: %s, 源层: %d",
+                static_cast<int>(outbound_state_),
+                buffer_in ? "到位" : "未到位",
+                buffer_out ? "到位" : "未到位", 
+                conveyor_in ? "到位" : "未到位",
+                conveyor_out ? "到位" : "未到位",
+                source_layer_);
+    
+    // 处理停止请求
+    if (outbound_process_stop_requested_) {
+        outbound_state_ = OutboundState::IDLE;
+        outbound_process_stop_requested_ = false;
+        outbound_process_requested_ = false;
+        RCLCPP_INFO(logger_, "出库流程已停止");
+        return;
+    }
+
+    switch (outbound_state_) {
+        case OutboundState::IDLE:{
+            // 等待话题启动信号
+            if (outbound_process_requested_ && check_outbound_condition(di_signals)) {
+                outbound_state_ = OutboundState::WAIT_FOR_EXIT;
+                outbound_process_requested_ = false;
+                RCLCPP_INFO(logger_, "出库流程启动，进入等待出库状态，源层: %d", source_layer_);
+            }
+            break;
+        }    
+        case OutboundState::WAIT_FOR_EXIT:{
+            RCLCPP_INFO(logger_, "检测到出库条件，开始提升机运行");
+            
+            // 移动到源层
+            ControlAction init_layer_action;
+            init_layer_action.type = CommandType::LAYER;
+            init_layer_action.axis_name = "axis5";
+            init_layer_action.command_value = std::to_string(source_layer_);
+            init_layer_action.description = "移动到源层" + std::to_string(source_layer_);
+            add_command(init_layer_action);
+
+            // 检测提升机到达源层
+            if (current_layer_ == source_layer_) {
+                RCLCPP_INFO(logger_, "提升机已到达第%d层", source_layer_);
+                
+                // 启动轴2正转（出库方向）
+                ControlAction axis2_action;
+                axis2_action.type = CommandType::JOG;
+                axis2_action.axis_name = "axis2_1";
+                axis2_action.command_value = "forward";
+                axis2_action.description = "启动轴2_1正转（出库）";
+                add_command(axis2_action);
+                
+                ControlAction axis2_action2;
+                axis2_action2.type = CommandType::JOG;
+                axis2_action2.axis_name = "axis2_2";
+                axis2_action2.command_value = "forward";
+                axis2_action2.description = "启动轴2_2正转（出库）";
+                add_command(axis2_action2);
+                write_single_do_signal(811, true); // 激活DO信号
+                
+                outbound_state_ = OutboundState::LIFT_MOVING;
+            }
+            break;
+        }    
+        case OutboundState::LIFT_MOVING:{
+            write_single_do_signal(812, true); // 激活DO13皮带正转
+            // 检测货物到达接驳台
+            if (conveyor_in) {
+                 // 检测停止条件
+                if (!outbound_delay_started_ && !outbound_delay_condition_triggered_ ) {
+                    outbound_delay_condition_triggered_ = true;
+                    outbound_delay_started_ = true;
+                    outbound_delay_counter_ = 0;
+                    RCLCPP_INFO(logger_, "检测到货物到达接驳台出料位，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
+                }
+            }
+            
+            // 处理延迟逻辑
+            if (outbound_delay_started_) {
+                outbound_delay_counter_++;
+                
+                if (outbound_delay_counter_ >= DELAY_COUNTER_MAX) {
+                    // 延迟结束，执行停止操作
+                    outbound_delay_started_ = false;
+                    outbound_delay_condition_triggered_ = false;
+                    
+                    // 停止轴2
+                    ControlAction stop_action;
+                    stop_action.type = CommandType::JOG;
+                    stop_action.axis_name = "axis2_1";
+                    stop_action.command_value = "stop";
+                    stop_action.description = "停止轴2_1";
+                    add_command(stop_action);
+                    
+                    ControlAction stop_action2;
+                    stop_action2.type = CommandType::JOG;
+                    stop_action2.axis_name = "axis2_2";
+                    stop_action2.command_value = "stop";
+                    stop_action2.description = "停止轴2_2";
+                    add_command(stop_action2);
+                    write_single_do_signal(811, false); // 停止DO信号
+                    
+                    outbound_state_ = OutboundState::CONVEYOR_MOVING;
+                    RCLCPP_INFO(logger_, "延迟结束，停止输送带并进入完成状态");
+                }
+            }
+            break;
+        }    
+        case OutboundState::CONVEYOR_MOVING:{
+            // 检测货物到达缓存架 先返回第一层
+            ControlAction conveyor_layer_action;
+            conveyor_layer_action.type = CommandType::LAYER;
+            conveyor_layer_action.axis_name = "axis5";
+            conveyor_layer_action.command_value = "1";  // 固定为第1层
+            conveyor_layer_action.description = "移动到第1层等待";
+            add_command(conveyor_layer_action);
+            if (conveyor_out) {
+                RCLCPP_INFO(logger_, "检测到货物到达缓存架出料位");
+                write_single_do_signal(812, false);
+                if (!outbound_delay_started_ && !outbound_delay_condition_triggered_ ) {
+                    outbound_delay_condition_triggered_ = true;
+                    outbound_delay_started_ = true;
+                    outbound_delay_counter_ = 0;
+                    RCLCPP_INFO(logger_, "检测到出库停止条件，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
+                }
+            }
+            
+            // 处理延迟逻辑
+            if (outbound_delay_started_) {
+                outbound_delay_counter_++;
+
+                if (outbound_delay_counter_ >= DELAY_COUNTER_MAX) {
+                    // 延迟结束，执行停止操作
+                    outbound_delay_started_ = false;
+                    outbound_delay_condition_triggered_ = false;
+                    write_single_do_signal(812, true);
+
+                    outbound_state_ = OutboundState::COMPLETED;
+                    RCLCPP_INFO(logger_, "延迟结束，停止输送带并进入完成状态");
+                }
+            }
+            break;
+        }    
+        case OutboundState::COMPLETED:{
+            // 回到第1层
+            ControlAction completed_layer_action;
+            completed_layer_action.type = CommandType::LAYER;
+            completed_layer_action.axis_name = "axis5";
+            completed_layer_action.command_value = "1";
+            completed_layer_action.description = "出库流程完成，回到第1层";
+            add_command(completed_layer_action);
+            
+            if (current_layer_ == 1 && check_outbound_completion_condition(di_signals)) {
+                outbound_state_ = OutboundState::IDLE;
+                write_single_do_signal(812, false);
+                RCLCPP_INFO(logger_, "出库流程完成，回到初始状态");
+            }
+            break;
+        }
+    }
+}
+
+bool BusinessLogicProcessor::check_outbound_condition(const DI_Interface& di) {
+    // 出库启动条件：所有传感器都未到位
+    return !di.buffer_in_position && !di.buffer_out_position && 
+           !di.conveyor_in_position && !di.conveyor_out_position;
+}
+
+bool BusinessLogicProcessor::check_outbound_completion_condition(const DI_Interface& di) {
+    // 出库完成条件：回到初始状态
+    return !di.buffer_in_position && !di.buffer_out_position && 
+           !di.conveyor_in_position && !di.conveyor_out_position;
 }
 
 void BusinessLogicProcessor::add_command(const ControlAction& action) {

@@ -46,9 +46,9 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     target_layer_ = layer;
     double target_height = calculate_layer_height(layer);
     
-    RCLCPP_INFO(node_->get_logger(), 
-               "执行层指令: %d -> %d, 目标高度: %.2fmm", 
-               current_layer_, target_layer_, target_height);
+    // RCLCPP_INFO(node_->get_logger(), 
+    //            "执行层指令: %d -> %d, 目标高度: %.2fmm", 
+    //            current_layer_, target_layer_, target_height);
     
     is_moving_ = true;
     
@@ -57,7 +57,7 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     
     // 注意：实际运动完成检测需要在状态机中处理
     // 这里假设运动立即完成（实际需要等待轴到达目标位置）
-    RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
+    // RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
 }
 
 bool LayerCommandProcessor::validate_layer(uint8_t layer) {

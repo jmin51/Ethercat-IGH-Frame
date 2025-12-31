@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Float64MultiArray
+from std_msgs.msg import String, Float64MultiArray, UInt8, Empty
 import threading
 import select
 import sys
@@ -17,6 +17,12 @@ class ControlCommander(Node):
         self.control_pub = self.create_publisher(String, '/control_command', 10)
         self.displacement_pub = self.create_publisher(String, '/displacement_command', 10)  # 改为String类型
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
+        # 新增仓库控制发布器
+        self.warehouse_start_pub = self.create_publisher(UInt8, '/warehouse_start', 10)
+        self.warehouse_stop_pub = self.create_publisher(Empty, '/warehouse_stop', 10)
+        # 新增出库控制发布器
+        self.outbound_start_pub = self.create_publisher(UInt8, '/outbound_start', 10)
+        self.outbound_stop_pub = self.create_publisher(Empty, '/outbound_stop', 10)
         
         # 设置非阻塞输入
         self.old_settings = termios.tcgetattr(sys.stdin)
@@ -87,6 +93,11 @@ class ControlCommander(Node):
         print("  8: 轴5移动到10.0mm位置")
         print("  z: 轴5正向移动10.0mm")
         print("  c: 轴5反向移动10.0mm")
+        print("仓库控制:")
+        print("  j: 启动入库 (发布/warehouse_start data=2)")
+        print("  k: 停止入库 (发布/warehouse_stop)")
+        print("  n: 启动出库 (发布/outbound_start data=2)")
+        print("  m: 停止出库 (发布/outbound_stop)")
         print("其他控制:")
         print("  0: 停止所有轴")
         print("  t: 返回主菜单")
@@ -113,6 +124,32 @@ class ControlCommander(Node):
         msg.data = command
         self.jog_pub.publish(msg)
         self.get_logger().info(f'已发送点动命令: {command}')
+    
+    def send_warehouse_start(self):
+        """发送入库启动命令"""
+        msg = UInt8()
+        msg.data = 2
+        self.warehouse_start_pub.publish(msg)
+        self.get_logger().info('已发送入库启动命令: data=2')
+    
+    def send_warehouse_stop(self):
+        """发送入库停止命令"""
+        msg = Empty()
+        self.warehouse_stop_pub.publish(msg)
+        self.get_logger().info('已发送入库停止命令')
+    
+    def send_outbound_start(self):
+        """发送出库启动命令"""
+        msg = UInt8()
+        msg.data = 2
+        self.outbound_start_pub.publish(msg)
+        self.get_logger().info('已发送出库启动命令: data=2')
+    
+    def send_outbound_stop(self):
+        """发送出库停止命令"""
+        msg = Empty()
+        self.outbound_stop_pub.publish(msg)
+        self.get_logger().info('已发送出库停止命令')
     
     def stop_all_jog(self):
         """停止所有轴的点动"""
@@ -249,6 +286,23 @@ class ControlCommander(Node):
             self.axis5_position -= 10.0
             self.send_displacement_command('axis5', self.axis5_position)
             self.print_auto_menu()
+        
+        # 仓库控制命令
+        elif key == 'j':  # 启动入库
+            self.send_warehouse_start()
+            print("已发送入库启动命令")
+        
+        elif key == 'k':  # 停止入库
+            self.send_warehouse_stop()
+            print("已发送入库停止命令")
+        
+        elif key == 'n':  # 启动出库
+            self.send_outbound_start()
+            print("已发送出库启动命令")
+        
+        elif key == 'm':  # 停止出库
+            self.send_outbound_stop()
+            print("已发送出库停止命令")
         
         else:
             print(f"自动模式下未知命令: {key}")

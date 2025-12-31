@@ -7,6 +7,7 @@
 #include "BusinessLogicProcessor.hpp"  // 添加这行
 #include "LayerCommandProcessor.hpp" 
 #include <std_msgs/msg/u_int8.hpp> 
+#include <std_msgs/msg/empty.hpp>  // 添加这行，用于Empty消息类型
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -87,6 +88,12 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
     // 添加点动指令订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
+    // 添加入库流程话题订阅器
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr warehouse_start_sub_;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr warehouse_stop_sub_;
+    // 添加出库流程话题订阅器
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr outbound_start_sub_;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr outbound_stop_sub_;
 
     std::atomic<bool> node_shutting_down_;
     
@@ -110,6 +117,57 @@ private:
     void initialize_business_logic();
     void initialize_layer_processor();
     void monitor_di_changes(const DI_Interface& current_di);
+    // 添加入库处理函数
+    void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg) {
+        if (node_shutting_down_.load() || !rclcpp::ok()) {
+            return;
+        }
+        
+        uint8_t target_layer = msg->data;
+        RCLCPP_INFO(this->get_logger(), "收到入库启动命令，目标层: %d", target_layer);
+        
+        if (business_processor_) {
+            business_processor_->start_warehouse_process(target_layer);
+        }
+    }
+    
+    void handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg) {
+        if (node_shutting_down_.load() || !rclcpp::ok()) {
+            return;
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "收到入库停止命令");
+        
+        if (business_processor_) {
+            business_processor_->stop_warehouse_process();
+        }
+    }
+
+    // 添加出库处理函数
+    void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg) {
+        if (node_shutting_down_.load() || !rclcpp::ok()) {
+            return;
+        }
+        
+        uint8_t source_layer = msg->data;
+        RCLCPP_INFO(this->get_logger(), "收到出库启动命令，源层: %d", source_layer);
+        
+        if (business_processor_) {
+            business_processor_->start_outbound_process(source_layer);
+        }
+    }
+
+    void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg) {
+        if (node_shutting_down_.load() || !rclcpp::ok()) {
+            return;
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "收到出库停止命令");
+        
+        if (business_processor_) {
+            business_processor_->stop_outbound_process();
+        }
+    }
 };
 
 // 全局变量声明
