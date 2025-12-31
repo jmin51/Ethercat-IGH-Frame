@@ -2,6 +2,7 @@
 #include <chrono>
 #include <algorithm>
 
+#define DELAY_BEFORE_STOP_MS 30000  // 30秒延迟
 using namespace std::chrono;
 
 BusinessLogicProcessor::BusinessLogicProcessor(rclcpp::Logger logger) 
@@ -92,71 +93,121 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
         case WarehouseState::CONVEYOR_MOVING:
             // 检测出料到位
             if (conveyor_in && buffer_out) {
-                // warehouse_state_ = WarehouseState::LIFT_MOVING;
-                RCLCPP_INFO(logger_, "检测到出料到位，开始提升机运行");
+                write_single_do_signal(812, true); // 激活DO13皮带正转
+                RCLCPP_INFO(logger_, "检测到运行至:缓存架出料和接驳台入料位，等待提升机运行");
             }
-                // 继续输送直到重新检测到入库条件
-                if (conveyor_out) {
-                    // 停止输送带
-                    ControlAction stop_action;
-                    stop_action.type = CommandType::JOG;
-                    stop_action.axis_name = "axis1_1";
-                    stop_action.command_value = "stop";
-                    stop_action.description = "停止轴1_1";
-                    add_command(stop_action);
-                    
-                    ControlAction stop_action2;
-                    stop_action2.type = CommandType::JOG;
-                    stop_action2.axis_name = "axis1_2";
-                    stop_action2.command_value = "stop";
-                    stop_action2.description = "停止轴1_2";
-                    add_command(stop_action2);
-                    
-                    // 移动到目标层（固定为2层）
-                    ControlAction target_layer_action;
-                    target_layer_action.type = CommandType::LAYER;
-                    target_layer_action.axis_name = "axis5";
-                    target_layer_action.command_value = "2";  // 固定为第2层
-                    target_layer_action.description = "移动到目标层2";
-                    add_command(target_layer_action);
-                    
-                    // 启动轴2反转
-                    ControlAction axis2_action;
-                    axis2_action.type = CommandType::JOG;
-                    axis2_action.axis_name = "axis2_1";
-                    axis2_action.command_value = "reverse";
-                    axis2_action.description = "启动轴2_1反转";
-                    add_command(axis2_action);
-                    
-                    ControlAction axis2_action2;
-                    axis2_action2.type = CommandType::JOG;
-                    axis2_action2.axis_name = "axis2_2";
-                    axis2_action2.command_value = "reverse";
-                    axis2_action2.description = "启动轴2_2反转";
-                    add_command(axis2_action2);
-                    warehouse_state_ = WarehouseState::LIFT_MOVING;
-                }
+            // 继续输送直到重新检测到入库条件
+            if (conveyor_out) {
+                // 停止输送带
+                ControlAction stop_action;
+                stop_action.type = CommandType::JOG;
+                stop_action.axis_name = "axis1_1";
+                stop_action.command_value = "stop";
+                stop_action.description = "停止轴1_1";
+                add_command(stop_action);
+                
+                ControlAction stop_action2;
+                stop_action2.type = CommandType::JOG;
+                stop_action2.axis_name = "axis1_2";
+                stop_action2.command_value = "stop";
+                stop_action2.description = "停止轴1_2";
+                add_command(stop_action2);
+                
+                // 移动到目标层（固定为2层）
+                ControlAction target_layer_action;
+                target_layer_action.type = CommandType::LAYER;
+                target_layer_action.axis_name = "axis5";
+                target_layer_action.command_value = "2";  // 固定为第2层
+                target_layer_action.description = "移动到目标层2";
+                add_command(target_layer_action);
+                
+                write_single_do_signal(812, false); // 停止DO13皮带正转
+                warehouse_state_ = WarehouseState::LIFT_MOVING;
+            }
 
             break;
             
         case WarehouseState::LIFT_MOVING:
             // 检测入库传感器未到位
-            if (conveyor_in) {
-                warehouse_state_ = WarehouseState::COMPLETED;
-                RCLCPP_INFO(logger_, "入库流程完成，回到第1层");
+            if (current_layer_ == target_layer_) {
+                RCLCPP_INFO(logger_, "接驳台已到达第%d层", target_layer_);
                 
-                // 回到第1层（固定）
-                ControlAction return_action;
-                return_action.type = CommandType::LAYER;
-                return_action.axis_name = "axis5";
-                return_action.command_value = "1";  // 固定为第1层
-                return_action.description = "流程完成，回到第1层";
-                add_command(return_action);
+                // 启动轴2反转
+                ControlAction axis2_action;
+                axis2_action.type = CommandType::JOG;
+                axis2_action.axis_name = "axis2_1";
+                axis2_action.command_value = "reverse";
+                axis2_action.description = "启动轴2_1反转";
+                add_command(axis2_action);
+                
+                ControlAction axis2_action2;
+                axis2_action2.type = CommandType::JOG;
+                axis2_action2.axis_name = "axis2_2";
+                axis2_action2.command_value = "reverse";
+                axis2_action2.description = "启动轴2_2反转";
+                add_command(axis2_action2);
+                
+                // 检测停止条件（只需检测一次）
+                if (!delay_started_ && !delay_condition_triggered_ && conveyor_in && !conveyor_out) {
+                    delay_condition_triggered_ = true;  // 标记条件已触发
+                    delay_started_ = true;             // 开始延迟
+                    delay_counter_ = 0;                // 重置计数器
+                    RCLCPP_INFO(logger_, "检测到停止条件，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
+                }
+                
+                // 处理延迟逻辑
+                if (delay_started_) {
+                    delay_counter_++;
+                    
+                    if (delay_counter_ >= DELAY_COUNTER_MAX) {
+                        // 延迟结束，执行停止操作
+                        warehouse_state_ = WarehouseState::COMPLETED;
+                        delay_started_ = false;
+                        delay_condition_triggered_ = false;
+                        
+                        // 停止轴2
+                        ControlAction stop_action;
+                        stop_action.type = CommandType::JOG;
+                        stop_action.axis_name = "axis2_1";
+                        stop_action.command_value = "stop";
+                        stop_action.description = "轴2_1停止";
+                        add_command(stop_action);
+                        
+                        ControlAction stop_action2;
+                        stop_action2.type = CommandType::JOG;
+                        stop_action2.axis_name = "axis2_2";
+                        stop_action2.command_value = "stop";
+                        stop_action2.description = "轴2_2停止";
+                        add_command(stop_action2);
+                        
+                        RCLCPP_INFO(logger_, "延迟结束，停止轴2并进入完成状态");
+                    } else {
+                        // 延迟中，每5秒记录一次剩余时间
+                        if (delay_counter_ % 50 == 0) { // 每5秒记录一次
+                            int remaining_seconds = DELAY_BEFORE_STOP_MS/1000 - delay_counter_/10;
+                            RCLCPP_INFO(logger_, "延迟剩余时间: %d秒", remaining_seconds);
+                        }
+                    }
+                }
+            } else {
+                // 如果层条件不满足，重置延迟状态
+                if (delay_started_) {
+                    delay_started_ = false;
+                    delay_condition_triggered_ = false;
+                    RCLCPP_DEBUG(logger_, "层条件不满足，重置延迟状态");
+                }
             }
             break;
             
         case WarehouseState::COMPLETED:
-            if (!buffer_in && !buffer_out && !conveyor_in && !conveyor_out) {
+            // 回到第1层（固定） 看下放这还是放下面
+            ControlAction return_action;
+            return_action.type = CommandType::LAYER;
+            return_action.axis_name = "axis5";
+            return_action.command_value = "1";  // 固定为第1层
+            return_action.description = "入库流程完成,回到第1层";
+            add_command(return_action);
+            if (!buffer_in && !buffer_out && !conveyor_in && !conveyor_out && (current_layer_ == 1)) {
                 warehouse_state_ = WarehouseState::IDLE;
                 RCLCPP_INFO(logger_, "回到初始状态，等待下一次入库");
             }

@@ -446,7 +446,10 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     if (displacement_updated_) {
         displacement_updated_ = false;
         target_reached_ = false;
-
+        {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = false; // 新运动开始，清除标志
+        }
         // 绝对位置模式：直接计算目标脉冲数
         target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
         printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d, 当前: %d)\n", 
@@ -468,14 +471,14 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     if (target_pulses_ != joint_position_) {
         gradual_approach(target_pulses_, domain1_pd);
         
-        // 检查是否到达目标
-        const int32_t TOLERANCE = 100;
-        if (abs(joint_position_ - target_pulses_) <= TOLERANCE) {
-            if (!target_reached_) {
-                printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
-                target_reached_ = true;
-            }
-        }
+        // // 检查是否到达目标
+        // const int32_t TOLERANCE = 100;
+        // if (abs(joint_position_ - target_pulses_) <= TOLERANCE) {
+        //     if (!target_reached_) {
+        //         printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
+        //         target_reached_ = true;
+        //     }
+        // }
     }
     // if (displacement_updated_) {
     //     displacement_updated_ = false;

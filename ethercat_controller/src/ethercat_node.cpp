@@ -139,6 +139,8 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis2_2));
 
     // 可以继续添加其他轴
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 9.0));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
@@ -690,6 +692,34 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
         
         // 清空已处理的命令
         business_processor_->clear_pending_commands();
+    }
+    // 关键：每次处理IO信号时，都检查层运动是否完成
+    if (layer_processor_) {
+        // 查找axis5轴
+        std::shared_ptr<ServoAxisBase> axis5 = nullptr;
+        for (auto& axis : servo_axes_) {
+            if (axis->get_name() == "axis5") {
+                axis5 = axis;
+                break;
+            }
+        }
+        
+        if (axis5) {
+            bool motion_completed = layer_processor_->check_motion_completion(axis5);
+            if (motion_completed) {
+                RCLCPP_DEBUG(this->get_logger(), "检测到axis5运动完成");
+                
+                // 更新业务逻辑的当前层状态
+                if (business_processor_) {
+                    business_processor_->set_current_layer(layer_processor_->get_current_layer());
+                    
+                    RCLCPP_INFO(this->get_logger(), 
+                              "业务逻辑层状态更新: 当前层=%d, 目标层=%d",
+                              business_processor_->get_current_layer(),
+                              business_processor_->get_target_layer());
+                }
+            }
+        }
     }
     // 发布IO状态
     publish_io_status();

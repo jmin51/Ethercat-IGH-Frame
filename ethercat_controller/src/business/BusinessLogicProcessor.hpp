@@ -136,6 +136,13 @@ private:
     bool check_entry_condition(const DI_Interface& di);
     bool check_exit_condition(const DI_Interface& di);
     bool check_completion_condition(const DI_Interface& di);
+
+    // 延迟停止相关变量
+    int delay_counter_ = 0;
+    bool delay_started_ = false;
+    bool delay_condition_triggered_ = false;  // 新增：标记条件是否已触发
+    static constexpr int DELAY_BEFORE_STOP_MS = 5000;  // 5秒延迟
+    static constexpr int DELAY_COUNTER_MAX = DELAY_BEFORE_STOP_MS / 100;  // 每100ms计数一次
 };
 
 #endif // BUSINESS_LOGIC_PROCESSOR_HPP

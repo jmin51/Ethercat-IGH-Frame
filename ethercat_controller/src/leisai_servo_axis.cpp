@@ -408,7 +408,7 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
         
         // 基于速度的匀速移动（单位：脉冲/周期）
         if (abs(error) > TOLERANCE) {
-            const int32_t VELOCITY = 150; // 速度值，可根据需要调整
+            const int32_t VELOCITY = 500; // 速度值，可根据需要调整
             int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
             
             // 如果剩余距离小于步长，直接到达目标

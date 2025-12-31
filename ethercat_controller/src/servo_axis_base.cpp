@@ -200,3 +200,43 @@ void ServoAxisBase::check_system_initialization() {
         std::cout << "轴 " << axis_name_ << " 回零完成，系统可初始化" << std::endl;
     }
 }
+
+// 在 ServoAxisBase.cpp 中实现
+bool ServoAxisBase::check_target_reached_flag() {
+    std::lock_guard<std::mutex> lock(flag_mutex_);
+    if (target_reached_flag_) {
+        target_reached_flag_ = false; // 读取后清除标志
+        return true;
+    }
+    return false;
+}
+
+bool ServoAxisBase::is_target_reached() const {
+    std::lock_guard<std::mutex> lock(flag_mutex_);
+    return target_reached_flag_;
+}
+
+// 在逐步逼近函数中设置标志位
+void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
+    const int32_t TOLERANCE = 50;
+    int32_t error = target_pulses - joint_position_;
+    
+    if (abs(error) <= TOLERANCE) {
+        if (!target_reached_) {
+            // 第一次到达目标位置
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = true;
+            target_reached_ = true;
+            printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
+        }
+        joint_position_ = target_pulses; // 精确对齐
+    } else {
+        const int32_t MAX_STEP = 30;
+        int32_t step = (abs(error) > MAX_STEP) ? 
+                      ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+        joint_position_ += step;
+        target_reached_ = false; // 离开目标位置
+    }
+    
+    EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+}

@@ -90,6 +90,8 @@ public:
     }
     // 最新移动从protected
     virtual int32_t displacement_to_pulses(double displacement_mm);
+    bool check_target_reached_flag();   // 检查目标到达标志（一次性读取，读取后自动清除）
+    bool is_target_reached() const;     // 检查是否到达目标位置（持续状态）
 
 protected:
     // 保护成员变量 - 子类可以访问
@@ -147,23 +149,28 @@ protected:
     bool jog_reverse_requested_; // 反转请求
     bool jog_stop_requested_;    // 停止请求
     
+    // 在保护成员变量中添加
+    std::atomic<bool> target_reached_flag_{false};
+    mutable std::mutex flag_mutex_;
     // 速度控制参数
-    const double DEFAULT_JOG_SPEED = 10.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
+    const double DEFAULT_JOG_SPEED = 20.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
+											//	现在是每秒20000	对应两圈，一分?120rpm
 
     // 新增逐步逼近相关变量
     int32_t target_offset_;           // 目标偏移量
     int direction_flag_;              // 0: 无方向 1: 正转 -1: 反转
     int32_t new_target_;              // 新目标位置
     
-    void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
-        const int32_t MAX_STEP = 30; // 最大步进脉冲数
-        int32_t error = target_pulses - joint_position_;
-        int32_t step = (abs(error) > MAX_STEP) ? 
-                      ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
-        // printf("轴 %s 在运动中!\n", axis_name_.c_str());
-        joint_position_ += step;
-        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    }
+    void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd);
+    // {
+    //     const int32_t MAX_STEP = 30; // 最大步进脉冲数
+    //     int32_t error = target_pulses - joint_position_;
+    //     int32_t step = (abs(error) > MAX_STEP) ? 
+    //                   ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+    //     // printf("轴 %s 在运动中!\n", axis_name_.c_str());
+    //     joint_position_ += step;
+    //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+    // }
 };
 
 #endif // SERVO_AXIS_BASE_HPP

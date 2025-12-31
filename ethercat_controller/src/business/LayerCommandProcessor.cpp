@@ -39,8 +39,8 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     
     if (is_moving_) {
         RCLCPP_WARN(node_->get_logger(), 
-                   "轴正在运动中，忽略层指令: %d -> %d", current_layer_, layer);
-        return;
+                   "轴正在运动中，覆盖层指令: %d -> %d", current_layer_, layer);
+        // 不返回，继续执行新指令 return;
     }
     
     target_layer_ = layer;
@@ -53,13 +53,10 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     is_moving_ = true;
     
     // 发布位移指令
-    publish_displacement_command(target_height);
+    publish_displacement_command(target_height);    // 位置要提前
     
     // 注意：实际运动完成检测需要在状态机中处理
     // 这里假设运动立即完成（实际需要等待轴到达目标位置）
-    current_layer_ = target_layer_;
-    is_moving_ = false;
-    
     RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
 }
 
@@ -130,4 +127,23 @@ void LayerCommandProcessor::set_motion_parameters(double speed_mm_per_s, double 
     RCLCPP_INFO(node_->get_logger(), 
                "更新运动参数: 速度=%.1fmm/s, 加速度=%.1fmm/s²", 
                motion_speed_, motion_acceleration_);
+}
+
+bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoAxisBase>& axis5) {
+    if (!is_moving_) {
+        return false; // 没有运动在进行
+    }
+    
+    // 检查标志位
+    if (axis5 && axis5->check_target_reached_flag()) {
+        // 运动完成
+        current_layer_ = target_layer_;
+        is_moving_ = false;
+        
+        RCLCPP_INFO(node_->get_logger(), 
+                   "层指令执行完成: 到达第%d层", current_layer_);
+        return true;
+    }
+    
+    return false;
 }

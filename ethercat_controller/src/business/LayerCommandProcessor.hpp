@@ -8,6 +8,7 @@
 #include <map>
 #include <atomic>
 #include <memory>
+#include "servo_axis_base.hpp"  // 添加这行
 
 /**
  * @brief 层指令处理器
@@ -61,6 +62,7 @@ public:
      * @param acceleration_mm_per_s2 加速度(mm/s²)
      */
     void set_motion_parameters(double speed_mm_per_s, double acceleration_mm_per_s2);
+    bool check_motion_completion(const std::shared_ptr<ServoAxisBase>& axis5);  // 检查运动是否完成（基于axis5的标志位）
 
 private:
     rclcpp::Node* node_;
