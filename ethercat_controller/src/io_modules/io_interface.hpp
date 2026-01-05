@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>  // 添加time.h头文件
+#include <string>
 
 // 宏开关配置 - 根据实际需求开启或关闭
 #define ENABLE_DI_MODULE    1  // 1:启用DI模块 0:禁用DI模块
@@ -54,6 +55,7 @@ typedef struct {
     bool lift_cylinder_down;    // M810 顶升气缸下降
     bool gear_cylinder_extend;  // M811 齿轮对接气缸伸出
     bool belt_forward;          // M812 皮带正转启动
+    bool belt_backward;          // M813 皮带反转启动 - 新增
 } DO_Interface;
 
 // 初始化函数
@@ -87,5 +89,12 @@ bool is_do_module_enabled();
 
 // 非阻塞延时检查
 int should_execute_sequence(time_t *last_time, int interval_seconds);
+// DO控制命令消息格式
+struct DOControlCommand {
+    std::string do_address;  // DO地址，如 "801"
+    bool state;              // 状态：true(1)/false(0)
+};
 
+// DO控制命令解析函数
+bool parse_do_control_command(const std::string& command, DOControlCommand& do_cmd);
 #endif

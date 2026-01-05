@@ -33,6 +33,7 @@ static void refresh_do_state_from_device() {
         current_do_state.lift_cylinder_down = do_values[10];
         current_do_state.gear_cylinder_extend = do_values[11];
         current_do_state.belt_forward = do_values[12];
+        current_do_state.belt_backward = do_values[13];  // 新增皮带反转状态读取
         printf("DO状态已从设备刷新\n");
     } else {
         fprintf(stderr, "刷新DO状态失败: %s\n", modbus_strerror(errno));
@@ -223,6 +224,7 @@ int write_do_signals(DO_Interface do_signals) {
     do_values[10] = do_signals.lift_cylinder_down;   // M810
     do_values[11] = do_signals.gear_cylinder_extend;// M811
     do_values[12] = do_signals.belt_forward;        // M812
+    do_values[13] = do_signals.belt_backward;       // M813 新增皮带反转控制
     
     // 写入设备
     int result = modbus_write_bits(ctx_do, 0, 16, do_values);
@@ -239,7 +241,7 @@ int write_single_do_signal(int do_address, bool state) {
     if (!ctx_do) return -1;
     
     // 地址有效性检查
-    if (do_address < 800 || do_address > 812) {
+    if (do_address < 800 || do_address > 813) {
         fprintf(stderr, "DO地址超出范围: %d\n", do_address);
         return -1;
     }
@@ -427,6 +429,7 @@ void print_do_status(DO_Interface do_control) {
     printf("DO11 顶升气缸下降: %s\n", do_control.lift_cylinder_down ? "动作" : "停止");
     printf("DO12 齿轮气缸伸出: %s\n", do_control.gear_cylinder_extend ? "动作" : "停止");
     printf("DO13 皮带正转: %s\n", do_control.belt_forward ? "运行" : "停止");
+    printf("DO14 皮带反转: %s\n", do_control.belt_backward ? "运行" : "停止");  // 新增
 }
 
 // 非阻塞延时检查
@@ -437,4 +440,48 @@ int should_execute_sequence(time_t *last_time, int interval_seconds) {
         return 1;
     }
     return 0;
+}
+
+// 在文件末尾添加DO控制命令解析实现
+bool parse_do_control_command(const std::string& command, DOControlCommand& do_cmd) {
+    // 格式: "801:1" 或 "801:0"
+    size_t colon_pos = command.find(':');
+    if (colon_pos == std::string::npos) {
+        fprintf(stderr, "无效的DO控制命令格式，应为 '地址:状态'\n");
+        return false;
+    }
+    
+    std::string addr_str = command.substr(0, colon_pos);
+    std::string state_str = command.substr(colon_pos + 1);
+    
+    // 去除空格
+    addr_str.erase(0, addr_str.find_first_not_of(" \t"));
+    addr_str.erase(addr_str.find_last_not_of(" \t") + 1);
+    state_str.erase(0, state_str.find_first_not_of(" \t"));
+    state_str.erase(state_str.find_last_not_of(" \t") + 1);
+    
+    // 验证地址有效性
+    try {
+        int address = std::stoi(addr_str);
+        if (address < 800 || address > 813) {
+            fprintf(stderr, "DO地址超出范围 (800-812): %d\n", address);
+            return false;
+        }
+        do_cmd.do_address = addr_str;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "DO地址解析失败: %s\n", e.what());
+        return false;
+    }
+    
+    // 验证状态有效性
+    if (state_str == "1" || state_str == "true" || state_str == "True") {
+        do_cmd.state = true;
+    } else if (state_str == "0" || state_str == "false" || state_str == "False") {
+        do_cmd.state = false;
+    } else {
+        fprintf(stderr, "无效的状态值: %s (应为 0/1 或 true/false)\n", state_str.c_str());
+        return false;
+    }
+    
+    return true;
 }

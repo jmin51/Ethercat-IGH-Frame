@@ -145,8 +145,8 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 ControlAction target_layer_action;
                 target_layer_action.type = CommandType::LAYER;
                 target_layer_action.axis_name = "axis5";
-                target_layer_action.command_value = std::to_string(target_layer_);
-                target_layer_action.description = "移动到目标层" + std::to_string(target_layer_);
+    target_layer_action.command_value = std::to_string(target_layer_);  // 使用target_layer_
+    target_layer_action.description = "移动到目标层" + std::to_string(target_layer_);
                 add_command(target_layer_action);
                 
                 write_single_do_signal(812, false); // 停止DO13皮带正转

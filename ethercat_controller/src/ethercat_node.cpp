@@ -96,7 +96,12 @@ void EthercatNode::initialize_node() {
         [this](const std_msgs::msg::Empty::SharedPtr msg) {
             handle_outbound_stop(msg);
         });
-        
+    // 添加DO控制话题订阅
+    do_control_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/do_control", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            handle_do_control(msg);
+        });
     // 初始化IO互斥锁
     pthread_mutex_init(&io_mutex_, nullptr);
     
@@ -162,10 +167,10 @@ void EthercatNode::init_axes(ec_master_t* master) {
 
     servo_axes_.push_back(std::move(axis2_1));
     servo_axes_.push_back(std::move(axis2_2));
-
+    
     // 可以继续添加其他轴
-    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1));
+    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 9.0));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
@@ -711,7 +716,7 @@ void* io_monitor_thread(void* arg) {
 #endif
         
         // 获取当前DO状态
-        DO_Interface do_control = get_current_do_state();
+        // DO_Interface do_control = get_current_do_state();
         
         // 每1秒显示一次状态，避免刷屏
         if (should_execute_sequence(&last_display, 1)) {
@@ -834,4 +839,36 @@ void EthercatNode::monitor_di_changes(const DI_Interface& current_di) {
     
     // 更新前一次状态
     previous_di = current_di;
+}
+
+void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    std::string command = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到DO控制命令: %s", command.c_str());
+    
+    // 解析命令
+    DOControlCommand do_cmd;
+    if (!parse_do_control_command(command, do_cmd)) {
+        RCLCPP_ERROR(this->get_logger(), "DO控制命令解析失败: %s", command.c_str());
+        return;
+    }
+    
+    // 执行DO控制
+    int do_address = std::stoi(do_cmd.do_address);
+    int result = write_single_do_signal(do_address, do_cmd.state);
+    
+    if (result == 1) {
+        RCLCPP_INFO(this->get_logger(), "DO控制成功: %s -> %s", 
+                   do_cmd.do_address.c_str(), 
+                   do_cmd.state ? "true" : "false");
+        
+        // 发布状态更新
+        publish_io_status();
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "DO控制失败: %s, 错误码: %d", 
+                     command.c_str(), result);
+    }
 }

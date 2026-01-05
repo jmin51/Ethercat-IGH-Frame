@@ -94,6 +94,8 @@ private:
     // 添加出库流程话题订阅器
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr outbound_start_sub_;
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr outbound_stop_sub_;
+    // 添加IO控制话题
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr do_control_sub_;
 
     std::atomic<bool> node_shutting_down_;
     
@@ -110,13 +112,12 @@ private:
     // 层指令处理器
     std::unique_ptr<LayerCommandProcessor> layer_processor_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr layer_command_sub_;
-    /**
-     * @brief 初始化业务逻辑处理器
-     * 创建处理器实例并配置标准的DI-轴映射关系，初始化层指令处理器
-     */
+
+    // 初始化业务逻辑处理器——创建处理器实例并配置标准的DI-轴映射关系，初始化层指令处理器
     void initialize_business_logic();
     void initialize_layer_processor();
     void monitor_di_changes(const DI_Interface& current_di);
+    void handle_do_control(const std_msgs::msg::String::SharedPtr msg);
     // 添加入库处理函数
     void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg) {
         if (node_shutting_down_.load() || !rclcpp::ok()) {
