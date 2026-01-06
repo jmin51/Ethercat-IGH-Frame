@@ -22,8 +22,8 @@ void BusinessLogicProcessor::initialize(size_t num_axes) {
 
 void BusinessLogicProcessor::process_io_signals(const DI_Interface& di_signals) {
     /// 主处理函数：分析DI信号变化并生成相应的轴控制命令
-    if (!enabled_ || !initialized_) {
-        RCLCPP_DEBUG(logger_, "业务逻辑处理器未启用或未初始化，跳过处理");
+    if (!enabled_ || !initialized_ || !auto_mode_enabled_) {
+        RCLCPP_DEBUG(logger_, "业务逻辑处理器未启用或未初始化或未在自动模式，跳过处理");
         return;
     }
     
@@ -501,4 +501,50 @@ bool BusinessLogicProcessor::check_debounce(DIConfig& config, int64_t current_ti
     }
     config.last_trigger_time = current_time;
     return true;
+}
+
+// 自动模式控制相关
+// 添加自动模式控制方法
+void BusinessLogicProcessor::enable_auto_mode() {
+    auto_mode_enabled_ = true;
+    RCLCPP_INFO(logger_, "业务逻辑处理器进入自动模式");
+}
+
+void BusinessLogicProcessor::disable_auto_mode() {
+    auto_mode_enabled_ = false;
+    
+    // 清空所有状态和命令
+    reset_business_logic();
+    
+    RCLCPP_INFO(logger_, "业务逻辑处理器退出自动模式，已重置所有状态");
+}
+
+void BusinessLogicProcessor::reset_business_logic() {
+    // 重置入库流程状态
+    warehouse_state_ = WarehouseState::IDLE;
+    warehouse_process_requested_ = false;
+    warehouse_process_stop_requested_ = false;
+    
+    // 重置出库流程状态
+    outbound_state_ = OutboundState::IDLE;
+    outbound_process_requested_ = false;
+    outbound_process_stop_requested_ = false;
+    
+    // 重置延迟计数器
+    delay_started_ = false;
+    delay_condition_triggered_ = false;
+    delay_counter_ = 0;
+    
+    outbound_delay_started_ = false;
+    outbound_delay_condition_triggered_ = false;
+    outbound_delay_counter_ = 0;
+    
+    // 清空待处理命令
+    pending_commands_.clear();
+    
+    RCLCPP_INFO(logger_, "业务逻辑处理器状态已重置");
+}
+
+bool BusinessLogicProcessor::is_auto_mode_enabled() const {
+    return auto_mode_enabled_;
 }

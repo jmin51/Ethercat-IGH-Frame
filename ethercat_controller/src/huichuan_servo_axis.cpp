@@ -384,19 +384,25 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
         position_initialized_ = true;
     }
     
+    // 获取当前点动速度（线程安全）
+    double current_jog_speed;
+    {
+        std::lock_guard<std::mutex> lock(speed_mutex_);
+        current_jog_speed = jog_speed_;
+    }
     // 处理点动控制
     if (jog_forward_requested_) {
-        // 正转：每个周期增加固定脉冲数
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
+        // 正转：每个周期增加固定脉冲数，基于当前速度
+        int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
         target_pulses_ += speed_pulses;
     } else if (jog_reverse_requested_) {
-        // 反转：每个周期减少固定脉冲数
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
+        // 反转：每个周期减少固定脉冲数，基于当前速度
+        int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
         target_pulses_ -= speed_pulses;
     } else if (jog_stop_requested_) {
         // 停止：保持当前位置
         target_pulses_ = current_pos;
-        jog_stop_requested_ = false; // 重置停止标志
+        jog_stop_requested_ = false;
     }
     
     // // 原有的位移指令处理（可选保留或注释掉）
@@ -407,7 +413,7 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
     // }
     
     // 限制最大速度
-    const int32_t MAX_STEP = 50;
+    const int32_t MAX_STEP = displacement_to_pulses(MAX_JOG_SPEED * PERIOD);
     int32_t error = target_pulses_ - joint_position_;
     int32_t step = (abs(error) > MAX_STEP) ? 
                   ((error > 0) ? MAX_STEP : -MAX_STEP) : error;

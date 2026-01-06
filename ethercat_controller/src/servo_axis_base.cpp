@@ -240,3 +240,24 @@ void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd)
     
     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
 }
+
+bool ServoAxisBase::set_jog_speed(double speed) {
+    std::lock_guard<std::mutex> lock(speed_mutex_);
+    
+    // 检查速度范围
+    if (speed < MIN_JOG_SPEED || speed > MAX_JOG_SPEED) {
+        std::cout << "轴 " << axis_name_ << " 点动速度超出范围 [" 
+                  << MIN_JOG_SPEED << ", " << MAX_JOG_SPEED << "]: " << speed << std::endl;
+        return false;
+    }
+    
+    // 只能在READY状态下设置速度
+    if (current_state_ != AxisState::READY) {
+        std::cout << "轴 " << axis_name_ << " 不在READY状态，无法设置点动速度" << std::endl;
+        return false;
+    }
+    
+    jog_speed_ = speed;
+    std::cout << "轴 " << axis_name_ << " 点动速度设置为: " << jog_speed_ << " mm/s" << std::endl;
+    return true;
+}

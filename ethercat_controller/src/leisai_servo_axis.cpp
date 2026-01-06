@@ -383,17 +383,24 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
         printf("轴 %s 手动模式位置初始化完成\n", axis_name_.c_str());
     }
     
+    // 获取当前点动速度（线程安全）
+    double current_jog_speed;
+    {
+        std::lock_guard<std::mutex> lock(speed_mutex_);
+        current_jog_speed = jog_speed_;
+    }
+    
     // 处理点动控制
     if (jog_forward_requested_) {
-        // 正转
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
+        // 正转：基于当前速度计算脉冲增量
+        int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
         target_pulses_ += speed_pulses;
     } else if (jog_reverse_requested_) {
-        // 反转
-        int32_t speed_pulses = displacement_to_pulses(jog_speed_ * PERIOD);
+        // 反转：基于当前速度计算脉冲增量
+        int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
         target_pulses_ -= speed_pulses;
     } else if (jog_stop_requested_) {
-        // 停止
+        // 停止：保持当前位置
         target_pulses_ = current_pos;
         jog_stop_requested_ = false;
     }

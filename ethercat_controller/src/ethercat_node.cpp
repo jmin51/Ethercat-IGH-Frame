@@ -72,6 +72,13 @@ void EthercatNode::initialize_node() {
         [this](const std_msgs::msg::String::SharedPtr msg) {
             handle_jog_command(msg);
         });
+    // 新增：点动速度设置订阅
+    jog_speed_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/jog_speed_command", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            handle_jog_speed_command(msg);
+        });
+
     // 添加入库流程话题订阅器
     warehouse_start_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/warehouse_start", rclcpp::QoS(10).reliable(),
@@ -272,34 +279,58 @@ void EthercatNode::handle_control_command(const std::string& command) {
     // 发布系统状态
     auto status_msg = std_msgs::msg::String();
     status_msg.data = "执行命令: " + command;
-
     system_status_pub_->publish(status_msg);
 
     if (command == CMD_START_MANUAL) {
+        // 手动模式：禁用业务逻辑自动模式
+        if (business_processor_) {
+            business_processor_->disable_auto_mode();
+        }
+        
         for (auto& axis : servo_axes_) {
             axis->start_manual_mode();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到手动模式启动命令");
         
     } else if (command == CMD_START_AUTO) {
+        // 自动模式：启用业务逻辑自动模式
+        if (business_processor_) {
+            business_processor_->enable_auto_mode();
+        }
+        
         for (auto& axis : servo_axes_) {
             axis->start_auto_mode();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到自动模式启动命令");
         
     } else if (command == CMD_STOP) {
+        // 停止模式：禁用业务逻辑自动模式并重置
+        if (business_processor_) {
+            business_processor_->disable_auto_mode();
+        }
+        
         for (auto& axis : servo_axes_) {
             axis->stop();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到停止命令");
         
     } else if (command == CMD_CLEAR_FAULT) {
+        // 清除故障时也禁用自动模式
+        if (business_processor_) {
+            business_processor_->disable_auto_mode();
+        }
+        
         for (auto& axis : servo_axes_) {
             axis->clear_fault();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到清除故障命令");
         
     } else if (command == CMD_RESET) {
+        // 重置时也禁用自动模式
+        if (business_processor_) {
+            business_processor_->disable_auto_mode();
+        }
+        
         for (auto& axis : servo_axes_) {
             axis->reset_axis();
         }
@@ -579,8 +610,8 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
 
-    // 步骤1: 如果有业务逻辑处理器且已启用，处理自动控制逻辑
-    if (business_processor_ && business_processor_->is_enabled()) {
+    // 步骤1: 如果有业务逻辑处理器且已启用，并且处于自动模式，处理自动控制逻辑
+    if (business_processor_ && business_processor_->is_enabled() && business_processor_->is_auto_mode_enabled()) {
         // 将DI信号传递给业务逻辑处理器进行分析
         business_processor_->process_io_signals(di);
         
@@ -870,5 +901,79 @@ void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg)
     } else {
         RCLCPP_ERROR(this->get_logger(), "DO控制失败: %s, 错误码: %d", 
                      command.c_str(), result);
+    }
+}
+
+// 添加点动速度设置处理函数
+void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    std::string command = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到点动速度设置命令: %s", command.c_str());
+    
+    std::string axis_name;
+    double speed;
+    
+    if (!parse_jog_speed_command(command, axis_name, speed)) {
+        RCLCPP_ERROR(this->get_logger(), "点动速度命令解析失败: %s", command.c_str());
+        return;
+    }
+    
+    // 查找对应的轴并设置速度
+    bool axis_found = false;
+    for (auto& axis : servo_axes_) {
+        if (axis->get_name() == axis_name) {
+            if (axis->set_jog_speed(speed)) {
+                RCLCPP_INFO(this->get_logger(), "成功设置轴 %s 的点动速度为: %.1f mm/s", 
+                           axis_name.c_str(), speed);
+                
+                // 发布系统状态
+                auto status_msg = std_msgs::msg::String();
+                status_msg.data = "轴 " + axis_name + " 点动速度设置为: " + std::to_string(speed) + " mm/s";
+                system_status_pub_->publish(status_msg);
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "设置轴 %s 的点动速度失败", axis_name.c_str());
+            }
+            axis_found = true;
+            break;
+        }
+    }
+    
+    if (!axis_found) {
+        RCLCPP_ERROR(this->get_logger(), "未找到轴: %s", axis_name.c_str());
+    }
+}
+
+// 添加点动速度解析函数
+bool EthercatNode::parse_jog_speed_command(const std::string& command, std::string& axis_name, double& speed) {
+    // 格式: "axis_name:speed" 例如: "axis1_1:30.5"
+    size_t colon_pos = command.find(':');
+    if (colon_pos == std::string::npos) {
+        RCLCPP_ERROR(this->get_logger(), "无效命令格式，应为 '轴名:速度'");
+        return false;
+    }
+    
+    axis_name = command.substr(0, colon_pos);
+    std::string speed_str = command.substr(colon_pos + 1);
+    
+    // 去除空格
+    axis_name.erase(0, axis_name.find_first_not_of(" \t"));
+    axis_name.erase(axis_name.find_last_not_of(" \t") + 1);
+    speed_str.erase(0, speed_str.find_first_not_of(" \t"));
+    speed_str.erase(speed_str.find_last_not_of(" \t") + 1);
+    
+    if (axis_name.empty() || speed_str.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "轴名或速度值为空");
+        return false;
+    }
+    
+    try {
+        speed = std::stod(speed_str);
+        return true;
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "速度值转换失败: %s, 错误: %s", speed_str.c_str(), e.what());
+        return false;
     }
 }

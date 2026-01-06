@@ -96,6 +96,14 @@ private:
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr outbound_stop_sub_;
     // 添加IO控制话题
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr do_control_sub_;
+    // 添加点动速度设置订阅器
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_speed_sub_;
+    
+    // 添加点动速度设置处理函数
+    void handle_jog_speed_command(const std_msgs::msg::String::SharedPtr msg);
+    
+    // 添加点动速度解析函数
+    bool parse_jog_speed_command(const std::string& command, std::string& axis_name, double& speed);
 
     std::atomic<bool> node_shutting_down_;
     

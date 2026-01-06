@@ -92,6 +92,9 @@ public:
     virtual int32_t displacement_to_pulses(double displacement_mm);
     bool check_target_reached_flag();   // 检查目标到达标志（一次性读取，读取后自动清除）
     bool is_target_reached() const;     // 检查是否到达目标位置（持续状态）
+    // 添加点动速度设置方法
+    virtual bool set_jog_speed(double speed);
+    virtual double get_jog_speed() const { return jog_speed_; }
 
 protected:
     // 保护成员变量 - 子类可以访问
@@ -149,12 +152,18 @@ protected:
     bool jog_reverse_requested_; // 反转请求
     bool jog_stop_requested_;    // 停止请求
     
+    // 添加速度设置互斥锁
+    mutable std::mutex speed_mutex_;
+
+    // 速度限制参数
+    const double MIN_JOG_SPEED = 1.0;    // 最小点动速度 (mm/s)
+    const double MAX_JOG_SPEED = 500.0;  // 最大点动速度 (mm/s)
+    const double DEFAULT_JOG_SPEED = 20.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
+											//	现在是每秒20000	对应两圈，一分?120rpm
+    
     // 在保护成员变量中添加
     std::atomic<bool> target_reached_flag_{false};
     mutable std::mutex flag_mutex_;
-    // 速度控制参数
-    const double DEFAULT_JOG_SPEED = 20.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
-											//	现在是每秒20000	对应两圈，一分?120rpm
 
     // 新增逐步逼近相关变量
     int32_t target_offset_;           // 目标偏移量

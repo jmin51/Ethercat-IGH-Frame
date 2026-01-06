@@ -103,6 +103,11 @@ public:
     void start_outbound_process(uint8_t source_layer); // 启动出库流程
     void stop_outbound_process();  // 停止出库流程
     bool is_outbound_running() const { return outbound_state_ != OutboundState::IDLE; }  // 检查是否在运行出库流程
+    // 自动模式控制
+    void enable_auto_mode();
+    void disable_auto_mode();
+    void reset_business_logic();
+    bool is_auto_mode_enabled() const;
 
 private:
     std::map<std::string, DIConfig> di_configs_;  ///< DI信号配置映射表
@@ -112,7 +117,9 @@ private:
     bool initialized_ = false;
     int debounce_time_ms_ = 50;
     rclcpp::Logger logger_;
-
+    // 自动模式标志
+    bool auto_mode_enabled_ = false;
+    
     // 入库流程状态
     WarehouseState warehouse_state_ = WarehouseState::IDLE;
     uint8_t current_layer_ = 1;
