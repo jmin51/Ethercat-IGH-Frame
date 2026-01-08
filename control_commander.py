@@ -121,7 +121,7 @@ class ControlCommander(Node):
     def print_auto_menu(self):
         """打印自动控制菜单"""
         print("\n" + "="*40)
-        print("自动模式 - 位移控制菜单")
+        print("自动模式 - 位移控制与IO控制菜单")
         print("="*40)
         print("点动控制:")
         print("  01: 轴1_1正转点动")
@@ -138,13 +138,26 @@ class ControlCommander(Node):
         print("  10: 轴5移动到10.0mm位置")
         print("  11: 轴5正向移动10.0mm")
         print("  12: 轴5反向移动10.0mm")
+        print("IO控制 (当前状态):")
+        print("  13: M800启动按钮灯 [{}]".format("ON" if self.io_status['800'] else "OFF"))
+        print("  14: M801复位按钮灯 [{}]".format("ON" if self.io_status['801'] else "OFF"))
+        print("  15: M802暂停按钮灯 [{}]".format("ON" if self.io_status['802'] else "OFF"))
+        print("  16: M803蜂鸣器 [{}]".format("ON" if self.io_status['803'] else "OFF"))
+        print("  17: M804三色红灯 [{}]".format("ON" if self.io_status['804'] else "OFF"))
+        print("  18: M805三色黄灯 [{}]".format("ON" if self.io_status['805'] else "OFF"))
+        print("  19: M806三色绿灯 [{}]".format("ON" if self.io_status['806'] else "OFF"))
+        print("  20: M810顶升气缸下降 [{}]".format("ON" if self.io_status['810'] else "OFF"))
+        print("  21: M811齿轮对接气缸伸出 [{}]".format("ON" if self.io_status['811'] else "OFF"))
+        print("  22: M812皮带正转启动 [{}]".format("ON" if self.io_status['812'] else "OFF"))
+        print("  23: M813皮带反转启动 [{}]".format("ON" if self.io_status['813'] else "OFF"))
         print("仓库控制:")
-        print("  13: 启动入库")
-        print("  14: 停止入库")
-        print("  15: 启动出库")
-        print("  16: 停止出库")
+        print("  24: 启动入库")
+        print("  25: 停止入库")
+        print("  26: 启动出库")
+        print("  27: 停止出库")
         print("其他控制:")
         print("  s: 停止所有轴")
+        print("  r: 复位所有IO")
         print("  b: 返回主菜单")
         print("="*40)
         print("请输入命令:")
@@ -205,8 +218,11 @@ class ControlCommander(Node):
         status = "开启" if self.io_status[io_address] else "关闭"
         print("{} {} ({})".format(io_names.get(io_address, 'IO'), status, command))
         # 刷新菜单显示新状态
-        if self.current_menu == "manual_mode":
-            self.print_manual_menu()
+        if self.current_menu == "manual_mode" or self.current_menu == "auto_mode":
+            if self.current_menu == "manual_mode":
+                self.print_manual_menu()
+            else:
+                self.print_auto_menu()
     
     def reset_all_io(self):
         """复位所有IO状态"""
@@ -216,13 +232,16 @@ class ControlCommander(Node):
                 self.send_io_control(io_address, 0)
         print("所有IO已复位")
         # 刷新菜单
-        if self.current_menu == "manual_mode":
-            self.print_manual_menu()
+        if self.current_menu == "manual_mode" or self.current_menu == "auto_mode":
+            if self.current_menu == "manual_mode":
+                self.print_manual_menu()
+            else:
+                self.print_auto_menu()
     
     def send_warehouse_start(self):
         """发送入库启动命令"""
         msg = UInt8()
-        msg.data = 2
+        msg.data = 9
         self.warehouse_start_pub.publish(msg)
         print("启动入库")
     
@@ -235,7 +254,7 @@ class ControlCommander(Node):
     def send_outbound_start(self):
         """发送出库启动命令"""
         msg = UInt8()
-        msg.data = 2
+        msg.data = 9
         self.outbound_start_pub.publish(msg)
         print("启动出库")
     
@@ -356,6 +375,21 @@ class ControlCommander(Node):
             '04': 'axis2_2:reverse',
         }
         
+        # IO控制命令映射
+        io_commands = {
+            '13': '800',  # M800启动按钮灯
+            '14': '801',  # M801复位按钮灯
+            '15': '802',  # M802暂停按钮灯
+            '16': '803',  # M803蜂鸣器
+            '17': '804',  # M804三色红灯
+            '18': '805',  # M805三色黄灯
+            '19': '806',  # M806三色绿灯
+            '20': '810',  # M810顶升气缸下降
+            '21': '811',  # M811齿轮对接气缸伸出
+            '22': '812',  # M812皮带正转启动
+            '23': '813',  # M813皮带反转启动
+        }
+        
         if key in jog_commands:
             self.send_jog_command(jog_commands[key])
             # 显示简化的执行信息
@@ -366,8 +400,13 @@ class ControlCommander(Node):
                 'axis2_2:reverse': '轴2_2反转',
             }
             print(axis_map.get(jog_commands[key], "执行"))
+        elif key in io_commands:
+            # 处理IO控制
+            self.toggle_io(io_commands[key])
         elif key == 's':
             self.stop_all_motion()
+        elif key == 'r':  # 复位所有IO
+            self.reset_all_io()
         elif key == 'b':
             self.return_to_main_menu()
         # 轴4位移控制
@@ -421,16 +460,16 @@ class ControlCommander(Node):
             self.print_auto_menu()
         
         # 仓库控制命令
-        elif key == '13':  # 启动入库
+        elif key == '24':  # 启动入库
             self.send_warehouse_start()
         
-        elif key == '14':  # 停止入库
+        elif key == '25':  # 停止入库
             self.send_warehouse_stop()
         
-        elif key == '15':  # 启动出库
+        elif key == '26':  # 启动出库
             self.send_outbound_start()
         
-        elif key == '16':  # 停止出库
+        elif key == '27':  # 停止出库
             self.send_outbound_stop()
         
         else:

@@ -809,13 +809,6 @@ void EthercatNode::initialize_layer_processor() {
     // 初始化处理器
     layer_processor_->initialize(axis5_index);
     
-    // 配置自定义层高（可选）
-    std::map<uint8_t, double> layer_heights;
-    for (uint8_t layer = 1; layer <= 10; ++layer) {
-        layer_heights[layer] = (layer - 1) * 25.0;  // 每层25mm
-    }
-    layer_processor_->set_layer_heights(layer_heights);
-    
     // 创建层指令订阅器
     layer_command_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
         "/layer_command", rclcpp::QoS(10).reliable(),

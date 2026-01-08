@@ -119,7 +119,7 @@ private:
     rclcpp::Logger logger_;
     // 自动模式标志
     bool auto_mode_enabled_ = false;
-    
+
     // 入库流程状态
     WarehouseState warehouse_state_ = WarehouseState::IDLE;
     uint8_t current_layer_ = 1;
@@ -129,6 +129,7 @@ private:
     // 添加入库流程控制标志
     bool warehouse_process_requested_ = false;
     bool warehouse_process_stop_requested_ = false;
+    bool conveyor_in_detected_ = false;  // 标记是否检测到过conveyor_in为1
     
     // 内部处理函数
     void process_warehouse_logic(const DI_Interface& di_signals);
@@ -145,8 +146,11 @@ private:
     int delay_counter_ = 0;
     bool delay_started_ = false;
     bool delay_condition_triggered_ = false;  // 新增：标记条件是否已触发
-    static constexpr int DELAY_BEFORE_STOP_MS = 5000;  // 5秒延迟
+    static constexpr int DELAY_BEFORE_STOP_MS = 10000;  // 10秒延迟
     static constexpr int DELAY_COUNTER_MAX = DELAY_BEFORE_STOP_MS / 100;  // 每100ms计数一次
+    // 出库延迟常量（新增）
+    static constexpr int OUTBOUND_DELAY_BEFORE_STOP_MS = 8000;  // 出库流程8秒延迟
+    static constexpr int OUTBOUND_DELAY_COUNTER_MAX = OUTBOUND_DELAY_BEFORE_STOP_MS / 100;  // 出库流程每100ms计数一次
     
     // 出库流程状态
     OutboundState outbound_state_ = OutboundState::IDLE;
@@ -165,7 +169,7 @@ private:
     int outbound_delay_counter_ = 0;
     bool outbound_delay_started_ = false;
     bool outbound_delay_condition_triggered_ = false;
-
+    bool outbound_conveyor_in_detected_ = false;  // 标记是否检测到过conveyor_in为1（出库流程）
 };
 
 #endif // BUSINESS_LOGIC_PROCESSOR_HPP

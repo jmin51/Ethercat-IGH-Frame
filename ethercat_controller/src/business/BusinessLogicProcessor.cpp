@@ -2,7 +2,6 @@
 #include <chrono>
 #include <algorithm>
 
-#define DELAY_BEFORE_STOP_MS 30000  // 30秒延迟
 using namespace std::chrono;
 
 BusinessLogicProcessor::BusinessLogicProcessor(rclcpp::Logger logger) 
@@ -97,7 +96,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 ControlAction conv_action;
                 conv_action.type = CommandType::JOG;
                 conv_action.axis_name = "axis1_1";
-                conv_action.command_value = "forward";
+                conv_action.command_value = "reverse";
                 conv_action.description = "启动轴1_1正转";
                 add_command(conv_action);
                 
@@ -121,7 +120,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
         case WarehouseState::CONVEYOR_MOVING:
             // 检测出料到位
             if (buffer_out) {
-                write_single_do_signal(812, true); // 激活DO13皮带正转
+                write_single_do_signal(813, true); // 激活DO14皮带反转
                 RCLCPP_INFO(logger_, "检测到运行至:缓存架出料和接驳台入料位，等待提升机运行");
             }
             // 继续输送直到重新检测到入库条件
@@ -145,11 +144,11 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 ControlAction target_layer_action;
                 target_layer_action.type = CommandType::LAYER;
                 target_layer_action.axis_name = "axis5";
-    target_layer_action.command_value = std::to_string(target_layer_);  // 使用target_layer_
-    target_layer_action.description = "移动到目标层" + std::to_string(target_layer_);
+                target_layer_action.command_value = std::to_string(target_layer_);  // 使用target_layer_
+                target_layer_action.description = "移动到目标层" + std::to_string(target_layer_);
                 add_command(target_layer_action);
                 
-                write_single_do_signal(812, false); // 停止DO13皮带正转
+                write_single_do_signal(813, false); // 停止DO14皮带反转
                 warehouse_state_ = WarehouseState::LIFT_MOVING;
             }
 
@@ -160,6 +159,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
             if (current_layer_ == target_layer_) {
                 RCLCPP_INFO(logger_, "接驳台已到达第%d层", target_layer_);
                 
+                write_single_do_signal(812, true); // 启动DO13皮带正转
                 // 启动轴2反转
                 ControlAction axis2_action;
                 axis2_action.type = CommandType::JOG;
@@ -171,17 +171,27 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                 ControlAction axis2_action2;
                 axis2_action2.type = CommandType::JOG;
                 axis2_action2.axis_name = "axis2_2";
-                axis2_action2.command_value = "reverse";
+                axis2_action2.command_value = "forward";
                 axis2_action2.description = "启动轴2_2反转";
                 add_command(axis2_action2);
-                write_single_do_signal(811, true); // 激活DO信号
+                write_single_do_signal(811, true); // 激活DO气缸伸出信号
 
-                // 检测停止条件（只需检测一次）
-                if (!delay_started_ && !delay_condition_triggered_ && conveyor_in && !conveyor_out) {
-                    delay_condition_triggered_ = true;  // 标记条件已触发
-                    delay_started_ = true;             // 开始延迟
-                    delay_counter_ = 0;                // 重置计数器
-                    RCLCPP_INFO(logger_, "检测到停止条件，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
+                // 检测信号变化：先检测到conveyor_in为1，再检测到为0
+                if (!delay_started_ && !delay_condition_triggered_) {
+                    if (conveyor_in) {
+                        // 第一次检测到conveyor_in为1，标记条件已满足第一部分
+                        if (!conveyor_in_detected_) {
+                            conveyor_in_detected_ = true;
+                            RCLCPP_INFO(logger_, "检测到货物进入接驳台(conveyor_in=1)");
+                        }
+                    } else if (conveyor_in_detected_) {
+                        // 之前检测到过conveyor_in为1，现在检测到为0，触发延迟
+                        delay_condition_triggered_ = true;
+                        delay_started_ = true;
+                        delay_counter_ = 0;
+                        conveyor_in_detected_ = false; // 重置检测标志
+                        RCLCPP_INFO(logger_, "检测到货物离开接驳台(conveyor_in=0)，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
+                    }
                 }
                 
                 // 处理延迟逻辑
@@ -209,6 +219,7 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                         stop_action2.description = "轴2_2停止";
                         add_command(stop_action2);
                         write_single_do_signal(811, false); 
+                        write_single_do_signal(812, false);
                         RCLCPP_INFO(logger_, "延迟结束，停止轴2并进入完成状态");
                     } else {
                         // 延迟中，每5秒记录一次剩余时间
@@ -219,12 +230,13 @@ void BusinessLogicProcessor::process_warehouse_logic(const DI_Interface& di_sign
                     }
                 }
             } else {
-                // 如果层条件不满足，重置延迟状态
+                // 如果层条件不满足，重置所有状态
                 if (delay_started_) {
                     delay_started_ = false;
                     delay_condition_triggered_ = false;
-                    RCLCPP_DEBUG(logger_, "层条件不满足，重置延迟状态");
                 }
+                conveyor_in_detected_ = false; // 重置检测标志
+                RCLCPP_DEBUG(logger_, "层条件不满足，重置延迟状态");
             }
             break;
             
@@ -321,7 +333,7 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
                 ControlAction axis2_action2;
                 axis2_action2.type = CommandType::JOG;
                 axis2_action2.axis_name = "axis2_2";
-                axis2_action2.command_value = "forward";
+                axis2_action2.command_value = "reverse";
                 axis2_action2.description = "启动轴2_2正转（出库）";
                 add_command(axis2_action2);
                 write_single_do_signal(811, true); // 激活DO信号
@@ -331,28 +343,21 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
             break;
         }    
         case OutboundState::LIFT_MOVING:{
-            write_single_do_signal(812, true); // 激活DO13皮带正转
-            // 检测货物到达接驳台
-            if (conveyor_in) {
-                 // 检测停止条件
-                if (!outbound_delay_started_ && !outbound_delay_condition_triggered_ ) {
-                    outbound_delay_condition_triggered_ = true;
-                    outbound_delay_started_ = true;
-                    outbound_delay_counter_ = 0;
-                    RCLCPP_INFO(logger_, "检测到货物到达接驳台出料位，开始%d秒延迟", DELAY_BEFORE_STOP_MS/1000);
-                }
-            }
+            write_single_do_signal(813, true); // 激活DO14皮带反转
             
-            // 处理延迟逻辑
-            if (outbound_delay_started_) {
-                outbound_delay_counter_++;
-                
-                if (outbound_delay_counter_ >= DELAY_COUNTER_MAX) {
-                    // 延迟结束，执行停止操作
-                    outbound_delay_started_ = false;
-                    outbound_delay_condition_triggered_ = false;
+            // 检测货物到达接驳台 - 修改为检测信号变化：先conveyor_in为1，后conveyor_out为1
+            if (!outbound_conveyor_in_detected_) {
+                if (conveyor_in) {
+                    // 第一次检测到conveyor_in为1
+                    outbound_conveyor_in_detected_ = true;
+                    RCLCPP_INFO(logger_, "检测到货物进入接驳台(conveyor_in=1)");
+                }
+            } else {
+                // 已经检测到conveyor_in为1，现在等待conveyor_out为1
+                if (conveyor_out) {
+                    RCLCPP_INFO(logger_, "检测到货物到达缓存架出料位(conveyor_out=1)，停止输送带");
                     
-                    // 停止轴2
+                    // 执行停止操作
                     ControlAction stop_action;
                     stop_action.type = CommandType::JOG;
                     stop_action.axis_name = "axis2_1";
@@ -369,11 +374,12 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
                     write_single_do_signal(811, false); // 停止DO信号
                     
                     outbound_state_ = OutboundState::CONVEYOR_MOVING;
-                    RCLCPP_INFO(logger_, "延迟结束，停止输送带并进入完成状态");
+                    RCLCPP_INFO(logger_, "进入输送带运行状态");
                 }
             }
             break;
-        }    
+        }
+
         case OutboundState::CONVEYOR_MOVING:{
             // 检测货物到达缓存架 先返回第一层
             ControlAction conveyor_layer_action;
@@ -384,7 +390,7 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
             add_command(conveyor_layer_action);
             if (conveyor_out) {
                 RCLCPP_INFO(logger_, "检测到货物到达缓存架出料位");
-                write_single_do_signal(812, false);
+                write_single_do_signal(813, false);
                 if (!outbound_delay_started_ && !outbound_delay_condition_triggered_ ) {
                     outbound_delay_condition_triggered_ = true;
                     outbound_delay_started_ = true;
@@ -401,7 +407,7 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
                     // 延迟结束，执行停止操作
                     outbound_delay_started_ = false;
                     outbound_delay_condition_triggered_ = false;
-                    write_single_do_signal(812, true);
+                    // write_single_do_signal(813, true);
 
                     outbound_state_ = OutboundState::COMPLETED;
                     RCLCPP_INFO(logger_, "延迟结束，停止输送带并进入完成状态");
@@ -420,7 +426,7 @@ void BusinessLogicProcessor::process_outbound_logic(const DI_Interface& di_signa
             
             if (current_layer_ == 1 && check_outbound_completion_condition(di_signals)) {
                 outbound_state_ = OutboundState::IDLE;
-                write_single_do_signal(812, false);
+                // write_single_do_signal(813, false);
                 RCLCPP_INFO(logger_, "出库流程完成，回到初始状态");
             }
             break;
@@ -535,6 +541,10 @@ void BusinessLogicProcessor::reset_business_logic() {
     delay_condition_triggered_ = false;
     delay_counter_ = 0;
     
+    // 重置信号检测状态
+    conveyor_in_detected_ = false;
+    outbound_conveyor_in_detected_ = false;
+
     outbound_delay_started_ = false;
     outbound_delay_condition_triggered_ = false;
     outbound_delay_counter_ = 0;

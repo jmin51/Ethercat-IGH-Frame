@@ -430,16 +430,16 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     //            axis_name_.c_str(), current_pos, target_pulses_, initial_position_, 
     //            target_pulses_ - current_pos);
     // }
-    // 汇川自动模式特有逻辑
-    if (!homing_completed_) {
-        handle_huichuan_homing(domain1_pd, current_pos);
-        if (displacement_updated_) {
-            displacement_updated_ = false;
-            RCLCPP_WARN(rclcpp::get_logger("huichuan_servo"), 
-                       "汇川轴 %s 回零期间忽略位移指令", axis_name_.c_str());
-        }
-        return;
-    }
+    // // 汇川自动模式特有逻辑
+    // if (!homing_completed_) {
+    //     handle_huichuan_homing(domain1_pd, current_pos);
+    //     if (displacement_updated_) {
+    //         displacement_updated_ = false;
+    //         RCLCPP_WARN(rclcpp::get_logger("huichuan_servo"), 
+    //                    "汇川轴 %s 回零期间忽略位移指令", axis_name_.c_str());
+    //     }
+    //     return;
+    // }
     
     if (!position_initialized_) {
         joint_position_ = current_pos;
