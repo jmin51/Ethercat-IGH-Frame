@@ -73,9 +73,6 @@ public:
     
     void initialize(size_t num_axes);
     
-    //配置入库流程DI信号
-    void configure_warehouse_process();
-    
     // 处理IO信号变化，生成入库控制命令
     void process_io_signals(const DI_Interface& di_signals);
     
@@ -124,8 +121,6 @@ private:
     WarehouseState warehouse_state_ = WarehouseState::IDLE;
     uint8_t current_layer_ = 1;
     uint8_t target_layer_ = 1;
-    bool waiting_for_entry_ = false;
-    bool waiting_for_exit_ = false;
     // 添加入库流程控制标志
     bool warehouse_process_requested_ = false;
     bool warehouse_process_stop_requested_ = false;
@@ -133,14 +128,8 @@ private:
     
     // 内部处理函数
     void process_warehouse_logic(const DI_Interface& di_signals);
-    void process_di_signal(const std::string& di_name, DIConfig& config, bool current_state);
     void add_command(const ControlAction& action);
     bool check_debounce(DIConfig& config, int64_t current_time);
-    
-    // 检查入库条件
-    bool check_entry_condition(const DI_Interface& di);
-    bool check_exit_condition(const DI_Interface& di);
-    bool check_completion_condition(const DI_Interface& di);
 
     // 延迟停止相关变量
     int delay_counter_ = 0;

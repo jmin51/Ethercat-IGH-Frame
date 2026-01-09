@@ -46,10 +46,6 @@ public:
      */
     bool is_moving() const { return is_moving_; }
     
-    // 移除或修改以下函数，因为不再使用Float64MultiArray
-    // std_msgs::msg::Float64MultiArray create_displacement_command(
-    //     const std::vector<double>& base_displacements);
-    
     /**
      * @brief 设置层高配置
      * @param layer_heights 各层高度映射表(层号->高度mm)

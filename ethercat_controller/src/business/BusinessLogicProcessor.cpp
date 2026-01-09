@@ -461,26 +461,6 @@ void BusinessLogicProcessor::add_command(const ControlAction& action) {
                 action.command_value.c_str(), action.description.c_str());
 }
 
-// 其他现有函数保持不变...
-void BusinessLogicProcessor::process_di_signal(const std::string& di_name, 
-                                               DIConfig& config, 
-                                               bool current_state) {
-    // 保持现有逻辑，但主要逻辑已移到process_warehouse_logic
-    auto now_ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-    if (!check_debounce(config, now_ms)) {
-        return;
-    }
-    
-    // 简单的DI触发逻辑（备用）
-    if (current_state != config.last_state) {
-        for (const auto& action : config.actions) {
-            add_command(action);
-        }
-    }
-    
-    config.last_state = current_state;
-}
-
 std::vector<AxisCommand> BusinessLogicProcessor::get_pending_commands() {
     /// 获取当前所有待执行的轴控制命令
     return pending_commands_;

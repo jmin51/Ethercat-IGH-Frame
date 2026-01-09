@@ -102,20 +102,6 @@ std::string LayerCommandProcessor::format_displacement_command(double axis5_targ
     return ss.str();
 }
 
-// 移除或注释掉原来的create_displacement_command函数
-// std_msgs::msg::Float64MultiArray LayerCommandProcessor::create_displacement_command(
-//     const std::vector<double>& base_displacements) {
-//     
-//     auto msg = std_msgs::msg::Float64MultiArray();
-//     msg.data = base_displacements;
-//     
-//     if (axis5_index_ < msg.data.size()) {
-//         msg.data[axis5_index_] = calculate_layer_height(target_layer_);
-//     }
-//     
-//     return msg;
-// }
-
 void LayerCommandProcessor::set_layer_heights(const std::map<uint8_t, double>& layer_heights) {
     layer_heights_ = layer_heights;
     RCLCPP_INFO(node_->get_logger(), "更新层高配置，共%zu层", layer_heights_.size());

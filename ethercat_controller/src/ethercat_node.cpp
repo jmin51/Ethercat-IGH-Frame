@@ -134,24 +134,11 @@ void EthercatNode::initialize_after_axes() {
 void EthercatNode::init_axes(ec_master_t* master) {
     RCLCPP_INFO(this->get_logger(), "开始初始化伺服轴");
     
-    auto& dual_axis_manager = LeisaiDualAxisManager::getInstance();
-    
     // 添加从站1：第二个雷赛双轴驱动器
     auto axis1_1 = ServoAxisFactory::create_servo_axis(
         DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
     auto axis1_2 = ServoAxisFactory::create_servo_axis(
         DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
-
-    // 注册从站1的双轴关系
-    dual_axis_manager.register_dual_axis(0,  // 从站位置1
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1),
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2));
-
-    // 启用从站3的双轴同步
-    auto leisai_axis1_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_1);
-    auto leisai_axis1_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis1_2);
-    leisai_axis1_1->set_sync_motor_enabled(true);
-    leisai_axis1_2->set_sync_motor_enabled(true);
 
     servo_axes_.push_back(std::move(axis1_1));
     servo_axes_.push_back(std::move(axis1_2));
@@ -160,17 +147,6 @@ void EthercatNode::init_axes(ec_master_t* master) {
         DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
     auto axis2_2 = ServoAxisFactory::create_servo_axis(
         DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
-    
-    // 注册双轴关系
-    dual_axis_manager.register_dual_axis(1, 
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1),
-        std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2));
-    
-    // 启用双轴同步
-    auto leisai_axis2_1 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_1);
-    auto leisai_axis2_2 = std::dynamic_pointer_cast<LeisaiServoAxis>(axis2_2);
-    leisai_axis2_1->set_sync_motor_enabled(true);
-    leisai_axis2_2->set_sync_motor_enabled(true);
 
     servo_axes_.push_back(std::move(axis2_1));
     servo_axes_.push_back(std::move(axis2_2));
@@ -373,30 +349,11 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::String::Shar
         bool axis_found = false;
         for (size_t i = 0; i < servo_axes_.size(); ++i) {
             if (servo_axes_[i]->get_name() == axis_name) {
-                // 检查是否为雷赛双轴
-                auto leisai_axis = std::dynamic_pointer_cast<LeisaiServoAxis>(servo_axes_[i]);
-                if (leisai_axis && leisai_axis->is_sync_motor_enabled()) {
-                    // 双轴同步控制：只需要处理其中一个轴，另一个会自动同步
-                    if (leisai_axis->get_sync_axis()) {
-                        int32_t target_pulses = leisai_axis->get_initial_position() + 
-                                               leisai_axis->displacement_to_pulses(displacement);
-                        
-                        // 更新同步目标位置
-                        leisai_axis->update_sync_target_position(target_pulses);
-                        
-                        RCLCPP_DEBUG(this->get_logger(), 
-                                   "双轴同步控制: %s 和 %s 目标位移: %.3fmm, 脉冲: %d",
-                                   leisai_axis->get_name().c_str(),
-                                   leisai_axis->get_sync_axis()->get_name().c_str(),
-                                   displacement, target_pulses);
-                    }
-                } else {
                     // 单轴控制
                     if (servo_axes_[i]->is_running()) {
                         handle_axis_command(i, displacement);
                     }
-                }
-                axis_found = true;
+                    axis_found = true;
                 break;
             }
         }
