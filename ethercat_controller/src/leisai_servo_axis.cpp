@@ -215,8 +215,8 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             }
             else {
                 // 保持在READY状态，保持当前位置
-                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                // EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                // EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
                 
                 // 新增：检测故障状态字
                 if (read_status_word == 0x0638) {
