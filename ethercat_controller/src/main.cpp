@@ -268,12 +268,13 @@ void* rt_task_wrapper(void* arg) {
             global_node->handle_axes_state_machines(domain1_pd);
         }
         
-        // 发布关节状态（每10ms）
+        // 发布关节状态（每10ms） 后期改为在ethercat_node创建10ms定时器
         static int joint_state_counter = 0;
         if (joint_state_counter++ >= 10) {
             joint_state_counter = 0;
             if (global_node) {
                 global_node->publish_joint_states();
+                global_node->check_layer_motion_completion();
             }
         }
         

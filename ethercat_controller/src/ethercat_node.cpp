@@ -55,6 +55,14 @@ void EthercatNode::initialize_node() {
     system_status_pub_ = this->create_publisher<std_msgs::msg::String>("/system_status", 10);
     io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/io_status", 10);  // 新增IO状态发布器
 
+    // 添加与Python节点通信的发布器和订阅器
+    py_io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/py_io_status", 10);
+    py_control_command_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/py_control_command", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            this->handle_py_control_command(msg);
+        });
+
     displacement_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/displacement_command", rclcpp::QoS(10).reliable(),
         [this](const std_msgs::msg::String::SharedPtr msg) {
@@ -115,6 +123,26 @@ void EthercatNode::initialize_node() {
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
 }
 
+
+void EthercatNode::handle_py_control_command(const std_msgs::msg::String::SharedPtr msg) {
+    std::string command = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到Python控制命令: %s", command.c_str());
+    handle_control_command(command);
+}
+
+void EthercatNode::publish_py_io_status(const DI_Interface& di) {
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    ss << "DI12:" << di.buffer_in_position
+       << ",DI13:" << di.buffer_out_position
+       << ",DI14:" << di.conveyor_in_position
+       << ",DI15:" << di.conveyor_out_position;
+    
+    msg.data = ss.str();
+    py_io_status_pub_->publish(msg);
+}
+
 // 新增：在轴初始化后调用的方法
 void EthercatNode::initialize_after_axes() {
     RCLCPP_INFO(this->get_logger(), "开始初始化业务逻辑模块（延迟初始化）");
@@ -126,7 +154,6 @@ void EthercatNode::initialize_after_axes() {
     }
     
     // 初始化业务逻辑处理器
-    initialize_business_logic();
     initialize_layer_processor();
     RCLCPP_INFO(this->get_logger(), "业务逻辑模块初始化完成");
 }
@@ -152,12 +179,12 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis2_2));
     
     // 可以继续添加其他轴
+    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+    //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2)); 暂时停用
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2));
+        DriveBrand::HUICHUAN, "axis4", 2, AxisType::AXIS1, 0, 9.0));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 9.0));
-    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
+        DriveBrand::HUICHUAN, "axis5", 3, AxisType::AXIS1));
     // 配置每个轴
     for (auto& axis : servo_axes_) {
         axis->configure(master);
@@ -258,55 +285,35 @@ void EthercatNode::handle_control_command(const std::string& command) {
     system_status_pub_->publish(status_msg);
 
     if (command == CMD_START_MANUAL) {
-        // 手动模式：禁用业务逻辑自动模式
-        if (business_processor_) {
-            business_processor_->disable_auto_mode();
-        }
-        
+        // 手动模式
         for (auto& axis : servo_axes_) {
             axis->start_manual_mode();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到手动模式启动命令");
         
     } else if (command == CMD_START_AUTO) {
-        // 自动模式：启用业务逻辑自动模式
-        if (business_processor_) {
-            business_processor_->enable_auto_mode();
-        }
-        
+        // 自动模式
         for (auto& axis : servo_axes_) {
             axis->start_auto_mode();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到自动模式启动命令");
         
     } else if (command == CMD_STOP) {
-        // 停止模式：禁用业务逻辑自动模式并重置
-        if (business_processor_) {
-            business_processor_->disable_auto_mode();
-        }
-        
+        // 停止模式
         for (auto& axis : servo_axes_) {
             axis->stop();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到停止命令");
         
     } else if (command == CMD_CLEAR_FAULT) {
-        // 清除故障时也禁用自动模式
-        if (business_processor_) {
-            business_processor_->disable_auto_mode();
-        }
-        
+        // 清除故障
         for (auto& axis : servo_axes_) {
             axis->clear_fault();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到清除故障命令");
         
     } else if (command == CMD_RESET) {
-        // 重置时也禁用自动模式
-        if (business_processor_) {
-            business_processor_->disable_auto_mode();
-        }
-        
+        // 重置
         for (auto& axis : servo_axes_) {
             axis->reset_axis();
         }
@@ -536,131 +543,18 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
-void EthercatNode::initialize_business_logic() {
-    /// 创建并配置业务逻辑处理器
-    business_processor_ = std::make_unique<BusinessLogicProcessor>(this->get_logger());
-    
-    // 初始化处理器(传入轴数量用于验证)
-    size_t num_axes = servo_axes_.size();
-    business_processor_->initialize(num_axes);
-
-    // 设置固定目标层为1
-    business_processor_->set_target_layer(1);
-
-    // 启用业务逻辑处理
-    business_processor_->enable(); //disable
-    
-    RCLCPP_INFO(this->get_logger(), "业务逻辑处理器准备就绪，已配置 %zu 个轴的映射关系", num_axes);
-}
-
 void EthercatNode::handle_io_signals(DI_Interface di) {
-    // 这里可以添加IO信号处理逻辑
-    // 例如：根据DI信号状态控制伺服轴
-    // RCLCPP_INFO(this->get_logger(), 
-    //             "DI信号状态: DI12=%d, DI13=%d, DI14=%d, DI15=%d", 
-    //             static_cast<int>(di.buffer_in_position), 
-    //             static_cast<int>(di.buffer_out_position),
-    //             static_cast<int>(di.conveyor_in_position), 
-    //             static_cast<int>(di.conveyor_out_position));
+    // 发布IO状态到Python节点
+    publish_py_io_status(di);
+    
     monitor_di_changes(di);
     pthread_mutex_lock(&io_mutex_);
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
 
-    // 步骤1: 如果有业务逻辑处理器且已启用，并且处于自动模式，处理自动控制逻辑
-    if (business_processor_ && business_processor_->is_enabled() && business_processor_->is_auto_mode_enabled()) {
-        // 将DI信号传递给业务逻辑处理器进行分析
-        business_processor_->process_io_signals(di);
-        
-        // 获取业务逻辑生成的轴控制命令
-        auto commands = business_processor_->get_pending_commands();
-        
-        // RCLCPP_INFO(this->get_logger(), "生成 %zu 个业务逻辑命令", commands.size());
-        
-        for (const auto& cmd : commands) {
-            RCLCPP_INFO(this->get_logger(), "执行命令: 类型=%d, 轴=%s, 值=%s", 
-                       static_cast<int>(cmd.type), cmd.axis_name.c_str(), cmd.command_value.c_str());
-            
-            switch (cmd.type) {
-                case CommandType::JOG:
-                    // 直接处理点动命令
-                    for (auto& axis : servo_axes_) {
-                        if (axis->get_name() == cmd.axis_name) {
-                            if (cmd.command_value == "forward") {
-                                axis->jog_forward();
-                            } else if (cmd.command_value == "reverse") {
-                                axis->jog_reverse();
-                            } else if (cmd.command_value == "stop") {
-                                axis->jog_stop();
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                    
-                case CommandType::LAYER:
-                    // 直接处理层指令
-                    try {
-                        uint8_t layer = std::stoi(cmd.command_value);
-                        layer_processor_->process_layer_command(layer);
-                    } catch (const std::exception& e) {
-                        RCLCPP_ERROR(this->get_logger(), "层指令解析失败: %s", e.what());
-                    }
-                    break;
-                    
-                case CommandType::POSITION:
-                    // 原有的位置控制逻辑
-                    for (size_t i = 0; i < servo_axes_.size(); ++i) {
-                        if (servo_axes_[i]->get_name() == cmd.axis_name) {
-                            handle_axis_command(i, cmd.target_position);
-                            break;
-                        }
-                    }
-                    break;
-                    
-                case CommandType::STOP:
-                    // 停止命令
-                    for (size_t i = 0; i < servo_axes_.size(); ++i) {
-                        if (servo_axes_[i]->get_name() == cmd.axis_name) {
-                            servo_axes_[i]->jog_stop();
-                            break;
-                        }
-                    }
-                    break;
-            }
-        }
-        
-        // 清空已处理的命令
-        business_processor_->clear_pending_commands();
-    }
-    // 关键：每次处理IO信号时，都检查层运动是否完成
-    if (layer_processor_) {
-        // 查找axis5轴
-        std::shared_ptr<ServoAxisBase> axis5 = nullptr;
-        for (auto& axis : servo_axes_) {
-            if (axis->get_name() == "axis5") {
-                axis5 = axis;
-                break;
-            }
-        }
-        
-        if (axis5) {
-            bool motion_completed = layer_processor_->check_motion_completion(axis5);
-            if (motion_completed) {
-                RCLCPP_DEBUG(this->get_logger(), "检测到axis5运动完成");
-                
-                // 更新业务逻辑的当前层状态
-                if (business_processor_) {
-                    business_processor_->set_current_layer(layer_processor_->get_current_layer());
-                    
-                    RCLCPP_INFO(this->get_logger(), 
-                              "业务逻辑层状态更新: 当前层=%d, 目标层=%d",
-                              business_processor_->get_current_layer(),
-                              business_processor_->get_target_layer());
-                }
-            }
-        }
-    }
+    // 删除原有的BusinessLogicProcessor处理逻辑
+    // 业务逻辑现在由Python节点处理
+
     // 发布IO状态
     publish_io_status();
 }
@@ -735,7 +629,13 @@ void* io_monitor_thread(void* arg) {
 void EthercatNode::initialize_layer_processor() {
     // 创建层指令处理器
     layer_processor_ = std::make_unique<LayerCommandProcessor>(this);
+    // 创建层移动完成发布器
+    auto layer_completion_pub = this->create_publisher<std_msgs::msg::Bool>(
+        "/layer_motion_completed", rclcpp::QoS(10).reliable());
     
+    // 设置发布器给层指令处理器
+    layer_processor_->set_layer_completion_publisher(layer_completion_pub);    
+
     // 查找axis5的索引 - 需要正确找到axis5的位置
     size_t axis5_index = 0;
     bool axis5_found = false;
@@ -790,6 +690,25 @@ void EthercatNode::handle_layer_command(const std_msgs::msg::UInt8::SharedPtr ms
     }
     
     layer_processor_->process_layer_command(msg->data);
+}
+
+void EthercatNode::check_layer_motion_completion() {
+    if (!layer_processor_) {
+        return;
+    }
+    
+    // 查找axis5轴
+    std::shared_ptr<ServoAxisBase> axis5;
+    for (auto& axis : servo_axes_) {
+        if (axis->get_name() == "axis5") {
+            axis5 = axis;
+            break;
+        }
+    }
+    
+    if (axis5) {
+        layer_processor_->check_motion_completion(axis5);
+    }
 }
 
 void EthercatNode::monitor_di_changes(const DI_Interface& current_di) {
@@ -926,4 +845,40 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
         RCLCPP_ERROR(this->get_logger(), "速度值转换失败: %s, 错误: %s", speed_str.c_str(), e.what());
         return false;
     }
+}
+
+void EthercatNode::handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    uint8_t target_layer = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到入库启动命令，目标层: %d", target_layer);
+    
+    // 这里可以添加直接处理逻辑，或者通过Python节点处理
+}
+
+void EthercatNode::handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "收到入库停止命令");
+}
+
+void EthercatNode::handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    uint8_t source_layer = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到出库启动命令，源层: %d", source_layer);
+}
+
+void EthercatNode::handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "收到出库停止命令");
 }

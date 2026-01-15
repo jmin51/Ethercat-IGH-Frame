@@ -52,6 +52,14 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     
     is_moving_ = true;
     
+    // 新增：发布层移动开始消息
+    if (layer_completion_pub_) {
+        auto msg = std_msgs::msg::Bool();
+        msg.data = false;  // false表示移动开始/进行中
+        layer_completion_pub_->publish(msg);
+        RCLCPP_INFO(node_->get_logger(), "发布层移动开始消息: 第%d层 -> 第%d层", 
+                   current_layer_, target_layer_);
+    }
     // 发布位移指令
     publish_displacement_command(target_height);    // 位置要提前
     
@@ -114,20 +122,25 @@ void LayerCommandProcessor::set_motion_parameters(double speed_mm_per_s, double 
                "更新运动参数: 速度=%.1fmm/s, 加速度=%.1fmm/s²", 
                motion_speed_, motion_acceleration_);
 }
-
+// 修改 check_motion_completion 方法
 bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoAxisBase>& axis5) {
     if (!is_moving_) {
-        return false; // 没有运动在进行
+        return false;
     }
     
-    // 检查标志位
     if (axis5 && axis5->check_target_reached_flag()) {
-        // 运动完成
         current_layer_ = target_layer_;
         is_moving_ = false;
         
-        RCLCPP_INFO(node_->get_logger(), 
-                   "层指令执行完成: 到达第%d层", current_layer_);
+        // 新增：发布层移动完成消息
+        if (layer_completion_pub_) {
+            auto msg = std_msgs::msg::Bool();
+            msg.data = true;
+            layer_completion_pub_->publish(msg);
+            RCLCPP_INFO(node_->get_logger(), "发布层移动完成消息: 到达第%d层", current_layer_);
+        }
+        
+        RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
         return true;
     }
     

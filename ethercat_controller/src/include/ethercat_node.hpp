@@ -3,8 +3,7 @@
 
 #include "servo_axis_base.hpp"
 #include "servo_axis_factory.hpp"
-#include "io_interface.hpp"  // 新增IO模块头文件
-#include "BusinessLogicProcessor.hpp"  // 添加这行
+#include "io_interface.hpp"
 #include "LayerCommandProcessor.hpp" 
 #include <std_msgs/msg/u_int8.hpp> 
 #include <std_msgs/msg/empty.hpp>  // 添加这行，用于Empty消息类型
@@ -62,6 +61,8 @@ public:
     // 层指令相关方法
     void handle_layer_command(const std_msgs::msg::UInt8::SharedPtr msg);
     uint8_t get_current_layer() const { return layer_processor_->get_current_layer(); }
+    // 新增：层运动完成检查函数
+    void check_layer_motion_completion();
 
 private:
     void initialize_node();
@@ -75,6 +76,11 @@ private:
     void handle_axis_command(size_t axis_index, double newTargetPosition);
     double pulses_to_displacement(int32_t pulses, int32_t initial_pulses);
     void publish_io_status();  // 新增：发布IO状态
+    
+    // 添加与Python节点通信的方法
+    void handle_py_control_command(const std_msgs::msg::String::SharedPtr msg);
+    void publish_py_io_status(const DI_Interface& di);
+
     // 添加点动指令处理函数
     void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
 
@@ -86,6 +92,11 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr io_status_pub_;  // 新增IO状态发布器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr displacement_sub_;  // 从Float64MultiArray改为String
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
+    
+    // 添加与Python节点通信的发布器和订阅器
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr py_io_status_pub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr py_control_command_sub_;
+    
     // 添加点动指令订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
     // 添加入库流程话题订阅器
@@ -114,69 +125,25 @@ private:
     DO_Interface current_do_control_;
     pthread_mutex_t io_mutex_;
 
-    // 业务逻辑处理器 - 负责DI信号到轴控制的映射逻辑
-    std::unique_ptr<BusinessLogicProcessor> business_processor_;
-    std::vector<AxisCommand> last_executed_commands_;
+    // 删除BusinessLogicProcessor相关代码
+    // std::unique_ptr<BusinessLogicProcessor> business_processor_;
+    
+    // std::vector<AxisCommand> last_executed_commands_;
     // 层指令处理器
     std::unique_ptr<LayerCommandProcessor> layer_processor_;
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr layer_command_sub_;
 
-    // 初始化业务逻辑处理器——创建处理器实例并配置标准的DI-轴映射关系，初始化层指令处理器
-    void initialize_business_logic();
+    // 删除initialize_business_logic方法
     void initialize_layer_processor();
     void monitor_di_changes(const DI_Interface& current_di);
     void handle_do_control(const std_msgs::msg::String::SharedPtr msg);
     // 添加入库处理函数
-    void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg) {
-        if (node_shutting_down_.load() || !rclcpp::ok()) {
-            return;
-        }
-        
-        uint8_t target_layer = msg->data;
-        RCLCPP_INFO(this->get_logger(), "收到入库启动命令，目标层: %d", target_layer);
-        
-        if (business_processor_) {
-            business_processor_->start_warehouse_process(target_layer);
-        }
-    }
-    
-    void handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg) {
-        if (node_shutting_down_.load() || !rclcpp::ok()) {
-            return;
-        }
-        
-        RCLCPP_INFO(this->get_logger(), "收到入库停止命令");
-        
-        if (business_processor_) {
-            business_processor_->stop_warehouse_process();
-        }
-    }
+    void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg);
+    void handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg);
 
     // 添加出库处理函数
-    void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg) {
-        if (node_shutting_down_.load() || !rclcpp::ok()) {
-            return;
-        }
-        
-        uint8_t source_layer = msg->data;
-        RCLCPP_INFO(this->get_logger(), "收到出库启动命令，源层: %d", source_layer);
-        
-        if (business_processor_) {
-            business_processor_->start_outbound_process(source_layer);
-        }
-    }
-
-    void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg) {
-        if (node_shutting_down_.load() || !rclcpp::ok()) {
-            return;
-        }
-        
-        RCLCPP_INFO(this->get_logger(), "收到出库停止命令");
-        
-        if (business_processor_) {
-            business_processor_->stop_outbound_process();
-        }
-    }
+    void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg);
+    void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg);
 };
 
 // 全局变量声明
