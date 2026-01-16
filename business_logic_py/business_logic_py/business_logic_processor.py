@@ -85,10 +85,20 @@ class BusinessLogicProcessor(Node):
         self.outbound_delay_condition_triggered = False
         self.outbound_conveyor_in_detected = False
         
+        # 新增：条件二延迟控制
+        self.conveyor_in_then_out_delay_started = False
+        self.conveyor_in_then_out_delay_counter = 0
+        # 新增：条件二延迟控制变量 - 出库流程
+        self.outbound_conveyor_in_then_out_delay_started = False
+        self.outbound_conveyor_in_then_out_delay_counter = 0
+        # 新增：层指令状态跟踪，避免重复发送
+        self.last_layer_command = None  # 存储最后发送的层指令
+        self.layer_command_sent = False  # 标记层指令是否已发送
+
         # 常量定义
         self.DELAY_BEFORE_STOP_MS = 10000
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
-        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 8000
+        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 500
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
         
         # 待处理命令队列
@@ -402,19 +412,40 @@ class BusinessLogicProcessor(Node):
             if buffer_out:
                 # 使用优化后的DO控制函数，确保只发送一次
                 self.send_do_control_once("813", True)  # 激活DO14皮带反转
-                self.get_logger().info('检测到运行至缓存架出料和接驳台入料位，等待提升机运行')
+                # self.get_logger().info('检测到运行至缓存架出料和接驳台入料位，等待提升机运行')
             
             # 修复：先更新conveyor_in检测状态，再检查条件
             # 实时跟踪conveyor_in信号变化
             if conveyor_in and not self.conveyor_in_detected:
                 # conveyor_in从False变为True
                 self.conveyor_in_detected = True
+            
             # 修改：扩展板子到位检测条件
             # 条件1：conveyor_out为True（直接检测到出料）
             # 条件2：conveyor_in曾经为True后又变为False（检测到货物进入后离开）
             conveyor_out_detected = conveyor_out
             conveyor_in_then_out = (self.conveyor_in_detected and not conveyor_in)
-            board_in_position = conveyor_out_detected or conveyor_in_then_out
+            
+            # 新增：条件二触发时的延迟处理
+            if conveyor_in_then_out and not self.conveyor_in_then_out_delay_started:
+                self.conveyor_in_then_out_delay_started = True
+                self.conveyor_in_then_out_delay_counter = 0
+                self.get_logger().info('检测到条件二（conveyor_in变化），开始1秒延迟')
+            
+            # 处理条件二的延迟
+            if self.conveyor_in_then_out_delay_started:
+                self.conveyor_in_then_out_delay_counter += 1
+                
+                # 1秒延迟（10个周期，每周期100ms）
+                if self.conveyor_in_then_out_delay_counter >= 10:
+                    board_in_position = True
+                    self.conveyor_in_then_out_delay_started = False
+                    self.get_logger().info('条件二延迟结束，认为板子到位')
+                else:
+                    board_in_position = False
+            else:
+                # 条件一立即触发
+                board_in_position = conveyor_out_detected
             
             # 记录检测状态用于调试
             if conveyor_in_then_out and not conveyor_out_detected:
@@ -422,6 +453,8 @@ class BusinessLogicProcessor(Node):
 
             # 继续输送直到检测到板子到位
             if board_in_position:
+                self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
+                
                 # 停止输送带
                 self.add_command(ControlAction(
                     CommandType.JOG, "axis1_1", "stop",
@@ -432,7 +465,8 @@ class BusinessLogicProcessor(Node):
                     description="停止轴1_2"
                 ))
                 self.send_do_control_once("813", False)  # 停止DO14皮带反转
-                self.conveyor_in_detected = False # 重置conveyor_in检测标志
+                self.conveyor_in_detected = False  # 重置conveyor_in检测标志
+                self.conveyor_in_then_out_delay_started = False  # 重置延迟标志
 
                 # 发送目标层层指令
                 self.send_layer_command(self.target_layer)
@@ -565,6 +599,7 @@ class BusinessLogicProcessor(Node):
             return
 
         if self.outbound_state == OutboundState.IDLE:
+
             # 等待启动信号
             if (self.outbound_process_requested and 
                 self.check_outbound_condition()):
@@ -606,7 +641,7 @@ class BusinessLogicProcessor(Node):
 
         elif self.outbound_state == OutboundState.POST_LIFT_PROCESSING:
             """出库流程的层移动后处理状态"""
-            # 内联处理逻辑
+            # 内联处理逻辑 需要避免多次指令下发和海量打印to do
             self.get_logger().info('出库流程：层移动完成，继续执行后续操作')
             self.send_do_control_once("813", True)  # 激活DO14皮带反转
             
@@ -626,23 +661,40 @@ class BusinessLogicProcessor(Node):
                 # conveyor_in从False变为True
                 self.outbound_conveyor_in_detected = True
                 self.get_logger().info('检测到货物进入接驳台(conveyor_in=1)')
+            
             # 修改：扩展板子到位检测条件
+            # 条件1：conveyor_out为True（直接检测到出料）
+            # 条件2：conveyor_in曾经为True后又变为False（检测到货物进入后离开）
             conveyor_out_detected = conveyor_out
             conveyor_in_then_out = (self.outbound_conveyor_in_detected and not conveyor_in)
-            board_in_position = conveyor_out_detected or conveyor_in_then_out
-
-            # # 检测货物到达接驳台
-            # if not self.outbound_conveyor_in_detected:
-            #     if conveyor_in:
-            #         self.outbound_conveyor_in_detected = True
-            #         self.get_logger().info('检测到货物进入接驳台(conveyor_in=1)')
+            
+            # 新增：条件二触发时的延迟处理
+            if conveyor_in_then_out and not self.outbound_conveyor_in_then_out_delay_started:
+                self.outbound_conveyor_in_then_out_delay_started = True
+                self.outbound_conveyor_in_then_out_delay_counter = 0
+                self.get_logger().info('检测到出库条件二（conveyor_in变化），开始1秒延迟')
+            
+            # 处理条件二的延迟
+            if self.outbound_conveyor_in_then_out_delay_started:
+                self.outbound_conveyor_in_then_out_delay_counter += 1
+                
+                # 0.5秒延迟（5个周期，每周期100ms）
+                if self.outbound_conveyor_in_then_out_delay_counter >= 5:
+                    board_in_position = True
+                    self.outbound_conveyor_in_then_out_delay_started = False
+                    self.get_logger().info('出库条件二延迟结束，认为板子到位')
+                else:
+                    board_in_position = False
+            else:
+                # 条件一立即触发
+                board_in_position = conveyor_out_detected
+            
             # 记录检测状态用于调试
             if conveyor_in_then_out and not conveyor_out_detected:
                 self.get_logger().info(f'检测到出库conveyor_in变化条件: outbound_conveyor_in_detected={self.outbound_conveyor_in_detected}, conveyor_in={conveyor_in}')
 
-
             if board_in_position: # 检测板子到位条件
-                self.get_logger().info('检测到货物到达缓存架出料位(conveyor_out=1)，停止输送带')
+                self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
                 
                 # 停止轴2
                 self.add_command(ControlAction(
@@ -654,42 +706,56 @@ class BusinessLogicProcessor(Node):
                     description="停止轴2_2"
                 ))
                 self.send_do_control_once("811", False)  # 停止DO信号
-                self.outbound_conveyor_in_detected = False # 重置检测标志
+                self.send_do_control_once("813", False)  # 停止DO14皮带反转
+                self.outbound_conveyor_in_detected = False  # 重置检测标志
+                self.outbound_conveyor_in_then_out_delay_started = False  # 重置延迟标志
                 
                 self.outbound_state = OutboundState.CONVEYOR_MOVING
                 self.get_logger().info('进入输送带运行状态')
 
         elif self.outbound_state == OutboundState.CONVEYOR_MOVING:
-            # 返回第一层
+            """输送带运行状态 - 优化版本"""
+            # 1. 首先发送层指令1，等待提升机到达
             self.send_layer_command(1)
             
-            if conveyor_out:
-                self.get_logger().info('检测到货物到达缓存架出料位')
-                self.send_do_control_once("813", False)
-                
-                if not self.outbound_delay_started and not self.outbound_delay_condition_triggered:
-                    self.outbound_delay_condition_triggered = True
-                    self.outbound_delay_started = True
-                    self.outbound_delay_counter = 0
-                    self.get_logger().info(f'检测到出库停止条件，开始{self.OUTBOUND_DELAY_BEFORE_STOP_MS//1000}秒延迟')
+            # 2. 等待提升机到达第1层
+            if not self.layer_motion_completed:
+                # 每5秒打印一次等待状态
+                self.state_change_counter += 1
+                if self.state_change_counter >= 50:  # 5秒打印一次
+                    self.state_change_counter = 0
+                    self.get_logger().info('等待提升机到达第1层...')
+                return  # 继续等待，不执行后续逻辑
             
-            # 处理延迟逻辑
-            if self.outbound_delay_started:
-                self.outbound_delay_counter += 1
-
-                if self.outbound_delay_counter >= self.OUTBOUND_DELAY_COUNTER_MAX:
-                    self.outbound_delay_started = False
-                    self.outbound_delay_condition_triggered = False
-                    self.outbound_state = OutboundState.COMPLETED
-                    self.get_logger().info('延迟结束，停止输送带并进入完成状态')
+            # 3. 提升机到达第1层后，启动输送带
+            if not hasattr(self, 'outbound_conveyor_started') or not self.outbound_conveyor_started:
+                self.send_do_control_once("813", True)  # 启动DO14皮带正转
+                self.outbound_conveyor_started = True
+                self.get_logger().info('提升机已到达第1层，启动输送带')
+                # 重置层移动完成标志，为下一次使用做准备
+                self.layer_motion_completed = False
+                self.outbound_state = OutboundState.COMPLETED
 
         elif self.outbound_state == OutboundState.COMPLETED:
-            # 回到第1层
-            self.send_layer_command(1)
+            # 4. 检测货物完全送出
+            if conveyor_out and not self.outbound_delay_started:
+                self.outbound_delay_started = True
+                self.outbound_delay_counter = 0
+                self.get_logger().info(f'检测到货物到达出料位，开始{self.OUTBOUND_DELAY_BEFORE_STOP_MS//1000}秒延迟')
             
-            if self.check_outbound_completion_condition():
-                self.outbound_state = OutboundState.IDLE
-                self.get_logger().info('出库流程完成，回到初始状态')
+            # 5. 延迟处理
+            if self.outbound_delay_started:
+                self.outbound_delay_counter += 1
+                
+                if self.outbound_delay_counter >= self.OUTBOUND_DELAY_COUNTER_MAX:
+                    # 停止输送带并完成流程
+                    self.send_do_control_once("813", False)
+                    self.outbound_delay_started = False
+                    self.outbound_state = OutboundState.IDLE
+                    # 重置所有相关标志
+                    if hasattr(self, 'outbound_conveyor_started'):
+                        self.outbound_conveyor_started = False
+                    self.get_logger().info('出库流程完成')
 
     def check_outbound_condition(self) -> bool:
         """检查出库启动条件"""
@@ -729,10 +795,21 @@ class BusinessLogicProcessor(Node):
         self.get_logger().info(f'已发送点动命令: {command}')
 
     def send_layer_command(self, layer: int):
-        """发送层指令"""
+        """发送层指令 - 优化版本，确保只发送一次"""
+        # 检查是否已经发送过相同的层指令
+        if self.last_layer_command == layer and self.layer_command_sent:
+            self.get_logger().debug(f'层指令已发送过，跳过: 第{layer}层')
+            return
+        
+        # 发送新命令
         msg = UInt8()
         msg.data = layer
         self.layer_pub.publish(msg)
+        
+        # 记录发送状态
+        self.last_layer_command = layer
+        self.layer_command_sent = True
+        
         self.get_logger().info(f'已发送层指令: 第{layer}层')
 
     def send_do_control_once(self, do_address: str, state: bool):
@@ -796,6 +873,16 @@ class BusinessLogicProcessor(Node):
         self.outbound_delay_condition_triggered = False
         self.outbound_delay_counter = 0
         
+        # 新增：重置条件二延迟控制变量
+        self.conveyor_in_then_out_delay_started = False
+        self.conveyor_in_then_out_delay_counter = 0
+        self.outbound_conveyor_in_then_out_delay_started = False
+        self.outbound_conveyor_in_then_out_delay_counter = 0
+
+        # 重置层指令发送状态，允许重新发送
+        self.layer_command_sent = False
+        self.last_layer_command = None
+
         # 重置DO命令发送状态，允许重新发送
         self.reset_do_command_state()
         
