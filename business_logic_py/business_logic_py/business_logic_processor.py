@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, UInt8, Empty, Bool
+from std_msgs.msg import String, Int8, Empty, Bool
 import time
 from enum import Enum, auto
 from typing import Dict, List, Optional
@@ -121,7 +121,7 @@ class BusinessLogicProcessor(Node):
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
         self.displacement_pub = self.create_publisher(String, '/displacement_command', 10)
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
-        self.layer_pub = self.create_publisher(UInt8, '/layer_command', 10)
+        self.layer_pub = self.create_publisher(Int8, '/layer_command', 10)
         
         # 创建订阅器
         self.io_status_sub = self.create_subscription(
@@ -139,7 +139,7 @@ class BusinessLogicProcessor(Node):
         )
         
         self.warehouse_start_sub = self.create_subscription(
-            UInt8,
+            Int8,
             '/warehouse_start', 
             self.warehouse_start_callback,
             10
@@ -153,7 +153,7 @@ class BusinessLogicProcessor(Node):
         )
         
         self.outbound_start_sub = self.create_subscription(
-            UInt8,
+            Int8,
             '/outbound_start',
             self.outbound_start_callback,
             10
@@ -800,7 +800,7 @@ class BusinessLogicProcessor(Node):
             return
         
         # 发送新命令
-        msg = UInt8()
+        msg = Int8()
         msg.data = layer
         self.layer_pub.publish(msg)
         

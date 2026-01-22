@@ -19,19 +19,22 @@ LayerCommandProcessor::LayerCommandProcessor(rclcpp::Node* node)
 void LayerCommandProcessor::initialize(size_t axis5_index) {
     axis5_index_ = axis5_index;
     RCLCPP_INFO(node_->get_logger(), 
-                "层指令处理器初始化完成，axis5索引: %zu", axis5_index_);
+                "层指令处理器初始化完成，axis5索引: %zu，支持层数范围: -20到+30", axis5_index_);
 }
 
 void LayerCommandProcessor::initialize_default_layer_heights() {
     // 默认配置：每层25mm间距，第1层为0mm
     layer_heights_.clear();
-    for (uint8_t layer = 1; layer <= 25; ++layer) {
+
+        // 默认配置：每层25mm间距，第1层为0mm
+    for (int8_t layer = -20; layer <= 25; ++layer) {
         layer_heights_[layer] = (layer - 1) * 25.0;
     }
     RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，共%ld层", layer_heights_.size());
+    RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，范围: -20到+30，共%d层", static_cast<int>(layer_heights_.size()));
 }
 
-void LayerCommandProcessor::process_layer_command(uint8_t layer) {
+void LayerCommandProcessor::process_layer_command(int8_t layer) {
     if (!validate_layer(layer)) {
         RCLCPP_ERROR(node_->get_logger(), "无效层指令: %d", layer);
         return;
@@ -68,22 +71,23 @@ void LayerCommandProcessor::process_layer_command(uint8_t layer) {
     // RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
 }
 
-bool LayerCommandProcessor::validate_layer(uint8_t layer) {
-    if (layer < 1) {
-        RCLCPP_ERROR(node_->get_logger(), "层数不能小于1: %d", layer);
+bool LayerCommandProcessor::validate_layer(int8_t layer) {
+    // 支持-20到+30的范围
+    if (layer < -20 || layer > 30) {
+        RCLCPP_ERROR(node_->get_logger(), "层数超出有效范围(-20到30): %d", layer);
         return false;
     }
     
     if (layer_heights_.find(layer) == layer_heights_.end()) {
-        RCLCPP_ERROR(node_->get_logger(), "无效层数: %d，可用层数: 1-%zu", 
-                    layer, layer_heights_.size());
+        RCLCPP_ERROR(node_->get_logger(), "无效层数: %d, 层高映射表大小: %zu", 
+                    static_cast<int>(layer), layer_heights_.size());
         return false;
     }
     
     return true;
 }
 
-double LayerCommandProcessor::calculate_layer_height(uint8_t layer) {
+double LayerCommandProcessor::calculate_layer_height(int8_t layer) {
     auto it = layer_heights_.find(layer);
     if (it != layer_heights_.end()) {
         return it->second;
@@ -110,7 +114,7 @@ std::string LayerCommandProcessor::format_displacement_command(double axis5_targ
     return ss.str();
 }
 
-void LayerCommandProcessor::set_layer_heights(const std::map<uint8_t, double>& layer_heights) {
+void LayerCommandProcessor::set_layer_heights(const std::map<int8_t, double>& layer_heights) {
     layer_heights_ = layer_heights;
     RCLCPP_INFO(node_->get_logger(), "更新层高配置，共%zu层", layer_heights_.size());
 }

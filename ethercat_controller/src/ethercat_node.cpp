@@ -681,15 +681,20 @@ void EthercatNode::handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg
         return;
     }
     
-    RCLCPP_INFO(this->get_logger(), "收到层指令: 第%d层", msg->data);
-    layer_processor_->process_layer_command(msg->data);
-    // 调试信息：打印当前所有轴的状态
+    int8_t layer = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到层指令: 第%d层", layer);
+    
+    if (layer_processor_) {
+        layer_processor_->process_layer_command(layer);
+    } else {
+        RCLCPP_ERROR(this->get_logger(), "层指令处理器未初始化");
+    }
+
+    // 调试信息（todo删）：打印当前所有轴的状态
     RCLCPP_INFO(this->get_logger(), "当前轴数量: %zu", servo_axes_.size());
     for (size_t i = 0; i < servo_axes_.size(); ++i) {
         RCLCPP_INFO(this->get_logger(), "轴[%zu]: %s", i, servo_axes_[i]->get_name().c_str());
     }
-    
-    layer_processor_->process_layer_command(msg->data);
 }
 
 void EthercatNode::check_layer_motion_completion() {
