@@ -667,16 +667,16 @@ void EthercatNode::initialize_layer_processor() {
     layer_processor_->initialize(axis5_index);
     
     // 创建层指令订阅器
-    layer_command_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
+    layer_command_sub_ = this->create_subscription<std_msgs::msg::Int8>(
         "/layer_command", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
+        [this](const std_msgs::msg::Int8::SharedPtr msg) {
             handle_layer_command(msg);
         });
     
     RCLCPP_INFO(this->get_logger(), "层指令处理器初始化完成");
 }
 
-void EthercatNode::handle_layer_command(const std_msgs::msg::UInt8::SharedPtr msg) {
+void EthercatNode::handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg) {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
         return;
     }

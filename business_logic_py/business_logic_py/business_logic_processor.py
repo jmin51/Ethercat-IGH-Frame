@@ -635,14 +635,6 @@ class BusinessLogicProcessor(Node):
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
             
-            # 立即转换到新的状态
-            self.outbound_state = OutboundState.POST_LIFT_PROCESSING
-            self.get_logger().info('进入出库流程层移动后处理状态')
-
-        elif self.outbound_state == OutboundState.POST_LIFT_PROCESSING:
-            """出库流程的层移动后处理状态"""
-            # 内联处理逻辑 需要避免多次指令下发和海量打印to do
-            self.get_logger().info('出库流程：层移动完成，继续执行后续操作')
             self.send_do_control_once("813", True)  # 激活DO14皮带反转
             
             # 启动轴2正转
@@ -655,7 +647,13 @@ class BusinessLogicProcessor(Node):
                 description="启动轴2_2反转（出库）"
             ))
             self.send_do_control_once("811", True)  # 激活DO信号
-            
+
+            # 立即转换到新的状态
+            self.outbound_state = OutboundState.POST_LIFT_PROCESSING
+            self.get_logger().info('出库流程：层移动完成，继续执行后续操作')
+
+        elif self.outbound_state == OutboundState.POST_LIFT_PROCESSING:
+            """出库流程的层移动后处理状态"""         
             # 修复：先更新outbound_conveyor_in_detected状态
             if conveyor_in and not self.outbound_conveyor_in_detected:
                 # conveyor_in从False变为True

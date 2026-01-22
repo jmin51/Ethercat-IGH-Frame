@@ -43,7 +43,6 @@ set(SOURCES
   src/huichuan_servo_axis.cpp
   src/servo_axis_factory.cpp
   src/io_modules/io_interface.cpp  # 新增IO模块
-  src/business/BusinessLogicProcessor.cpp  # 新增业务逻辑模块
   src/business/LayerCommandProcessor.cpp  # 新增层指令处理模块
 )
 

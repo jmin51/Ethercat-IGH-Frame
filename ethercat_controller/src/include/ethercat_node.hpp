@@ -6,6 +6,7 @@
 #include "io_interface.hpp"
 #include "LayerCommandProcessor.hpp" 
 #include <std_msgs/msg/u_int8.hpp> 
+#include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/empty.hpp>  // 添加这行，用于Empty消息类型
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
@@ -59,7 +60,7 @@ public:
     bool is_io_running() const { return io_running_.load(); }
 
     // 层指令相关方法
-    void handle_layer_command(const std_msgs::msg::UInt8::SharedPtr msg);
+    void handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg);
     uint8_t get_current_layer() const { return layer_processor_->get_current_layer(); }
     // 新增：层运动完成检查函数
     void check_layer_motion_completion();
@@ -131,7 +132,7 @@ private:
     // std::vector<AxisCommand> last_executed_commands_;
     // 层指令处理器
     std::unique_ptr<LayerCommandProcessor> layer_processor_;
-    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr layer_command_sub_;
+    rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr layer_command_sub_;
 
     // 删除initialize_business_logic方法
     void initialize_layer_processor();
