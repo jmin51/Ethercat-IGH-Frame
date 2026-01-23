@@ -121,6 +121,22 @@ void EthercatNode::initialize_node() {
     pthread_mutex_init(&io_mutex_, nullptr);
     
     RCLCPP_INFO(this->get_logger(), "EtherCAT节点初始化完成");
+
+    // 初始化板宽控制
+    initialize_board_width_parameters();
+    
+    // 创建板宽设定订阅器
+    board_width_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+        "/board_width_command", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::Float64::SharedPtr msg) {
+            this->handle_board_width_command(msg);
+        });
+    
+    // 创建板宽状态发布器
+    board_width_status_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "/board_width_status", rclcpp::QoS(10).reliable());
+    
+    RCLCPP_INFO(this->get_logger(), "板宽控制模块初始化完成");
 }
 
 
@@ -182,7 +198,7 @@ void EthercatNode::init_axes(ec_master_t* master) {
     // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
     //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2)); 暂时停用
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis4", 2, AxisType::AXIS1, 0, 9.0));
+        DriveBrand::HUICHUAN, "axis4", 2, AxisType::AXIS1, 0, 7.5)); // 汇川轴，减速比9.0,调式结果是7.5
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis5", 3, AxisType::AXIS1));
     // 配置每个轴
@@ -270,6 +286,27 @@ void EthercatNode::publish_joint_states() {
     if (log_counter++ >= 100) {
         log_counter = 0;
         RCLCPP_DEBUG(this->get_logger(), "发布关节状态: %zu个关节", msg.name.size());
+    }
+
+    // 检查板宽调整是否完成
+    if (board_width_moving_) {
+        int axis4_index = find_axis4_index();
+        if (axis4_index != -1) {
+            auto& axis4 = servo_axes_[axis4_index];
+            
+            // 检查是否到达目标
+            if (axis4->is_target_reached()) {
+                // 更新当前板宽
+                current_board_width_ = target_board_width_;
+                board_width_moving_ = false;
+                
+                RCLCPP_INFO(this->get_logger(), 
+                           "板宽调整完成: 当前板宽%.1fcm", current_board_width_);
+                
+                publish_board_width_status(current_board_width_, target_board_width_, 
+                                         false, "调整完成");
+            }
+        }
     }
 }
 
@@ -886,4 +923,174 @@ void EthercatNode::handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr ms
     }
     
     RCLCPP_INFO(this->get_logger(), "收到出库停止命令");
+}
+
+/* ---------------------------------------板宽度调整------------------------------------------------ */
+void EthercatNode::initialize_board_width_parameters() {
+    // 机械参数
+    screw_lead_ = 10.0;           // 丝杠导程10mm
+    // gear_ratio_ = 9.0;            // 减速比9.0
+    pulses_per_rev_ = 10000;      // 每转脉冲数10000
+    
+    // 板宽参数
+    min_board_width_ = 10.0;      // 最小板宽10cm
+    max_board_width_ = 50.0;      // 最大板宽50cm
+    board_width_resolution_ = 0.01; // 板宽分辨率0.01cm
+    current_board_width_ = 15.0;   // 默认板宽10cm
+    target_board_width_ = 15.0;
+    board_width_moving_ = false;
+    board_width_updated_ = false;
+    
+    RCLCPP_INFO(this->get_logger(), 
+               "板宽控制参数: 范围%.2f-%.2fcm, 导程%.2fmm, 减速比%.2f, 分辨率%.2fcm",
+               min_board_width_, max_board_width_, screw_lead_, gear_ratio_, board_width_resolution_);
+}
+
+void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::SharedPtr msg) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    double target_width = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到板宽设定命令: %.2fcm", target_width);
+    
+    // 验证板宽范围
+    if (!validate_board_width(target_width)) {
+        RCLCPP_ERROR(this->get_logger(), 
+                    "无效板宽: %.2fcm, 有效范围: %.2f-%.2fcm", 
+                    target_width, min_board_width_, max_board_width_);
+        return;
+    }
+    
+    // 检查是否与当前板宽相同
+    if (fabs(target_width - current_board_width_) < board_width_resolution_) {
+        RCLCPP_INFO(this->get_logger(), "板宽已为目标值: %.2fcm", target_width);
+        publish_board_width_status(current_board_width_, target_width, false, "已到达目标板宽");
+        return;
+    }
+    
+    // 设置目标板宽并立即执行调整
+    target_board_width_ = target_width;
+    board_width_moving_ = true;
+    
+    RCLCPP_INFO(this->get_logger(), 
+               "开始调整板宽: %.2fcm -> %.2fcm", current_board_width_, target_board_width_);
+
+    // 立即执行板宽调整
+    execute_board_width_adjustment();
+    
+    publish_board_width_status(current_board_width_, target_board_width_, true, "开始调整板宽");
+}
+
+bool EthercatNode::validate_board_width(double width) {
+    if (width < min_board_width_ || width > max_board_width_) {
+        return false;
+    }
+    
+    // 检查分辨率
+    double remainder = fmod(width * 100, board_width_resolution_ * 100);
+    if (fabs(remainder) > 0.001) {  // 浮点数精度容差
+        RCLCPP_WARN(this->get_logger(), 
+                   "板宽%.1fcm超出分辨率%.1fcm，将四舍五入", width, board_width_resolution_);
+    }
+    
+    return true;
+}
+
+double EthercatNode::calculate_displacement_from_width(double board_width_cm) {
+    // 计算原理：
+    // 1. 板宽变化量 (cm) = 目标板宽 - 当前板宽
+    // 2. 转换为毫米: Δwidth_mm = Δwidth_cm × 10
+    // 3. 考虑机械传动: 位移 = Δwidth_mm / (丝杠导程 × 减速比)
+    // 4. 转换为脉冲数: 脉冲 = 位移 × (脉冲数/转) / 丝杠导程
+    // 计算板宽变化量（厘米转毫米）
+    double width_change_cm = board_width_cm - current_board_width_;
+    double width_change_mm = width_change_cm * 10.0;  // cm转mm
+    
+    // 计算需要的电机位移（毫米）
+    // 位移 = 板宽变化量 × 机械传动比
+    double displacement_mm = width_change_mm;  // 根据实际机械结构调整系数
+    
+    RCLCPP_DEBUG(this->get_logger(),
+                "板宽计算: %.2fcm->%.2fcm, 变化%.2fmm, 需要位移%.3fmm",
+                current_board_width_, board_width_cm, width_change_mm, displacement_mm);
+    
+    return displacement_mm;
+}
+
+// double EthercatNode::calculate_width_from_displacement(double displacement_mm) {
+//     // 反向计算：从位移计算板宽
+//     // 电机转数 = 位移 / 丝杠导程
+//     // 输出转数 = 电机转数 / 减速比
+//     // 板宽变化 = 输出转数 × 丝杠导程
+    
+//     double motor_revolutions = displacement_mm / screw_lead_;
+//     double output_revolutions = motor_revolutions / gear_ratio_;
+//     double width_change_mm = output_revolutions * screw_lead_;
+//     double width_change_cm = width_change_mm / 10.0;
+    
+//     return current_board_width_ + width_change_cm;
+// }
+
+int EthercatNode::find_axis4_index() {
+    for (size_t i = 0; i < servo_axes_.size(); ++i) {
+        if (servo_axes_[i]->get_name() == "axis4") {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;  // 未找到
+}
+
+void EthercatNode::execute_board_width_adjustment() {
+    if (!board_width_moving_) {
+        return;
+    }
+    
+    // 查找axis4（板宽调整轴）
+    int axis4_index = find_axis4_index();
+    if (axis4_index == -1) {
+        RCLCPP_ERROR(this->get_logger(), "未找到axis4，无法执行板宽调整");
+        board_width_moving_ = false;
+        return;
+    }
+    
+    // 计算需要的位移（毫米）
+    double displacement_mm = calculate_displacement_from_width(target_board_width_);
+    
+    RCLCPP_INFO(this->get_logger(),
+               "板宽调整: 目标%.2fcm, 需要位移%.3fmm",
+               target_board_width_, displacement_mm);
+    
+    // 使用现有的位移命令接口控制电机
+    // handle_axis_command(axis4_index, displacement_mm);
+    double absolute_displacement_mm = (target_board_width_ - 10.0) * 10.0; // 10.0为板宽零点
+    handle_axis_command(axis4_index, absolute_displacement_mm);
+    
+    // 发布状态
+    publish_board_width_status(current_board_width_, target_board_width_, true, "板宽调整中");
+}
+
+void EthercatNode::publish_board_width_status(double current_width, double target_width, 
+                                            bool moving, const std::string& status) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    ss << "current:" << std::fixed << std::setprecision(2) << current_width
+       << ",target:" << std::fixed << std::setprecision(2) << target_width
+       << ",moving:" << (moving ? "true" : "false")
+       << ",status:" << status;
+    
+    msg.data = ss.str();
+    board_width_status_pub_->publish(msg);
+    
+    // 减少日志频率，避免刷屏
+    static int log_counter = 0;
+    if (log_counter++ % 10 == 0) {
+        RCLCPP_INFO(this->get_logger(), "板宽状态: %s", msg.data.c_str());
+        log_counter = 0;
+    }
 }

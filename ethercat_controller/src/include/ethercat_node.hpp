@@ -7,6 +7,7 @@
 #include "LayerCommandProcessor.hpp" 
 #include <std_msgs/msg/u_int8.hpp> 
 #include <std_msgs/msg/int8.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/empty.hpp>  // 添加这行，用于Empty消息类型
 #include <ecrt.h>
 #include <rclcpp/rclcpp.hpp>
@@ -145,6 +146,36 @@ private:
     // 添加出库处理函数
     void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg);
     void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg);
+
+// 在EthercatNode类定义中添加
+private:
+    // 板宽控制相关
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr board_width_sub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr board_width_status_pub_;
+    
+    double current_board_width_;           // 当前板宽（cm）
+    double target_board_width_;           // 目标板宽（cm）
+    double min_board_width_;              // 最小板宽10cm
+    double max_board_width_;              // 最大板宽50cm
+    double board_width_resolution_;       // 板宽分辨率
+    bool board_width_moving_;             // 板宽调整中标志
+    std::atomic<bool> board_width_updated_; // 板宽更新标志
+    
+    // 机械参数
+    double screw_lead_;                   // 丝杠导程10mm
+    double gear_ratio_;                   // 减速比9.0
+    int pulses_per_rev_;                  // 每转脉冲数10000
+    
+    // 板宽控制方法
+    void initialize_board_width_parameters();
+    void handle_board_width_command(const std_msgs::msg::Float64::SharedPtr msg);
+    double calculate_displacement_from_width(double board_width_cm);
+    // double calculate_width_from_displacement(double displacement_mm);
+    bool validate_board_width(double width);
+    void execute_board_width_adjustment();
+    void publish_board_width_status(double current_width, double target_width, 
+                                   bool moving, const std::string& status);
+    int find_axis4_index();  // 查找axis4的索引
 };
 
 // 全局变量声明
