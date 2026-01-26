@@ -12,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        # 添加launch目录支持
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'business_logic_node = business_logic_py.business_logic_processor:main',
+            'byte_multiarray_parser = business_logic_py.byte_multiarray_parser:main',  # 新增
         ],
     },
 )
