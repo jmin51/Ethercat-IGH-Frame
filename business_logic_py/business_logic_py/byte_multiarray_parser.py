@@ -47,7 +47,23 @@ class ByteMultiArrayParser(Node):
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
         self.board_width_pub = self.create_publisher(Float64, '/board_width_command', 10)
         
-        self.get_logger().info('ByteMultiArray解析器已启动（根据指令码表格修改）')
+        # 添加IO状态跟踪
+        self.last_io_state = 0  # 初始状态为全0
+        
+        self.get_logger().info('ByteMultiArray解析器已启动（支持0-13位IO控制）')
+
+    def ensure_int(self, value):
+        """确保值为整数类型"""
+        if isinstance(value, int):
+            return value
+        elif isinstance(value, (bytes, bytearray)):
+            return int.from_bytes(value, byteorder='little')
+        else:
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                self.get_logger().warn(f'无法转换为整数: {value}')
+                return 0
 
     def unified_callback(self, msg):
         """处理统一的ByteMultiArray消息"""
@@ -56,15 +72,20 @@ class ByteMultiArrayParser(Node):
             return
             
         try:
+            # 关键修复：确保所有数据都是整数类型
+            data_list = []
+            for item in msg.data:
+                data_list.append(self.ensure_int(item))
+            
             # 根据图片，指令码可能是16位（2字节）
             # 假设是小端序，先尝试解析为16位整数
-            if len(msg.data) >= 2:
-                command_code = (msg.data[1] << 8) | msg.data[0]  # 小端序
-                payload = msg.data[2:]  # 去除命令码后的负载数据
+            if len(data_list) >= 2:
+                command_code = (data_list[1] << 8) | data_list[0]  # 小端序
+                payload = data_list[2:]  # 去除命令码后的负载数据
             else:
-                # 如果数据长度不足，尝试单字节命令码（用于原有的非表格指令）
-                command_code = msg.data[0]
-                payload = msg.data[1:]
+                # 如果数据长度不足，尝试单字节命令码
+                command_code = data_list[0]
+                payload = data_list[1:]
             
             self.get_logger().info(f'解析命令: 0x{command_code:04X}, 负载长度: {len(payload)}')
             
@@ -100,9 +121,74 @@ class ByteMultiArrayParser(Node):
         except Exception as e:
             self.get_logger().error(f'消息解析错误: {e}')
 
+    def process_write_io(self, payload):
+        """处理写IO命令 (0x115) - /do_control，支持状态翻转检测"""
+        # IO地址映射表（0-15位）
+        io_mapping = {
+            0: 800,   # 启动按钮灯
+            1: 801,   # 复位按钮灯
+            2: 802,   # 暂停按钮灯
+            3: 803,   # 蜂鸣器
+            4: 804,   # 三色红灯
+            5: 805,   # 三色黄灯
+            6: 806,   # 三色绿灯
+            7: 807,   # 预留
+            8: 808,   # 预留
+            9: 809,   # 预留
+            10: 810,  # 顶升气缸下降
+            11: 811,  # 齿轮对接气缸伸出
+            12: 812,  # 皮带正转启动
+            13: 813,  # 皮带反转启动
+            14: 814,  # 预留
+            15: 815   # 预留
+        }
+        
+        # 检查负载长度
+        if len(payload) < 2:
+            self.get_logger().warn('写IO命令负载长度不足，需要至少2字节')
+            return
+        
+        # 解析两个字节（小端序）
+        byte0 = payload[0]  # 低字节，位0-7
+        byte1 = payload[1]  # 高字节，位8-15
+        
+        # 合并为16位整数
+        current_io_state = (byte1 << 8) | byte0
+        
+        self.get_logger().info(f'写IO命令解析: 当前状态=0x{current_io_state:04X}, 上次状态=0x{self.last_io_state:04X}')
+        
+        # 遍历所有位（0-15位）
+        for bit_position in range(16):
+            if bit_position in io_mapping:
+                do_number = io_mapping[bit_position]
+                
+                # 获取当前位和上一次的位状态
+                current_bit = (current_io_state >> bit_position) & 0x01
+                last_bit = (self.last_io_state >> bit_position) & 0x01
+                
+                # 检查是否发生翻转
+                if current_bit != last_bit:
+                    # 状态发生变化，发布命令
+                    command_str = f"{do_number}:{current_bit}"
+                    msg = String()
+                    msg.data = command_str
+                    self.do_control_pub.publish(msg)
+                    
+                    if current_bit == 1:
+                        self.get_logger().info(f'检测到翻转: {do_number} 从0变为1')
+                    else:
+                        self.get_logger().info(f'检测到翻转: {do_number} 从1变为0')
+                    
+                    self.get_logger().info(f'发布DO控制命令: {command_str} (位{bit_position})')
+                else:
+                    # 状态未变化，不发布命令
+                    self.get_logger().debug(f'状态未变化: {do_number} 保持{current_bit}')
+        
+        # 更新上一次状态
+        self.last_io_state = current_io_state
+
     def process_notify_storage(self, payload):
         """处理通知存放命令 (0x101) - /warehouse_start"""
-        # 根据表格：低位2byte代表层号
         if len(payload) >= 2:
             layer = payload[0] | (payload[1] << 8)  # 小端序
             msg = Int8()
@@ -114,7 +200,6 @@ class ByteMultiArrayParser(Node):
 
     def process_notify_retrieval(self, payload):
         """处理通知取出命令 (0x103) - /outbound_start"""
-        # 根据表格：低位2byte代表层号
         if len(payload) >= 2:
             layer = payload[0] | (payload[1] << 8)  # 小端序
             msg = Int8()
@@ -134,7 +219,6 @@ class ByteMultiArrayParser(Node):
 
     def process_axis_jog(self, payload):
         """处理轴点动命令 (0x10D) - /jog_command"""
-        # 根据表格：共12byte，高位前两位2byte对应轴号；第三、四位2byte对应正反转
         if len(payload) >= 4:
             # 假设前2字节是轴号，第3-4字节是方向
             axis_num = payload[0] | (payload[1] << 8)  # 小端序
@@ -168,26 +252,6 @@ class ByteMultiArrayParser(Node):
         msg.data = command_str
         self.jog_pub.publish(msg)
         self.get_logger().info('发布所有轴停止命令')
-
-    def process_write_io(self, payload):
-        """处理写IO命令 (0x115) - /do_control"""
-        # 根据表格：一共八位，低六位代表1-48个IO状态，801就代表1
-        if len(payload) >= 1:
-            io_byte = payload[0]
-            # 低6位表示IO状态
-            io_status = io_byte & 0x3F  # 0x3F = 00111111，取低6位
-            
-            # 查找哪个IO位被设置
-            for i in range(6):
-                if (io_status >> i) & 0x01:
-                    do_number = 800 + (i + 1)  # 801代表1，802代表2，以此类推
-                    command_str = f"{do_number}:1"
-                    msg = String()
-                    msg.data = command_str
-                    self.do_control_pub.publish(msg)
-                    self.get_logger().info(f'发布DO控制命令: {command_str}')
-        else:
-            self.get_logger().warn('写IO命令负载长度不足')
 
     def process_clear_axis_fault(self, payload):
         """处理清除轴故障命令 (0x117) - /control_command"""
