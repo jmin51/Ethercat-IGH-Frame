@@ -143,20 +143,26 @@ class ByteMultiArrayParser(Node):
             15: 815   # 预留
         }
         
-        # 检查负载长度
-        if len(payload) < 2:
-            self.get_logger().warn('写IO命令负载长度不足，需要至少2字节')
+        # 检查负载长度：现在需要至少4字节（2字节组号 + 2字节IO状态）
+        if len(payload) < 4:
+            self.get_logger().warn('写IO命令负载长度不足，需要至少4字节')
             return
+            
+        # 解析组号（2字节，小端序）
+        group_low = payload[0]  # 组号低位
+        group_high = payload[1]  # 组号高位
+        group_id = (group_high << 8) | group_low
         
-        # 解析两个字节（小端序）
-        byte0 = payload[0]  # 低字节，位0-7
-        byte1 = payload[1]  # 高字节，位8-15
+        # 解析IO状态（2字节，小端序）
+        io_low = payload[2]  # IO状态低位
+        io_high = payload[3]  # IO状态高位
+        current_io_state = (io_high << 8) | io_low
         
-        # 合并为16位整数
-        current_io_state = (byte1 << 8) | byte0
+        self.get_logger().info(f'写IO命令解析: 组号=0x{group_id:04X}, IO状态=0x{current_io_state:04X}, 上次状态=0x{self.last_io_state:04X}')
         
-        self.get_logger().info(f'写IO命令解析: 当前状态=0x{current_io_state:04X}, 上次状态=0x{self.last_io_state:04X}')
-        
+        # 如果组号不是0x0000，记录警告但继续处理（根据您的需求，可以忽略组号）
+        if group_id != 0x0000:
+            self.get_logger().warn(f'非默认组号: 0x{group_id:04X}，将忽略组号继续处理')
         # 遍历所有位（0-15位）
         for bit_position in range(16):
             if bit_position in io_mapping:
@@ -189,25 +195,69 @@ class ByteMultiArrayParser(Node):
 
     def process_notify_storage(self, payload):
         """处理通知存放命令 (0x101) - /warehouse_start"""
-        if len(payload) >= 2:
-            layer = payload[0] | (payload[1] << 8)  # 小端序
-            msg = Int8()
-            msg.data = layer
-            self.warehouse_start_pub.publish(msg)
-            self.get_logger().info(f'发布仓库启动命令: 第{layer}层')
-        else:
+        # 检查负载长度：至少需要2字节（层高）
+        if len(payload) < 2:
             self.get_logger().warn('通知存放命令负载长度不足')
+            return
+        
+        # 解析层高（小端序）：最后2个字节
+        # 如果payload长度大于2，取最后2个字节；否则取全部
+        if len(payload) >= 2:
+            # 取最后2个字节作为层高
+            layer_low = payload[-2]  # 层高低位字节
+            layer_high = payload[-1]  # 层高高位字节
+            layer = (layer_high << 8) | layer_low  # 小端序组合
+        else:
+            # 如果只有2个字节，直接使用
+            layer_low = payload[0]
+            layer_high = payload[1]
+            layer = (layer_high << 8) | layer_low
+        
+        # 发布到/warehouse_start话题
+        msg = Int8()
+        msg.data = layer
+        self.warehouse_start_pub.publish(msg)
+        
+        # 记录详细信息
+        self.get_logger().info(f'发布仓库启动命令: 第{layer}层 (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
+        
+        # 如果有额外的数据（组号和IO状态），记录但不处理
+        if len(payload) > 2:
+            extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
+            self.get_logger().info(f'忽略额外数据: {extra_data}')
 
     def process_notify_retrieval(self, payload):
         """处理通知取出命令 (0x103) - /outbound_start"""
-        if len(payload) >= 2:
-            layer = payload[0] | (payload[1] << 8)  # 小端序
-            msg = Int8()
-            msg.data = layer
-            self.outbound_start_pub.publish(msg)
-            self.get_logger().info(f'发布出库启动命令: 第{layer}层')
+        # 检查负载长度：至少需要2字节（层高）
+        if len(payload) < 6:
+            self.get_logger().warn('通知取出命令负载长度不足，需要至少6字节')
+            return
+        
+        # 完整格式：[组号低位, 组号高位, IO状态低位, IO状态高位, 层高低位, 层高高位]
+        # 我们只关心最后2个字节（层高）
+        if len(payload) >= 6:
+            # 取最后2个字节作为层高
+            layer_low = payload[4]  # 第5个字节是层高低位
+            layer_high = payload[5]  # 第6个字节是层高高位
         else:
-            self.get_logger().warn('通知取出命令负载长度不足')
+            # 如果只有2个字节，直接使用（简化格式）
+            layer_low = payload[0]
+            layer_high = payload[1]
+        
+        layer = (layer_high << 8) | layer_low  # 小端序组合
+        
+        # 发布到/outbound_start话题
+        msg = Int8()
+        msg.data = layer
+        self.outbound_start_pub.publish(msg)
+        
+        # 记录详细信息
+        self.get_logger().info(f'发布出库启动命令: 第{layer}层 (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
+        
+        # 如果有额外的数据（组号和IO状态），记录但不处理
+        if len(payload) > 2:
+            extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
+            self.get_logger().info(f'忽略额外数据: {extra_data}')
 
     def process_end_operation(self, payload):
         """处理结束作业命令 (0x107) - /warehouse_stop /outbound_stop"""

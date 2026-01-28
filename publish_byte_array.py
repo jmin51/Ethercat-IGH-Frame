@@ -1,131 +1,34 @@
-# """
-# ROS2 Byte 发布脚本 - 修复版
-# 修复了字节格式化问题
-# """
-
-# import rclpy
-# from rclpy.node import Node
-# from std_msgs.msg import Byte
-
-# def main():
-#     rclpy.init()
-    
-#     # 创建节点
-#     node = Node('minimal_byte_publisher')
-#     publisher = node.create_publisher(Byte, '/integrated_control_test', 10)
-    
-#     # 等待连接建立
-#     rclpy.spin_once(node, timeout_sec=1.0)
-    
-#     # 创建并发送消息
-#     msg = Byte()
-#     msg.data = bytes([0x01])  # 正确的字节赋值
-    
-#     try:
-#         count = 0
-#         while rclpy.ok():
-#             publisher.publish(msg)
-            
-#             # 修复：将bytes转换为整数后再格式化
-#             byte_value = msg.data[0]  # 提取字节值转换为整数
-#             node.get_logger().info(f'发布消息 #{count}: 0x{byte_value:02X}')
-            
-#             count += 1
-#             rclpy.spin_once(node, timeout_sec=1.0)  # 1秒间隔
-#     except KeyboardInterrupt:
-#         print('\n停止发布')
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
-
-# if __name__ == '__main__':
-#     main()#!/usr/bin/env python3
-#!/usr/bin/env python3
-# """
-# ROS2 ByteMultiArray 发布脚本 - 修复版
-# 修复了data字段类型问题
-# """
-
-# import rclpy
-# from rclpy.node import Node
-# from std_msgs.msg import ByteMultiArray, MultiArrayLayout, MultiArrayDimension
-
-# def main():
-#     rclpy.init()
-    
-#     # 创建节点
-#     node = Node('minimal_byte_multiarray_publisher')
-#     publisher = node.create_publisher(ByteMultiArray, '/integrated_control_test', 10)
-    
-#     # 等待连接建立
-#     rclpy.spin_once(node, timeout_sec=1.0)
-    
-#     # 创建MultiArrayLayout
-#     layout = MultiArrayLayout()
-    
-#     # 创建维度描述
-#     dimension = MultiArrayDimension()
-#     dimension.label = ''
-#     dimension.size = 2    # 数组大小
-#     dimension.stride = 1
-    
-#     # 设置layout
-#     layout.dim = [dimension]
-#     layout.data_offset = 0
-    
-#     # 创建ByteMultiArray消息
-#     msg = ByteMultiArray()
-#     msg.layout = layout
-    
-#     # 修复：将整数列表转换为bytes对象列表
-#     # 每个元素必须是bytes类型，而不是整数
-#     msg.data = [bytes([0x01]), bytes([0x01])]  # 每个元素都是bytes对象
-    
-#     try:
-#         count = 0
-#         while rclpy.ok():
-#             publisher.publish(msg)
-            
-#             # 日志输出也需要相应调整
-#             data_hex = ' '.join([f'0x{b.hex().upper()}' for b in msg.data])
-#             node.get_logger().info(f'发布ByteMultiArray消息 #{count}: [{data_hex}]')
-            
-#             count += 1
-#             rclpy.spin_once(node, timeout_sec=1.0)
-            
-#             # 动态修改数据内容也需要使用bytes对象
-#             if count % 5 == 0:
-#                 # 修复：使用bytes对象而不是整数
-#                 msg.data = [bytes([count % 256]), bytes([(count + 1) % 256])]
-                
-#     except KeyboardInterrupt:
-#         print('\n停止发布')
-#     except Exception as e:
-#         print(f'发生错误: {e}')
-#         import traceback
-#         traceback.print_exc()
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
-
-# if __name__ == '__main__':
-#     main()
-
 #!/usr/bin/env python3
 """
-ROS2 ByteMultiArray 发布脚本 - 单次发送版
-只发送一次消息后退出
+ROS2 ByteMultiArray 发布脚本 - 支持多种指令
+支持入库指令（0x0101）、出库指令（0x0103）和IO控制指令（0x0115）
 """
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import ByteMultiArray, MultiArrayLayout, MultiArrayDimension
+import argparse
+import sys
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='发布ByteMultiArray消息')
+    parser.add_argument('--command', type=str, required=True, 
+                       choices=['warehouse', 'outbound', 'io'], 
+                       help='指令类型: warehouse(入库) 或 outbound(出库) 或 io(IO控制)')
+    parser.add_argument('--layer', type=int, default=1,
+                       help='层高（仅warehouse和outbound指令有效，默认1）')
+    parser.add_argument('--io_low', type=lambda x: int(x, 0), default=0x00,
+                       help='IO状态低位字节（仅io指令有效，十六进制，默认0x00）')
+    parser.add_argument('--io_high', type=lambda x: int(x, 0), default=0x00,
+                       help='IO状态高位字节（仅io指令有效，十六进制，默认0x00）')
+    
+    args = parser.parse_args()
+    
     rclpy.init()
     
     # 创建节点
-    node = Node('single_byte_multiarray_publisher')
+    node = Node('byte_multiarray_publisher')
     publisher = node.create_publisher(ByteMultiArray, '/integrated_control', 10)
     
     # 等待连接建立
@@ -133,26 +36,91 @@ def main():
     
     # 创建MultiArrayLayout
     layout = MultiArrayLayout()
-    
-    # 创建维度描述
-    dimension = MultiArrayDimension()
-    dimension.label = ''
-    dimension.size = 4    # 数组大小
-    dimension.stride = 1
-    
-    # 设置layout
-    layout.dim = [dimension]
     layout.data_offset = 0
+    
+    # 根据指令类型构造不同的消息
+    if args.command == 'warehouse':
+        # 入库指令 (0x0101)
+        # 格式: [指令码低位0x01, 指令码高位0x01, 组号低位0x00, 组号高位0x00, 
+        #        IO状态低位0x00, IO状态高位0x00, 层高低位, 层高高位]
+        
+        # 将层高转换为小端序的两个字节
+        layer_low = args.layer & 0xFF  # 低8位
+        layer_high = (args.layer >> 8) & 0xFF  # 高8位
+        
+        msg_data = [
+            bytes([0x01]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0101 = 入库指令)
+            bytes([0x00]),  # 组号低位
+            bytes([0x00]),  # 组号高位
+            bytes([0x00]),  # IO状态低位
+            bytes([0x00]),  # IO状态高位
+            bytes([layer_low]),   # 层高低位
+            bytes([layer_high])   # 层高高位
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'warehouse_command'
+        layout.dim[0].size = 8
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info(f'构造入库指令: 层高={args.layer} (0x{layer_low:02X} 0x{layer_high:02X})')
+        
+    elif args.command == 'outbound':
+        # 出库指令 (0x0103)
+        # 格式: [指令码低位0x03, 指令码高位0x01, 组号低位0x00, 组号高位0x00, 
+        #        IO状态低位0x00, IO状态高位0x00, 层高低位, 层高高位]
+        
+        # 将层高转换为小端序的两个字节
+        layer_low = args.layer & 0xFF  # 低8位
+        layer_high = (args.layer >> 8) & 0xFF  # 高8位
+        
+        msg_data = [
+            bytes([0x03]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0103 = 出库指令)
+            bytes([0x00]),  # 组号低位
+            bytes([0x00]),  # 组号高位
+            bytes([0x00]),  # IO状态低位
+            bytes([0x00]),  # IO状态高位
+            bytes([layer_low]),   # 层高低位
+            bytes([layer_high])   # 层高高位
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'outbound_command'
+        layout.dim[0].size = 8
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info(f'构造出库指令: 层高={args.layer} (0x{layer_low:02X} 0x{layer_high:02X})')
+        
+    elif args.command == 'io':
+        # IO控制指令 (0x0115)
+        # 格式: [指令码低位0x15, 指令码高位0x01, 组号低位0x00, 组号高位0x00, 
+        #        IO状态低位, IO状态高位]
+        
+        msg_data = [
+            bytes([0x15]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0115 = IO控制指令)
+            bytes([0x00]),  # 组号低位
+            bytes([0x00]),  # 组号高位
+            bytes([args.io_low]),   # IO状态低位
+            bytes([args.io_high])   # IO状态高位
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'io_command'
+        layout.dim[0].size = 6
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info(f'构造IO控制指令: IO状态=0x{args.io_high:02X}{args.io_low:02X}')
     
     # 创建ByteMultiArray消息
     msg = ByteMultiArray()
     msg.layout = layout
-    
-    # 设置数据
-    msg.data = [bytes([0x15]), bytes([0x01]), bytes([0x00]), bytes([0x0])]  # 每个元素都是bytes对象
+    msg.data = msg_data
     
     try:
-        # 只发送一次消息
+        # 发送消息
         publisher.publish(msg)
         
         # 日志输出
@@ -161,7 +129,7 @@ def main():
         node.get_logger().info('消息已发送，程序退出')
         
     except Exception as e:
-        print(f'发生错误: {e}')
+        node.get_logger().error(f'发生错误: {e}')
         import traceback
         traceback.print_exc()
     finally:
