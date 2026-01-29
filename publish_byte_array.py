@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ROS2 ByteMultiArray 发布脚本 - 支持多种指令
-支持入库指令（0x0101）、出库指令（0x0103）和IO控制指令（0x0115）
+支持入库指令（0x0101）、出库指令（0x0103）、结束作业指令（0x0107）、
+轴点动指令（0x010D）和IO控制指令（0x0115）
 """
 
 import rclpy
@@ -14,10 +15,14 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='发布ByteMultiArray消息')
     parser.add_argument('--command', type=str, required=True, 
-                       choices=['warehouse', 'outbound', 'io'], 
-                       help='指令类型: warehouse(入库) 或 outbound(出库) 或 io(IO控制)')
+                       choices=['warehouse', 'outbound', 'stop', 'jog', 'io'], 
+                       help='指令类型: warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制)')
     parser.add_argument('--layer', type=int, default=1,
                        help='层高（仅warehouse和outbound指令有效，默认1）')
+    parser.add_argument('--axis', type=int, default=1,
+                       help='轴号（仅jog指令有效，默认1）')
+    parser.add_argument('--direction', type=int, choices=[0, 1, 2], default=1,
+                       help='方向: 0=停止, 1=正转, 2=反转（仅jog指令有效，默认1）')
     parser.add_argument('--io_low', type=lambda x: int(x, 0), default=0x00,
                        help='IO状态低位字节（仅io指令有效，十六进制，默认0x00）')
     parser.add_argument('--io_high', type=lambda x: int(x, 0), default=0x00,
@@ -92,6 +97,55 @@ def main():
         layout.dim[0].stride = 1
         
         node.get_logger().info(f'构造出库指令: 层高={args.layer} (0x{layer_low:02X} 0x{layer_high:02X})')
+        
+    elif args.command == 'stop':
+        # 结束作业指令 (0x0107)
+        # 格式: [指令码低位0x07, 指令码高位0x01]
+        
+        msg_data = [
+            bytes([0x07]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0107 = 结束作业指令)
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'stop_command'
+        layout.dim[0].size = 2
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info('构造结束作业指令')
+        
+    elif args.command == 'jog':
+        # 轴点动指令 (0x010D)
+        # 格式: [指令码低位0x0D, 指令码高位0x01, 轴号低位, 轴号高位, 方向低位, 方向高位, 填充0...] (共14字节)
+        
+        # 将轴号和方向转换为小端序的两个字节
+        axis_low = args.axis & 0xFF  # 轴号低位
+        axis_high = (args.axis >> 8) & 0xFF  # 轴号高位
+        direction_low = args.direction & 0xFF  # 方向低位
+        direction_high = (args.direction >> 8) & 0xFF  # 方向高位
+        
+        # 构造14字节数据
+        msg_data = [
+            bytes([0x0D]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x010D = 轴点动指令)
+            bytes([axis_low]),   # 轴号低位
+            bytes([axis_high]),  # 轴号高位
+            bytes([direction_low]),   # 方向低位
+            bytes([direction_high]), # 方向高位
+        ]
+        
+        # 填充剩余8字节为0（共14字节）
+        for i in range(8):
+            msg_data.append(bytes([0x00]))
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'jog_command'
+        layout.dim[0].size = 14
+        layout.dim[0].stride = 1
+        
+        direction_map = {0: "停止", 1: "正转", 2: "反转"}
+        direction_str = direction_map.get(args.direction, "未知")
+        node.get_logger().info(f'构造轴点动指令: 轴号={args.axis}, 方向={direction_str}')
         
     elif args.command == 'io':
         # IO控制指令 (0x0115)

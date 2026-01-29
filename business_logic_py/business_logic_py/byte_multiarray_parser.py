@@ -269,30 +269,59 @@ class ByteMultiArrayParser(Node):
 
     def process_axis_jog(self, payload):
         """处理轴点动命令 (0x10D) - /jog_command"""
-        if len(payload) >= 4:
-            # 假设前2字节是轴号，第3-4字节是方向
-            axis_num = payload[0] | (payload[1] << 8)  # 小端序
-            direction = payload[2] | (payload[3] << 8)  # 小端序
-            
-            # 将轴号转换为字符串格式
-            axis_name = f"axis{axis_num}"
-            
-            # 方向映射
-            direction_map = {
-                0: "stop",
-                1: "forward",  # 假设1为正转
-                2: "reverse"   # 假设2为反转
-            }
-            
-            direction_str = direction_map.get(direction, "stop")
-            command_str = f"{axis_name}:{direction_str}"
-            
-            msg = String()
-            msg.data = command_str
-            self.jog_pub.publish(msg)
-            self.get_logger().info(f'发布点动命令: {command_str}')
-        else:
-            self.get_logger().warn('轴点动命令负载长度不足')
+        # 检查负载长度：至少需要6字节（轴号2字节 + 方向2字节 + 其他数据）
+        if len(payload) < 6:
+            self.get_logger().warn('轴点动命令负载长度不足，需要至少6字节')
+            return
+        
+        # 解析轴号（小端序）：负载的第1-2字节（索引0-1）
+        axis_low = payload[0]  # 轴号低位字节
+        axis_high = payload[1]  # 轴号高位字节
+        axis_num = (axis_high << 8) | axis_low  # 小端序组合
+        
+        # 解析方向（小端序）：负载的第3-4字节（索引2-3）
+        direction_low = payload[2]  # 方向低位字节
+        direction_high = payload[3]  # 方向高位字节
+        direction = (direction_high << 8) | direction_low  # 小端序组合
+        
+        # 轴号映射表：数字轴号 -> 字符串轴名
+        axis_mapping = {
+            1: "axis1_1",  # 轴1的第一个电机
+            2: "axis1_2",  # 轴1的第二个电机
+            3: "axis2_1",  # 轴2的第一个电机
+            4: "axis2_2",  # 轴2的第二个电机
+            5: "axis3",    # 轴3
+            6: "axis4",    # 轴4
+            7: "axis5"     # 轴5
+        }
+        
+        # 将数字轴号转换为字符串轴名
+        axis_name = axis_mapping.get(axis_num, f"axis{axis_num}")
+        # axis_name = f"axis{axis_num}"
+        
+        # 方向映射
+        direction_map = {
+            0: "stop",
+            1: "forward",  # 假设1为正转
+            2: "reverse"   # 假设2为反转
+        }
+        
+        direction_str = direction_map.get(direction, "stop")
+        command_str = f"{axis_name}:{direction_str}"
+        
+        # 发布到/jog_command话题
+        msg = String()
+        msg.data = command_str
+        self.jog_pub.publish(msg)
+        
+        # 记录详细信息
+        self.get_logger().info(f'发布点动命令: {command_str} (轴号: {axis_num}->{axis_name}, 方向: 0x{direction_high:02X}{direction_low:02X})')
+        # self.get_logger().info(f'发布点动命令: {command_str} (轴号: 0x{axis_high:02X}{axis_low:02X}, 方向: 0x{direction_high:02X}{direction_low:02X})')
+
+        # 如果有额外的数据，记录但不处理
+        if len(payload) > 4:
+            extra_data = payload[4:]  # 第5字节及以后的数据
+            self.get_logger().info(f'忽略额外数据: {extra_data}')
 
     def process_axis_stop(self, payload):
         """处理轴停止命令 (0x10F) - /jog_command"""
