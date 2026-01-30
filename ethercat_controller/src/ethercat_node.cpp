@@ -596,6 +596,26 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     publish_io_status();
 }
 
+// void EthercatNode::publish_io_status() {
+//     if (node_shutting_down_.load() || !rclcpp::ok()) {
+//         return;
+//     }
+    
+//     auto msg = std_msgs::msg::String();
+//     std::stringstream ss;
+    
+//     pthread_mutex_lock(&io_mutex_);
+//     ss << "DI状态: 启动按钮=" << (current_di_status_.start_button ? "按下" : "释放")
+//        << ", 急停=" << (current_di_status_.emergency_stop ? "激活" : "正常");
+    
+//     DO_Interface do_status = get_current_do_state();
+//     ss << " | DO状态: 启动灯=" << (do_status.start_button_light ? "亮" : "灭")
+//        << ", 绿灯=" << (do_status.green_light ? "亮" : "灭");
+//     pthread_mutex_unlock(&io_mutex_);
+    
+//     msg.data = ss.str();
+//     io_status_pub_->publish(msg);
+// }
 void EthercatNode::publish_io_status() {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
         return;
@@ -605,12 +625,55 @@ void EthercatNode::publish_io_status() {
     std::stringstream ss;
     
     pthread_mutex_lock(&io_mutex_);
-    ss << "DI状态: 启动按钮=" << (current_di_status_.start_button ? "按下" : "释放")
-       << ", 急停=" << (current_di_status_.emergency_stop ? "激活" : "正常");
     
+    // 读取当前DI和DO状态
+    DI_Interface di = current_di_status_;
     DO_Interface do_status = get_current_do_state();
-    ss << " | DO状态: 启动灯=" << (do_status.start_button_light ? "亮" : "灭")
-       << ", 绿灯=" << (do_status.green_light ? "亮" : "灭");
+    
+    // 按照表格顺序发布DI状态 (0-22)
+    ss << "DI状态: ";
+    ss << "DI00:" << (di.start_button ? "1" : "0") << ",";        // 启动按钮
+    ss << "DI01:" << (di.reset_button ? "1" : "0") << ",";        // 复位按钮
+    ss << "DI02:" << (di.pause_button ? "1" : "0") << ",";        // 暂停按钮
+    ss << "DI03:" << (di.manual_auto_button ? "1" : "0") << ",";  // 手自动按钮
+    ss << "DI04:" << (di.emergency_stop ? "1" : "0") << ",";      // 急停按钮
+    ss << "DI05:" << (di.air_supply ? "1" : "0") << ",";          // 气源输入
+    ss << "DI06:" << (di.safety_door_1 ? "1" : "0") << ",";       // 安全门检1
+    ss << "DI07:" << (di.safety_door_2 ? "1" : "0") << ",";       // 安全门检2
+    ss << "DI08:" << (di.feed_product_detect ? "1" : "0") << ","; // 入料产品检测
+    ss << "DI09:" << (di.buffer_sensor_1 ? "1" : "0") << ",";     // 缓存架对射1
+    ss << "DI10:" << (di.buffer_sensor_2 ? "1" : "0") << ",";     // 缓存架对射2
+    ss << "DI11:" << (di.buffer_in_position ? "1" : "0") << ",";  // 缓存架入料产品到位检测
+    ss << "DI12:" << (di.buffer_out_position ? "1" : "0") << ","; // 缓存架出料产品到位检测
+    ss << "DI13:" << (di.conveyor_in_position ? "1" : "0") << ","; // 接驳台入料产品到位检测
+    ss << "DI14:" << (di.conveyor_out_position ? "1" : "0") << ","; // 接驳台出料产品到位检测
+    ss << "DI15:" << (di.lift_cylinder1_up ? "1" : "0") << ",";  // 顶升气缸1上升到位
+    ss << "DI16:" << (di.lift_cylinder1_down ? "1" : "0") << ","; // 顶升气缸1下降到位
+    ss << "DI17:" << (di.lift_cylinder2_up ? "1" : "0") << ",";  // 顶升气缸2上升到位
+    ss << "DI18:" << (di.lift_cylinder2_down ? "1" : "0") << ","; // 顶升气缸2下降到位
+    ss << "DI19:" << (di.gear_cylinder1_retract ? "1" : "0") << ","; // 齿轮对接气缸1伸出到位
+    ss << "DI20:" << (di.gear_cylinder1_retract ? "1" : "0") << ","; // 齿轮对接气缸1缩回到位
+    ss << "DI21:" << (di.gear_cylinder2_extend ? "1" : "0") << ","; // 齿轮对接气缸2伸出到位
+    ss << "DI22:" << (di.gear_cylinder2_retract ? "1" : "0");       // 齿轮对接气缸2缩回到位
+
+    ss << " | DO状态: ";
+    
+    // 按照表格顺序发布DO状态 (0-13)
+    ss << "DO00:" << (do_status.start_button_light ? "1" : "0") << ",";  // 启动按钮灯
+    ss << "DO01:" << (do_status.reset_button_light ? "1" : "0") << ",";  // 复位按钮灯
+    ss << "DO02:" << (do_status.pause_button_light ? "1" : "0") << ",";  // 暂停按钮灯
+    ss << "DO03:" << (do_status.buzzer ? "1" : "0") << ",";              // 蜂鸣器
+    ss << "DO04:" << (do_status.red_light ? "1" : "0") << ",";           // 三色红灯
+    ss << "DO05:" << (do_status.yellow_light ? "1" : "0") << ",";        // 三色黄灯
+    ss << "DO06:" << (do_status.green_light ? "1" : "0") << ",";         // 三色绿灯
+    ss << "DO07:0,";                                                    // 预留
+    ss << "DO08:0,";                                                    // 预留
+    ss << "DO09:0,";                                                    // 预留
+    ss << "DO10:" << (do_status.lift_cylinder_down ? "1" : "0") << ","; // 顶升气缸下降
+    ss << "DO11:" << (do_status.gear_cylinder_extend ? "1" : "0") << ","; // 齿轮对接气缸伸出
+    ss << "DO12:" << (do_status.belt_forward ? "1" : "0") << ",";       // 皮带正转启动
+    ss << "DO13:" << (do_status.belt_backward ? "1" : "0");              // 皮带反转启动
+    
     pthread_mutex_unlock(&io_mutex_);
     
     msg.data = ss.str();
@@ -991,7 +1054,7 @@ bool EthercatNode::validate_board_width(double width) {
     double remainder = fmod(width * 100, board_width_resolution_ * 100);
     if (fabs(remainder) > 0.001) {  // 浮点数精度容差
         RCLCPP_WARN(this->get_logger(), 
-                   "板宽%.1fcm超出分辨率%.1fcm，将四舍五入", width, board_width_resolution_);
+                   "板宽%.2fcm超出分辨率%.2fcm，将四舍五入", width, board_width_resolution_);
     }
     
     return true;

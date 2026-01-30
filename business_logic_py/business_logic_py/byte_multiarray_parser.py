@@ -7,6 +7,7 @@ from enum import Enum
 
 class CommandType(Enum):
     # 根据图片中的指令码定义
+    START_OPERATION = 0x105      # 开始作业 /control_command -> start_auto
     NOTIFY_STORAGE = 0x101       # 通知存放 /warehouse_start
     NOTIFY_RETRIEVAL = 0x103     # 通知取出 /outbound_start
     END_OPERATION = 0x107        # 结束作业 /warehouse_stop /outbound_stop
@@ -90,7 +91,9 @@ class ByteMultiArrayParser(Node):
             self.get_logger().info(f'解析命令: 0x{command_code:04X}, 负载长度: {len(payload)}')
             
             # 根据命令码分发处理
-            if command_code == CommandType.NOTIFY_STORAGE.value:
+            if command_code == CommandType.START_OPERATION.value:
+                self.process_start_operation(payload)
+            elif command_code == CommandType.NOTIFY_STORAGE.value:
                 self.process_notify_storage(payload)
             elif command_code == CommandType.NOTIFY_RETRIEVAL.value:
                 self.process_notify_retrieval(payload)
@@ -120,6 +123,19 @@ class ByteMultiArrayParser(Node):
                 
         except Exception as e:
             self.get_logger().error(f'消息解析错误: {e}')
+            
+    def process_start_operation(self, payload):
+        """处理开始作业命令 (0x105) - /control_command -> start_auto"""
+        # 开始作业命令不需要负载数据，直接发布start_auto命令
+        command_str = "start_auto"
+        msg = String()
+        msg.data = command_str
+        self.control_pub.publish(msg)
+        self.get_logger().info('发布开始作业命令: 进入自动模式')
+        
+        # 如果有负载数据，记录但不处理
+        if len(payload) > 0:
+            self.get_logger().info(f'忽略开始作业命令的负载数据: {payload}')
 
     def process_write_io(self, payload):
         """处理写IO命令 (0x115) - /do_control，支持状态翻转检测"""

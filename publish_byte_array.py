@@ -15,8 +15,8 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='发布ByteMultiArray消息')
     parser.add_argument('--command', type=str, required=True, 
-                       choices=['warehouse', 'outbound', 'stop', 'jog', 'io'], 
-                       help='指令类型: warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制)')
+                        choices=['start', 'warehouse', 'outbound', 'stop', 'jog', 'io'], 
+                        help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制)')
     parser.add_argument('--layer', type=int, default=1,
                        help='层高（仅warehouse和outbound指令有效，默认1）')
     parser.add_argument('--axis', type=int, default=1,
@@ -44,7 +44,23 @@ def main():
     layout.data_offset = 0
     
     # 根据指令类型构造不同的消息
-    if args.command == 'warehouse':
+    if args.command == 'start':
+        # 开始作业指令 (0x0105)
+        # 格式: [指令码低位0x05, 指令码高位0x01] (不需要负载)
+        
+        msg_data = [
+            bytes([0x05]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0105 = 开始作业指令)
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'start_command'
+        layout.dim[0].size = 2
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info('构造开始作业指令: 进入自动模式')
+        
+    elif args.command == 'warehouse':
         # 入库指令 (0x0101)
         # 格式: [指令码低位0x01, 指令码高位0x01, 组号低位0x00, 组号高位0x00, 
         #        IO状态低位0x00, IO状态高位0x00, 层高低位, 层高高位]
