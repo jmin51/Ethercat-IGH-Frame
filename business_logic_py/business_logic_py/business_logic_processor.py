@@ -123,6 +123,11 @@ class BusinessLogicProcessor(Node):
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
         self.layer_pub = self.create_publisher(Int8, '/layer_command', 10)
         
+        # 在 __init__ 方法中添加发布器（在现有发布器之后）
+        self.warehouse_completed_pub = self.create_publisher(Bool, '/warehouse_completed', 10)
+        self.outbound_completed_pub = self.create_publisher(Bool, '/outbound_completed', 10)
+        self.product_arrival_pub = self.create_publisher(Bool, '/product_arrival', 10)
+   
         # 创建订阅器
         self.io_status_sub = self.create_subscription(
             String, 
@@ -172,6 +177,12 @@ class BusinessLogicProcessor(Node):
         self.layer_completion_received_time = None    # 添加接收时间记录
         self.layer_completion_timeout = 30.0          # 30秒超时
         
+        # 添加状态跟踪变量
+        self.warehouse_completion_published = False
+        self.outbound_completion_published = False
+        self.last_warehouse_state = WarehouseState.IDLE
+        self.last_outbound_state = OutboundState.IDLE
+
         # 创建层移动完成订阅器
         self.layer_completion_sub = self.create_subscription(
             Bool,
@@ -371,6 +382,26 @@ class BusinessLogicProcessor(Node):
             )
             self.previous_warehouse_state = self.warehouse_state
         
+        # === 修改点：替换原有的简单检测为有条件限制的检测 ===
+        # 条件：IDLE状态 + 未停止 + buffer_in为1
+        if (self.warehouse_state == WarehouseState.IDLE and 
+            not self.warehouse_process_stop_requested and 
+            buffer_in):
+            
+            # 添加时间间隔控制，避免频繁发送
+            current_time = time.time()
+            if not hasattr(self, 'last_product_arrival_time'):
+                self.last_product_arrival_time = 0
+
+            # 控制上报频率，至少间隔3秒
+            if current_time - self.last_product_arrival_time >= 3.0:
+                # 发布产品到位消息
+                arrival_msg = Bool()
+                arrival_msg.data = True
+                self.product_arrival_pub.publish(arrival_msg)
+                self.last_product_arrival_time = current_time
+                self.get_logger().info('✅ 检测到产品到位（IDLE状态+buffer_in=1），发布产品到位消息')
+    
         # 处理停止请求
         if self.warehouse_process_stop_requested:
             self.warehouse_state = WarehouseState.IDLE
@@ -381,8 +412,7 @@ class BusinessLogicProcessor(Node):
 
         if self.warehouse_state == WarehouseState.IDLE:
             # 等待启动信号
-            if (self.warehouse_process_requested and 
-                not buffer_in and not buffer_out and 
+            if (self.warehouse_process_requested and not buffer_out and 
                 not conveyor_in and not conveyor_out):
                 self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
                 self.warehouse_process_requested = False
@@ -569,6 +599,13 @@ class BusinessLogicProcessor(Node):
             if (not buffer_in and not buffer_out and 
                 not conveyor_in and not conveyor_out):
                 self.warehouse_state = WarehouseState.IDLE
+                # 发布入库完成消息（只在状态变化时发布一次）
+                if not self.warehouse_completion_published:
+                    completion_msg = Bool()
+                    completion_msg.data = True
+                    self.warehouse_completed_pub.publish(completion_msg)
+                    self.warehouse_completion_published = True
+                    self.get_logger().info('入库流程完成，发布完成消息')
                 self.get_logger().info('回到初始状态，等待下一次入库')
 
     def process_outbound_logic(self):
@@ -750,6 +787,13 @@ class BusinessLogicProcessor(Node):
                     self.send_do_control_once("813", False)
                     self.outbound_delay_started = False
                     self.outbound_state = OutboundState.IDLE
+                    # 发布出库完成消息（只在状态变化时发布一次）
+                    if not self.outbound_completion_published:
+                        completion_msg = Bool()
+                        completion_msg.data = True
+                        self.outbound_completed_pub.publish(completion_msg)
+                        self.outbound_completion_published = True
+                        self.get_logger().info('出库流程完成，发布完成消息')
                     # 重置所有相关标志
                     if hasattr(self, 'outbound_conveyor_started'):
                         self.outbound_conveyor_started = False
