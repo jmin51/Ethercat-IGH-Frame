@@ -111,6 +111,8 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr do_control_sub_;
     // 添加点动速度设置订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_speed_sub_;
+    // 新增：故障码发布器
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
     
     // 添加点动速度设置处理函数
     void handle_jog_speed_command(const std_msgs::msg::String::SharedPtr msg);
@@ -146,7 +148,9 @@ private:
     // 添加出库处理函数
     void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg);
     void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg);
-
+    // 故障状态发布方法
+    void publish_fault_status();
+    
 // 在EthercatNode类定义中添加
 private:
     // 板宽控制相关

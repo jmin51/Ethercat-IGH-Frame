@@ -116,6 +116,9 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
     uint16_t read_status_word = EC_READ_U16(domain1_pd + status_word_);
     uint16_t error_code = EC_READ_U16(domain1_pd + off_error_code_);
 
+    // 更新错误码
+    current_error_code_ = error_code;
+
     // 检查故障清除请求
     if (clear_fault_requested_ && current_state_ == AxisState::FAULT) {
         clear_fault_requested_ = false;
@@ -560,4 +563,12 @@ void LeisaiServoAxis::handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t er
     if (fault_clearing_in_progress_) {
         handle_fault_clear(domain1_pd);
     }
+}
+
+uint16_t LeisaiServoAxis::get_error_code() const {
+    return current_error_code_;
+}
+
+AxisState LeisaiServoAxis::get_current_state() const {
+    return current_state_;
 }

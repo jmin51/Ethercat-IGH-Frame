@@ -27,6 +27,9 @@ public:
     void configure(ec_master_t* master) override;
     void register_pdo_entries(ec_pdo_entry_reg_t* reg_list, int& index) override;
     void handle_state_machine(uint8_t* domain1_pd) override;
+    // 添加纯虚函数声明
+    AxisState get_current_state() const override;
+    uint16_t get_error_code() const override;
 
     // 雷赛特有功能
     void set_leisai_specific_parameter(int param);

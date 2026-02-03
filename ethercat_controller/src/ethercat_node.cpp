@@ -117,6 +117,9 @@ void EthercatNode::initialize_node() {
         [this](const std_msgs::msg::String::SharedPtr msg) {
             handle_do_control(msg);
         });
+    // 添加故障码发布器初始化
+    fault_code_pub_ = this->create_publisher<std_msgs::msg::String>("/fault_code", 10);
+
     // 初始化IO互斥锁
     pthread_mutex_init(&io_mutex_, nullptr);
     
@@ -287,6 +290,9 @@ void EthercatNode::publish_joint_states() {
         log_counter = 0;
         RCLCPP_DEBUG(this->get_logger(), "发布关节状态: %zu个关节", msg.name.size());
     }
+
+    // === 新增：发布故障状态 ===
+    publish_fault_status();
 
     // 检查板宽调整是否完成
     if (board_width_moving_) {
@@ -1154,6 +1160,68 @@ void EthercatNode::publish_board_width_status(double current_width, double targe
     static int log_counter = 0;
     if (log_counter++ % 10 == 0) {
         RCLCPP_INFO(this->get_logger(), "板宽状态: %s", msg.data.c_str());
+        log_counter = 0;
+    }
+}
+
+void EthercatNode::publish_fault_status() {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    bool has_fault = false;
+    
+    // 检查所有轴的故障状态
+    for (auto& axis : servo_axes_) {
+        // 获取轴的错误代码
+        uint16_t error_code = axis->get_error_code();
+        
+        // 检查是否处于故障状态
+        if (axis->get_current_state() == AxisState::FAULT) {
+            // 只有故障状态且错误码非0才发布
+            if (error_code != 0) {
+                ss << axis->get_name() << ":0x" << std::hex << error_code << ",";
+                has_fault = true;
+                
+                // 记录故障日志（减少频率避免刷屏）
+                static std::unordered_map<std::string, uint16_t> last_error_codes;
+                uint16_t last_code = last_error_codes[axis->get_name()];
+                
+                if (error_code != last_code) {
+                    RCLCPP_WARN(this->get_logger(), 
+                               "检测到轴故障: %s, 错误码: 0x%04X", 
+                               axis->get_name().c_str(), error_code);
+                    last_error_codes[axis->get_name()] = error_code;
+                }
+            }
+        }
+    }
+    
+    if (has_fault) {
+        std::string fault_str = ss.str();
+        // 移除最后一个逗号
+        if (!fault_str.empty() && fault_str.back() == ',') {
+            fault_str.pop_back();
+        }
+        msg.data = fault_str;
+    } else {
+        // 无故障时发布"0"
+        msg.data = "0";
+    }
+    
+    fault_code_pub_->publish(msg);
+    
+    // 减少日志频率，避免刷屏
+    static int log_counter = 0;
+    if (log_counter++ % 50 == 0) {  // 每5秒记录一次（假设100ms发布周期）
+        if (has_fault) {
+            RCLCPP_DEBUG(this->get_logger(), "发布故障状态: %s", msg.data.c_str());
+        } else {
+            RCLCPP_DEBUG(this->get_logger(), "系统正常，无故障");
+        }
         log_counter = 0;
     }
 }

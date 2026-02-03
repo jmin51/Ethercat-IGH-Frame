@@ -55,7 +55,11 @@ public:
 
     // 获取函数
     virtual std::string get_name() const;
+
+    // 获取错误代码（必须实现）
+    virtual uint16_t get_error_code() const = 0;
     virtual AxisState get_current_state() const;
+    
     virtual OperationMode get_operation_mode() const;
     virtual bool is_ready() const;
     virtual bool is_running() const;
@@ -180,6 +184,8 @@ protected:
     //     joint_position_ += step;
     //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
     // }
+
+    uint16_t current_error_code_ = 0;  // 当前错误代码
 };
 
 #endif // SERVO_AXIS_BASE_HPP

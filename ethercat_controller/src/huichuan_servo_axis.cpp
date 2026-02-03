@@ -453,3 +453,12 @@ void HuichuanServoAxis::complete_homing_sequence(uint8_t* domain1_pd) {
         axis_name_.c_str(), target_pulses_);
     check_system_initialization();
 }
+
+
+uint16_t HuichuanServoAxis::get_error_code() const {
+    return current_error_code_;
+}
+
+AxisState HuichuanServoAxis::get_current_state() const {
+    return current_state_;
+}
