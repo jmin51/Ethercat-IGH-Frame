@@ -586,6 +586,7 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
+#define CONTROL_SOURCE_IO 1  // 1:使用IO控制手自动模式, 0:使用话题控制
 void EthercatNode::handle_io_signals(DI_Interface di) {
     // 发布IO状态到Python节点
     publish_py_io_status(di);
@@ -597,7 +598,48 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
 
     // 删除原有的BusinessLogicProcessor处理逻辑
     // 业务逻辑现在由Python节点处理
+    // 新增：IO控制模式切换（仅在宏开关启用时生效）
+#if CONTROL_SOURCE_IO
+    bool current_manual_auto_state = di.manual_auto_button; // 当前按钮状态（DI04）
 
+    // 检查所有轴是否都处于READY状态
+    bool all_axes_ready = true;
+    for (auto& axis : servo_axes_) {
+        AxisState state = axis->get_current_state();
+        if (state != AxisState::READY) {
+            all_axes_ready = false;
+            break;
+        }
+    }
+    
+    // 如果所有轴都处于READY状态，尝试模式切换
+    if (all_axes_ready) {
+        RCLCPP_INFO(this->get_logger(), "所有轴已就绪，准备模式切换。手自动按钮状态: %s", 
+                   current_manual_auto_state ? "自动" : "手动");
+        
+        // 触发模式切换命令
+        std::string command = current_manual_auto_state ? CMD_START_AUTO : CMD_START_MANUAL;
+        handle_control_command(command); // 通过统一命令处理
+        
+        RCLCPP_INFO(this->get_logger(), "已发送%s模式切换命令", 
+                   current_manual_auto_state ? "自动" : "手动");
+    } else {
+        // 记录哪些轴未就绪（用于调试）
+        static int log_counter = 0;
+        if (log_counter++ % 500 == 0) { // 每500次记录一次，避免刷屏
+            std::stringstream ss;
+            ss << "等待所有轴就绪: ";
+            for (size_t i = 0; i < servo_axes_.size(); ++i) {
+                AxisState state = servo_axes_[i]->get_current_state();
+                if (state != AxisState::READY) {
+                    ss << servo_axes_[i]->get_name() << "=" << static_cast<int>(state) << " ";
+                }
+            }
+            RCLCPP_DEBUG(this->get_logger(), "%s", ss.str().c_str());
+            log_counter = 0;
+        }
+    }
+#endif
     // 发布IO状态
     publish_io_status();
 }
