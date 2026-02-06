@@ -17,6 +17,7 @@
 #include <atomic>
 #include <vector>
 #include <memory>
+#include <rclcpp/parameter.hpp>
 
 // 应用参数
 #define FREQUENCY 1000
@@ -180,6 +181,57 @@ private:
     void publish_board_width_status(double current_width, double target_width, 
                                    bool moving, const std::string& status);
     int find_axis4_index();  // 查找axis4的索引
+
+private:
+    // 动态配置相关
+    rclcpp::TimerBase::SharedPtr dynamic_control_timer_;
+    std::atomic<bool> ethercat_enabled_{false};
+    std::atomic<bool> ethercat_initialized_{false};
+    
+    // IO控制状态
+    std::atomic<bool> last_start_button_state_{false};
+    std::atomic<bool> last_pause_button_state_{false};
+    std::atomic<bool> emergency_stop_triggered_{false};
+    
+    // 配置参数
+    struct DynamicControlParams {
+        bool enable_dynamic_control = true;
+        int startup_delay_ms = 2000;
+        int shutdown_delay_ms = 1000;
+        int start_button_di = 0;
+        int pause_button_di = 2;
+        int emergency_stop_di = 4;
+    } dynamic_params_;
+    
+    // 动态控制方法
+
+    void dynamic_control_callback();
+    void handle_io_control_signals(const DI_Interface& di);
+    bool initialize_ethercat_system();
+    bool shutdown_ethercat_system();
+    bool soft_shutdown_ethercat(); // 软关闭，保留配置
+    bool soft_start_ethercat();
+    bool emergency_shutdown_ethercat(); // 急停关闭
+public:
+    void setup_dynamic_control();
+    // 动态控制状态查询
+    bool should_activate_ethercat() const { 
+        return !emergency_stop_triggered_ && ethercat_enabled_; 
+    }
+    
+    bool should_pause_ethercat() const { 
+        return emergency_stop_triggered_ || !ethercat_enabled_; 
+    }
+private:
+    std::atomic<bool> start_button_pressed_{false};
+    
+public:
+    bool check_start_button_edge() {
+        bool current = current_di_status_.start_button;
+        bool last = last_start_button_state_;
+        last_start_button_state_ = current;
+        return current && !last;  // 检测上升沿
+    }
 };
 
 // 全局变量声明

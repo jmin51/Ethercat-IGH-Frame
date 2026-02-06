@@ -1267,3 +1267,230 @@ void EthercatNode::publish_fault_status() {
         log_counter = 0;
     }
 }
+
+void EthercatNode::setup_dynamic_control() {
+    // 从参数服务器读取配置
+    this->declare_parameter("enable_dynamic_control", true);
+    this->declare_parameter("startup_delay_ms", 2000);
+    this->declare_parameter("shutdown_delay_ms", 1000);
+    
+    dynamic_params_.enable_dynamic_control = 
+        this->get_parameter("enable_dynamic_control").as_bool();
+    dynamic_params_.startup_delay_ms = 
+        this->get_parameter("startup_delay_ms").as_int();
+    dynamic_params_.shutdown_delay_ms = 
+        this->get_parameter("shutdown_delay_ms").as_int();
+    
+    if (dynamic_params_.enable_dynamic_control) {
+        // 创建动态控制定时器
+        dynamic_control_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(100),
+            std::bind(&EthercatNode::dynamic_control_callback, this));
+        
+        RCLCPP_INFO(this->get_logger(), "EtherCAT动态控制已启用");
+    }
+}
+
+// 修改动态控制回调函数
+void EthercatNode::dynamic_control_callback() {
+    if (!dynamic_params_.enable_dynamic_control) return;
+    
+    // 读取当前DI状态
+    DI_Interface current_di;
+    pthread_mutex_lock(&io_mutex_);
+    current_di = current_di_status_;
+    pthread_mutex_unlock(&io_mutex_);
+    
+    // 添加调试信息
+    static int debug_counter = 0;
+    if (debug_counter++ %100 == 0) { // 每5秒打印一次
+        RCLCPP_DEBUG(this->get_logger(), 
+                    "按钮状态 - 启动:%d 暂停:%d 急停:%d EtherCAT使能:%d", 
+                    current_di.start_button, current_di.pause_button, 
+                    current_di.emergency_stop, ethercat_enabled_.load());
+        debug_counter = 0;
+    }
+    
+    handle_io_control_signals(current_di);
+}
+
+// 修复IO控制信号处理
+void EthercatNode::handle_io_control_signals(const DI_Interface& di) {
+    bool current_start = di.start_button;
+    bool current_pause = di.pause_button;
+    bool current_emergency = di.emergency_stop;
+    
+    // // 急停处理（最高优先级）
+    // if (current_emergency) {
+    //     if (!emergency_stop_triggered_) {
+    //         RCLCPP_ERROR(this->get_logger(), "急停按钮按下，执行紧急关闭!");
+    //         emergency_shutdown_ethercat();
+    //         emergency_stop_triggered_ = true;
+    //         ethercat_enabled_ = false;
+    //     }
+    // } else {
+    //     if (emergency_stop_triggered_) {
+    //         emergency_stop_triggered_ = false;
+    //         RCLCPP_INFO(this->get_logger(), "急停按钮释放");
+    //     }
+    // }
+    
+    // 简化的启动按钮处理：检测上升沿后设置标志，不依赖持续高电平
+    if (current_start && !last_start_button_state_) {
+        RCLCPP_INFO(this->get_logger(), "启动按钮按下，设置启动标志");
+        
+        // 设置启动标志，不依赖按钮的持续状态
+        ethercat_enabled_ = true;
+        
+        if (!ethercat_initialized_) {
+            // 第一次启动，完整初始化
+            if (initialize_ethercat_system()) {
+                ethercat_initialized_ = true;
+                RCLCPP_INFO(this->get_logger(), "EtherCAT系统启动完成");
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "EtherCAT系统启动失败");
+                ethercat_enabled_ = false; // 启动失败，重置标志
+            }
+        }
+    }
+    
+    // 暂停按钮处理
+    if (current_pause && !last_pause_button_state_) {
+        if (ethercat_enabled_) {
+            RCLCPP_INFO(this->get_logger(), "暂停按钮按下，暂停EtherCAT通讯");
+            if (soft_shutdown_ethercat()) {
+                ethercat_enabled_ = false;
+                RCLCPP_INFO(this->get_logger(), "EtherCAT通讯已暂停");
+            }
+        }
+    }
+    
+    // 更新上一次状态
+    last_start_button_state_ = current_start;
+    last_pause_button_state_ = current_pause;
+}
+
+bool EthercatNode::initialize_ethercat_system() {
+    if (!master) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT主站未创建");
+        return false;
+    }
+    
+    try {
+        // 初始化从站配置
+        init_axes(master);
+        register_pdo_entries(domain1);
+        
+        // 配置分布式时钟
+        auto slave_configs = get_all_slave_configs();
+        for (auto sc : slave_configs) {
+            if (sc) {
+                ecrt_slave_config_dc(sc, 0x0300, PERIOD_NS, 0, 0, 0);
+            }
+        }
+        
+        // 激活主站
+        if (ecrt_master_activate(master)) {
+            RCLCPP_ERROR(this->get_logger(), "EtherCAT主站激活失败");
+            return false;
+        }
+        
+        // 获取域数据指针
+        if (!(domain1_pd = ecrt_domain_data(domain1))) {
+            RCLCPP_ERROR(this->get_logger(), "获取域数据失败");
+            return false;
+        }
+        
+        // 启动IO监控
+        start_io_monitoring();
+        
+        // 初始化业务逻辑
+        initialize_after_axes();
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT系统初始化异常: %s", e.what());
+        return false;
+    }
+}
+
+bool EthercatNode::soft_shutdown_ethercat() {
+    if (!master || !domain1_pd) {
+        return true; // 已经关闭
+    }
+    
+    try {
+        // 禁用所有驱动器
+        auto& axes = get_servo_axes();
+        for (auto& axis : axes) {
+            unsigned int offset = axis->get_control_word_offset();
+            EC_WRITE_U16(domain1_pd + offset, 0x0006); // 禁用命令
+        }
+        
+        // 发送最后一次命令
+        ecrt_domain_queue(domain1);
+        ecrt_master_send(master);
+        
+        // 短暂延迟确保命令发送
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        
+        RCLCPP_INFO(this->get_logger(), "EtherCAT通讯已软关闭");
+        return true;
+        
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT软关闭异常: %s", e.what());
+        return false;
+    }
+}
+
+bool EthercatNode::soft_start_ethercat() {
+    if (!master || !domain1_pd) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT系统未初始化，无法软启动");
+        return false;
+    }
+    
+    try {
+        // 重新初始化从站状态
+        auto& axes = get_servo_axes();
+        for (auto& axis : axes) {
+            axis->reset_axis(); // 重置轴状态
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "EtherCAT通讯已重新启用");
+        return true;
+        
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT软启动异常: %s", e.what());
+        return false;
+    }
+}
+
+bool EthercatNode::emergency_shutdown_ethercat() {
+    try {
+        // 立即停止所有轴
+        auto& axes = get_servo_axes();
+        for (auto& axis : axes) {
+            axis->stop(); // 调用轴的紧急停止
+        }
+        
+        // 快速禁用通讯
+        if (master && domain1_pd) {
+            auto& axes = get_servo_axes();
+            for (auto& axis : axes) {
+                unsigned int offset = axis->get_control_word_offset();
+                EC_WRITE_U16(domain1_pd + offset, 0x0006);
+            }
+            ecrt_domain_queue(domain1);
+            ecrt_master_send(master);
+        }
+        
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT紧急关闭完成");
+        return true;
+        
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "EtherCAT紧急关闭异常: %s", e.what());
+        return false;
+    }
+}
+

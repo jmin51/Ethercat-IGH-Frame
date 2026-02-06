@@ -30,6 +30,8 @@ find_library(MODBUS_LIBRARY modbus)
 include_directories(
   src/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/launch
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/config
   ${CMAKE_CURRENT_SOURCE_DIR}/src/io_modules  # 新增IO模块路径
   ${CMAKE_CURRENT_SOURCE_DIR}/src/business  # 新增业务逻辑模块路径
 )

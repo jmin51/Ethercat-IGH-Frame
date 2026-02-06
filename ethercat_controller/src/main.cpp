@@ -230,7 +230,15 @@ void check_domain1_state(void) {
 // 实时任务线程
 void* rt_task_wrapper(void* arg) {
     printf("实时线程启动 (优先级: %d)\n", sched_get_priority_max(SCHED_FIFO));
-    
+    static uint64_t last_time = 0;
+    struct timespec current_ts;
+    clock_gettime(CLOCK_TO_USE, &current_ts);
+    uint64_t current_ns = current_ts.tv_sec * NSEC_PER_SEC + current_ts.tv_nsec;
+    if (last_time != 0) {
+        uint64_t delta = current_ns - last_time;
+        printf("周期实际时间: %lu ns\n", delta); // 应为1ms左右
+    }
+    last_time = current_ns;
     // 设置CPU亲和性
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
@@ -242,55 +250,109 @@ void* rt_task_wrapper(void* arg) {
     struct timespec wakeup_time, current_time;
     clock_gettime(CLOCK_TO_USE, &wakeup_time);
     
+    // EtherCAT激活状态控制
+    std::atomic<bool> ethercat_activated{false};
+    bool master_activation_attempted = false;
+
     while (running) {
         wakeup_time = timespec_add(wakeup_time, cycletime);
         clock_nanosleep(CLOCK_TO_USE, TIMER_ABSTIME, &wakeup_time, NULL);
         
-        // 设置应用时间
-        ecrt_master_application_time(master, TIMESPEC2NS(wakeup_time));
-        
-        // EtherCAT通信处理
-        ecrt_master_receive(master);
-        ecrt_domain_process(domain1);
-        
-        // 状态检查
-        // check_domain1_state();
-        
-        if (counter == 0) {
-            counter = FREQUENCY;
-            check_master_state();
-        } else {
-            counter--;
-        }
-        
-        // 处理轴状态机
-        if (global_node && domain1_pd) {
-            global_node->handle_axes_state_machines(domain1_pd);
-        }
-        
-        // 发布关节状态（每10ms） 后期改为在ethercat_node创建10ms定时器
-        static int joint_state_counter = 0;
-        if (joint_state_counter++ >= 10) {
-            joint_state_counter = 0;
-            if (global_node) {
-                global_node->publish_joint_states();
-                global_node->check_layer_motion_completion();
+        // === 简化启动条件：只检查启动标志，不检查按钮持续状态 ===
+        if (!ethercat_activated) {
+            // 简化为只检查启动标志，不依赖按钮持续高电平
+            if (global_node && global_node->should_activate_ethercat()) {
+                if (!master_activation_attempted) {
+                    RCLCPP_INFO(global_node->get_logger(), 
+                               "检测到启动信号，激活EtherCAT主站...");
+                    
+                    if (ecrt_master_activate(master)) {
+                        RCLCPP_ERROR(global_node->get_logger(), "主站激活失败");
+                        master_activation_attempted = true;
+                        continue;
+                    }
+                    
+                    if (!(domain1_pd = ecrt_domain_data(domain1))) {
+                        RCLCPP_ERROR(global_node->get_logger(), "获取域数据失败");
+                        continue;
+                    }
+                    
+                    ethercat_activated = true;
+                    master_activation_attempted = true;
+                    RCLCPP_INFO(global_node->get_logger(), 
+                               "EtherCAT主站激活成功，开始实时通信");
+                }
             }
         }
         
-        // 同步参考时钟
-        if (sync_ref_counter == 0) {
-            sync_ref_counter = 1;
-            clock_gettime(CLOCK_TO_USE, &current_time);
-            ecrt_master_sync_reference_clock_to(master, TIMESPEC2NS(current_time));
-        } else {
-            sync_ref_counter--;
+        // === 正常的实时任务循环（仅在激活后执行）===
+        if (ethercat_activated) {
+            // 检查是否应该暂停
+            if (global_node && !global_node->should_activate_ethercat()) {
+                if (ethercat_activated) {
+                    RCLCPP_INFO(global_node->get_logger(), 
+                               "收到暂停信号，暂停EtherCAT通信");
+                    ethercat_activated = false;
+                    master_activation_attempted = false;
+                    
+                    // // 发送最后一次禁用命令
+                    // if (global_node && domain1_pd) {
+                    //     auto& axes = global_node->get_servo_axes();
+                    //     for (auto& axis : axes) {
+                    //         unsigned int offset = axis->get_control_word_offset();
+                    //         EC_WRITE_U16(domain1_pd + offset, 0x0006); // 禁用命令
+                    //     }
+                    //     ecrt_domain_queue(domain1);
+                    //     ecrt_master_send(master);
+                    // }
+                }
+                continue;
+            }
+            
+            // 设置应用时间
+            ecrt_master_application_time(master, TIMESPEC2NS(wakeup_time));
+            
+            // EtherCAT通信处理
+            ecrt_master_receive(master);
+            ecrt_domain_process(domain1);
+            
+            // 状态检查
+            if (counter == 0) {
+                counter = FREQUENCY;
+                check_master_state();
+            } else {
+                counter--;
+            }
+            
+            // 处理轴状态机
+            if (global_node && domain1_pd) {
+                global_node->handle_axes_state_machines(domain1_pd);
+            }
+            
+            // 发布关节状态（每10ms）
+            static int joint_state_counter = 0;
+            if (joint_state_counter++ >= 10) {
+                joint_state_counter = 0;
+                if (global_node) {
+                    global_node->publish_joint_states();
+                    global_node->check_layer_motion_completion();
+                }
+            }
+            
+            // 同步参考时钟
+            if (sync_ref_counter == 0) {
+                sync_ref_counter = 1;
+                clock_gettime(CLOCK_TO_USE, &current_time);
+                ecrt_master_sync_reference_clock_to(master, TIMESPEC2NS(current_time));
+            } else {
+                sync_ref_counter--;
+            }
+            
+            // 同步从站时钟并发送数据
+            ecrt_master_sync_slave_clocks(master);
+            ecrt_domain_queue(domain1);
+            ecrt_master_send(master);
         }
-        
-        // 同步从站时钟并发送数据
-        ecrt_master_sync_slave_clocks(master);
-        ecrt_domain_queue(domain1);
-        ecrt_master_send(master);
     }
     
     printf("实时线程退出\n");
@@ -301,7 +363,9 @@ void* rt_task_wrapper(void* arg) {
 int main(int argc, char **argv) {
     // 初始化ROS2
     rclcpp::init(argc, argv);
-    global_node = std::make_shared<EthercatNode>("ethercat_controller");
+    
+    // 创建节点
+    auto node = std::make_shared<EthercatNode>("ethercat_controller");
     
     // 设置信号处理
     signal(SIGINT, signal_handler);
@@ -333,38 +397,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, "创建Modbus监测线程失败\n");
     }
     
-    // 初始化轴和PDO
-    global_node->init_axes(master);
-    global_node->register_pdo_entries(domain1);
+    // 初始化轴和PDO配置（但不发送数据）
+    node->init_axes(master);
+    node->register_pdo_entries(domain1);
     
     // 配置分布式时钟
-    auto slave_configs = global_node->get_all_slave_configs();
+    auto slave_configs = node->get_all_slave_configs();
     for (auto sc : slave_configs) {
         if (sc) {
             ecrt_slave_config_dc(sc, 0x0300, PERIOD_NS, 0, 0, 0);
         }
     }
-    
-    // 激活主站
-    printf("激活EtherCAT主站...\n");
-    if (ecrt_master_activate(master)) {
-        fprintf(stderr, "主站激活失败\n");
-        safe_shutdown();
-        return 1;
-    }
-    
-    // 获取域数据指针
-    if (!(domain1_pd = ecrt_domain_data(domain1))) {
-        fprintf(stderr, "获取域数据失败\n");
-        safe_shutdown();
-        return 1;
-    }
-    
-    // 启动IO监控
+    // 启动IO监控（基础监控，不涉及EtherCAT数据交换）
     printf("启动IO监控模块...\n");
-    global_node->start_io_monitoring();
-    // 在轴初始化后初始化业务逻辑和层处理器
-    global_node->initialize_after_axes();
+    node->start_io_monitoring();
+    node->initialize_after_axes();
     
     // 设置实时线程属性
     pthread_attr_t attr;
@@ -411,19 +458,23 @@ int main(int argc, char **argv) {
     pthread_setname_np(thread, "ethercat-rt");
     printf("实时线程创建成功 (优先级: %d)\n", param.sched_priority);
     
-    // 运行ROS2执行器
-    rclcpp::executors::SingleThreadedExecutor executor;
-    executor.add_node(global_node);
+    // 设置动态控制
+    node->setup_dynamic_control();
     
-    printf("=== EtherCAT控制系统启动完成 ===\n");
-    printf("系统状态:\n");
-    printf("  - EtherCAT主站: 已激活\n");
-    printf("  - 实时线程: 运行中\n");
-    printf("  - IO监控: %s\n", global_node->is_io_running() ? "已启动" : "未启动");
-    printf("  - 伺服轴数量: %zu\n", global_node->get_servo_axes().size());
-    printf("  - DI模块: %s\n", is_di_module_enabled() ? "启用" : "禁用");
-    printf("  - DO模块: %s\n", is_do_module_enabled() ? "启用" : "禁用");
-    printf("按Ctrl+C退出程序\n\n");
+    // 设置全局节点指针
+    global_node = node;
+    
+    RCLCPP_INFO(node->get_logger(), "=== EtherCAT控制系统启动完成 ===");
+    RCLCPP_INFO(node->get_logger(), "系统状态:");
+    RCLCPP_INFO(node->get_logger(), "  - EtherCAT主站: 已配置（等待启动信号）");
+    RCLCPP_INFO(node->get_logger(), "  - 实时线程: 已创建（等待启动信号）");
+    RCLCPP_INFO(node->get_logger(), "  - IO监控: 已启动");
+    RCLCPP_INFO(node->get_logger(), "  - 伺服轴数量: %zu", node->get_servo_axes().size());
+    RCLCPP_INFO(node->get_logger(), "请按下启动按钮开始系统...");
+    
+    // 运行ROS2执行器
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
     
     // 使用非阻塞的spin方式
     while (rclcpp::ok() && !g_should_exit) {
@@ -434,6 +485,7 @@ int main(int argc, char **argv) {
             break;
         }
     }
+    
     printf("ROS2执行器已退出，开始清理...\n");
     safe_shutdown();
     

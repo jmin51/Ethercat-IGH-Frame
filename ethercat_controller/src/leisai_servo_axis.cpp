@@ -397,6 +397,10 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
     if (jog_forward_requested_) {
         // 正转：基于当前速度计算脉冲增量
         int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
+        // 关键调试：打印实际计算的脉冲增量
+        printf("速度 %.1f mm/s → 脉冲增量: %d 脉冲/周期\n", 
+               current_jog_speed, speed_pulses);
+               
         target_pulses_ += speed_pulses;
     } else if (jog_reverse_requested_) {
         // 反转：基于当前速度计算脉冲增量

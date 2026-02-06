@@ -231,7 +231,7 @@ void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd)
         }
         joint_position_ = target_pulses; // 精确对齐
     } else {
-        const int32_t MAX_STEP = 30;
+        const int32_t MAX_STEP = 70;
         int32_t step = (abs(error) > MAX_STEP) ? 
                       ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
         joint_position_ += step;

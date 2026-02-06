@@ -1,0 +1,22 @@
+# ethercat_controller:
+#   ros__parameters:
+#     # EtherCAT动态控制参数
+#     enable_dynamic_control: true
+#     startup_delay_ms: 2000      # 启动延迟
+#     shutdown_delay_ms: 1000     # 停止延迟
+#     # IO控制映射
+#     io_control_mapping:
+#       start_button_di: 0        # DI00 - 启动按钮
+#       pause_button_di: 2        # DI02 - 暂停按钮  
+#       emergency_stop_di: 4       # DI04 - 急停按钮
+#     # EtherCAT从站配置
+#     slave_configs:
+#       - position: 0
+#         vendor_id: 0x00004321
+#         product_code: 0x0000a400
+#       - position: 1  
+#         vendor_id: 0x00004321
+#         product_code: 0x0000a400
+#       - position: 2
+#         vendor_id: 0x00100000
+#         product_code: 0x000c010d
