@@ -15,6 +15,10 @@ ec_domain_t *domain1 = nullptr;
 uint8_t *domain1_pd = nullptr;
 std::atomic<bool> g_should_exit(false);
 std::atomic<bool> node_shutting_down_{false};
+// 全局变量定义
+std::atomic<bool> g_system_running(false);
+std::atomic<bool> g_start_button_pressed(false);
+std::atomic<bool> g_pause_button_pressed(false);
 
 // 添加缺失的常量定义
 // const int HOMING_TOLERANCE = 100;
@@ -180,6 +184,16 @@ void EthercatNode::initialize_after_axes() {
 void EthercatNode::init_axes(ec_master_t* master) {
     RCLCPP_INFO(this->get_logger(), "开始初始化伺服轴");
     
+    // 清空现有轴对象，确保重新启动时初值正确
+    stop_io_monitoring();  // 等待IO线程完全退出
+    servo_axes_.clear();
+    last_target_positions_.clear();  // 同时清空位置记录
+    // +++ 新增：重置板宽控制状态 +++
+    current_board_width_ = 15.0;   // 重置为默认板宽
+    target_board_width_ = 15.0;
+    board_width_moving_ = false;
+    board_width_updated_.store(false);
+
     // 添加从站1：第二个雷赛双轴驱动器
     auto axis1_1 = ServoAxisFactory::create_servo_axis(
         DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
@@ -210,6 +224,7 @@ void EthercatNode::init_axes(ec_master_t* master) {
     }
     
     last_target_positions_.resize(servo_axes_.size(), 0.0);
+    start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态
     RCLCPP_INFO(this->get_logger(), "伺服轴初始化完成，共 %zu 个轴", servo_axes_.size());
 }
 
@@ -241,12 +256,6 @@ void EthercatNode::handle_axes_state_machines(uint8_t* domain1_pd) {
     for (auto& axis : servo_axes_) {
         axis->handle_state_machine(domain1_pd);
     }
-}
-
-void EthercatNode::add_axis(std::shared_ptr<ServoAxisBase> axis) {
-    servo_axes_.push_back(std::move(axis));
-    last_target_positions_.resize(servo_axes_.size(), 0.0);
-    RCLCPP_INFO(this->get_logger(), "添加新轴: %s", servo_axes_.back()->get_name().c_str());
 }
 
 std::vector<std::shared_ptr<ServoAxisBase>>& EthercatNode::get_servo_axes() {
@@ -586,7 +595,7 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
-#define CONTROL_SOURCE_IO 1  // 1:使用IO控制手自动模式, 0:使用话题控制
+#define CONTROL_SOURCE_IO 0  // 1:使用IO控制手自动模式, 0:使用话题控制
 void EthercatNode::handle_io_signals(DI_Interface di) {
     // 发布IO状态到Python节点
     publish_py_io_status(di);
@@ -598,6 +607,21 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
 
     // 删除原有的BusinessLogicProcessor处理逻辑
     // 业务逻辑现在由Python节点处理
+    // 启动按钮处理（上升沿触发）
+    static bool last_start_button = false;
+    if (di.start_button && !last_start_button) {
+        g_start_button_pressed.store(true);
+        RCLCPP_INFO(this->get_logger(), "启动按钮按下，开始启动系统");
+    }
+    last_start_button = di.start_button;
+
+    // 暂停按钮处理（上升沿触发）
+    static bool last_pause_button = false;
+    if (di.pause_button && !last_pause_button) {
+        g_pause_button_pressed.store(true);
+        RCLCPP_INFO(this->get_logger(), "暂停按钮按下，开始安全关闭");
+    }
+    last_pause_button = di.pause_button;
     // 新增：IO控制模式切换（仅在宏开关启用时生效）
 #if CONTROL_SOURCE_IO
     bool current_manual_auto_state = di.manual_auto_button; // 当前按钮状态（DI04）

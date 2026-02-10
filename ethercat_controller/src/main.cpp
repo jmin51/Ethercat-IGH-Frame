@@ -101,10 +101,11 @@ void signal_handler(int signum) {
     printf("\n收到信号 %d, 开始安全关闭...\n", signum);
     running = 0;
     g_should_exit = true;
+    safe_shutdown(false);  // false表示完全关闭模式
 }
 
 // 安全关闭
-void safe_shutdown() {
+void safe_shutdown(bool is_pause = false) {
     static std::atomic<bool> shutdown_in_progress{false};
     
     if (shutdown_in_progress.exchange(true)) {
@@ -112,29 +113,34 @@ void safe_shutdown() {
         return;
     }
     
-    printf("\n开始安全关闭流程...\n");
-    // 1. 先关闭ROS2执行器（最重要的一步）
-    if (rclcpp::ok()) {
-        // 强制中断ROS2执行器
-        rclcpp::shutdown();
-        
-        // 等待ROS2线程完全退出
-        usleep(200000); // 200ms等待
+    if (is_pause) {
+        printf("\n开始安全暂停流程...\n");
     } else {
+        printf("\n开始安全关闭流程...\n");
     }
     
-    // 1. 先设置退出标志
+    // 1. 设置退出标志
     running = 0;
-    g_should_exit.store(true);
+    if (!is_pause) {
+        g_should_exit.store(true);
+    }
+    
+    if (!is_pause) {
+        // 完全关闭时才停止ROS2执行器
+        printf("[DEBUG] 步骤1: 停止ROS2执行器\n");
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+            usleep(200000); // 200ms等待ROS2线程退出
+        }
+    }
     
     printf("[DEBUG] 步骤2: 等待100ms让实时线程检测退出标志\n");
     usleep(100000); // 100ms
     
     // 2. 处理实时线程
     if (thread) {
-        printf("[DEBUG] 步骤3: 开始处理实时线程\n");
+        printf("[DEBUG] 步骤3: 处理实时线程\n");
         
-        // 先尝试温和的等待
         int wait_count = 0;
         const int max_wait = 30; // 3秒超时
         
@@ -165,24 +171,21 @@ void safe_shutdown() {
         printf("[DEBUG] 实时线程句柄为空\n");
     }
     
-    printf("[DEBUG] 步骤4: 处理Modbus线程\n");
-    // 3. 停止Modbus线程
-    modbus_running = 0;
-    if (modbus_thread) {
-        printf("等待Modbus线程退出...\n");
-        pthread_join(modbus_thread, nullptr);
-        modbus_thread = 0;
-        printf("Modbus线程已退出\n");
+    // 3. 暂停模式下不停止Modbus线程和IO监控
+    if (!is_pause) {
+        printf("[DEBUG] 步骤4: 处理Modbus线程\n");
+        modbus_running = 0;
+        if (modbus_thread) {
+            printf("等待Modbus线程退出...\n");
+            pthread_join(modbus_thread, nullptr);
+            modbus_thread = 0;
+            printf("Modbus线程已退出\n");
+        }
+    } else {
+        printf("[DEBUG] 暂停模式：保持Modbus线程运行\n");
     }
-
-    // 4. 停止Modbus线程
-    modbus_running = 0;
-    if (modbus_thread) {
-        pthread_join(modbus_thread, nullptr);
-        modbus_thread = 0;
-    }
-
-    // 5. 禁用驱动器
+    
+    // 4. 禁用驱动器
     if (master && global_node && domain1_pd) {
         printf("禁用所有驱动器...\n");
         auto& axes = global_node->get_servo_axes();
@@ -191,27 +194,42 @@ void safe_shutdown() {
             EC_WRITE_U16(domain1_pd + offset, 0x0006); // 禁用命令
         }
         
-        // 发送最后一次命令 - 修复这里
-        ecrt_domain_queue(domain1);  // 直接调用，不检查返回值
-        // ecrt_master_send(master);
+        // 发送最后一次命令
+        ecrt_domain_queue(domain1);
         usleep(10000);
     }
     
-    printf("安全关闭完成...\n释放EtherCAT资源...\n");
-
+    // 5. 释放EtherCAT资源
     if (master) {
+        if (is_pause) {
+            printf("暂停模式：释放EtherCAT主站资源\n");
+        } else {
+            printf("释放EtherCAT资源...\n");
+        }
+        ecrt_master_deactivate(master);
         ecrt_release_master(master);
         master = nullptr;
     }
-    printf("解除内存锁定...\n");
-    munlockall();
     
-    // 最后清理全局节点
-    if (global_node) {
-        global_node.reset();
+    // 6. 完全关闭时的额外清理
+    if (!is_pause) {
+        printf("解除内存锁定...\n");
+        munlockall();
+    } else {
+        printf("暂停模式：保持内存锁定和全局节点\n");
     }
     
-    printf("安全关闭完成\n");
+    if (is_pause) {
+        printf("安全暂停完成\n");
+    } else {
+        // 清理全局节点
+        if (global_node) {
+            global_node.reset();
+        }
+        printf("安全关闭完成\n");
+    }
+    
+    shutdown_in_progress.store(false);
 }
 
 // 域状态检查
@@ -230,7 +248,10 @@ void check_domain1_state(void) {
 // 实时任务线程
 void* rt_task_wrapper(void* arg) {
     printf("实时线程启动 (优先级: %d)\n", sched_get_priority_max(SCHED_FIFO));
-    
+    if (!master || !domain1 || !domain1_pd) {
+        printf("EtherCAT资源未就绪，等待初始化...\n");
+        return nullptr;
+    }
     // 设置CPU亲和性
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
@@ -242,7 +263,19 @@ void* rt_task_wrapper(void* arg) {
     struct timespec wakeup_time, current_time;
     clock_gettime(CLOCK_TO_USE, &wakeup_time);
     
-    while (running) {
+    while (running && !g_should_exit.load()) {
+        // 检查暂停按钮
+        if (g_pause_button_pressed.load()) {
+            printf("检测到暂停按钮，准备安全关闭...\n");
+            break;
+        }
+        
+        // 检查系统运行状态
+        if (!g_system_running.load()) {
+            usleep(50000); // 50ms等待
+            continue;
+        }
+        
         wakeup_time = timespec_add(wakeup_time, cycletime);
         clock_nanosleep(CLOCK_TO_USE, TIMER_ABSTIME, &wakeup_time, NULL);
         
@@ -324,13 +357,8 @@ int main(int argc, char **argv) {
     domain1 = ecrt_master_create_domain(master);
     if (!domain1) {
         fprintf(stderr, "创建域失败\n");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
-    }
-    
-    // 初始化Modbus监控
-    if (init_modbus_monitor() != 0) {
-        fprintf(stderr, "创建Modbus监测线程失败\n");
     }
     
     // 初始化轴和PDO
@@ -344,22 +372,25 @@ int main(int argc, char **argv) {
             ecrt_slave_config_dc(sc, 0x0300, PERIOD_NS, 0, 0, 0);
         }
     }
-    
     // 激活主站
     printf("激活EtherCAT主站...\n");
     if (ecrt_master_activate(master)) {
         fprintf(stderr, "主站激活失败\n");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     // 获取域数据指针
     if (!(domain1_pd = ecrt_domain_data(domain1))) {
         fprintf(stderr, "获取域数据失败\n");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
-    
+      
+    // 初始化Modbus监控
+    if (init_modbus_monitor() != 0) {
+        fprintf(stderr, "创建Modbus监测线程失败\n");
+    }
     // 启动IO监控
     printf("启动IO监控模块...\n");
     global_node->start_io_monitoring();
@@ -372,39 +403,39 @@ int main(int argc, char **argv) {
     
     if (pthread_attr_init(&attr)) {
         perror("线程属性初始化失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     if (pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + 32768)) {
         perror("设置栈大小失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO)) {
         perror("设置调度策略失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     param.sched_priority = sched_get_priority_max(SCHED_FIFO);
     if (pthread_attr_setschedparam(&attr, &param)) {
         perror("设置优先级失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     if (pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED)) {
         perror("设置继承调度失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
     // 创建实时线程
     if (pthread_create(&thread, &attr, rt_task_wrapper, NULL)) {
         perror("创建实时线程失败");
-        safe_shutdown();
+        safe_shutdown(false);
         return 1;
     }
     
@@ -418,24 +449,109 @@ int main(int argc, char **argv) {
     printf("=== EtherCAT控制系统启动完成 ===\n");
     printf("系统状态:\n");
     printf("  - EtherCAT主站: 已激活\n");
-    printf("  - 实时线程: 运行中\n");
     printf("  - IO监控: %s\n", global_node->is_io_running() ? "已启动" : "未启动");
     printf("  - 伺服轴数量: %zu\n", global_node->get_servo_axes().size());
     printf("  - DI模块: %s\n", is_di_module_enabled() ? "启用" : "禁用");
     printf("  - DO模块: %s\n", is_do_module_enabled() ? "启用" : "禁用");
     printf("按Ctrl+C退出程序\n\n");
+    printf("  - 实时线程: 等待启动按钮\n");
     
-    // 使用非阻塞的spin方式
+    // 使用非阻塞的spin方式，添加启动/暂停检测
+    bool system_initialized = false;
+
     while (rclcpp::ok() && !g_should_exit) {
         executor.spin_some(std::chrono::milliseconds(100));
+        
+        // 检查启动按钮
+        if (g_start_button_pressed.load() && !g_system_running.load()) {
+            printf("开始重新启动系统...\n");
+            g_system_running.store(true);
+            g_start_button_pressed.store(false);
+            
+            // 重新初始化EtherCAT资源
+            if (!master) {
+                printf("重新初始化EtherCAT资源...\n");
+                
+                // 重新请求主站
+                master = ecrt_request_master(0);
+                if (!master) {
+                    fprintf(stderr, "重新请求EtherCAT主站失败\n");
+                    g_system_running.store(false);
+                    continue;
+                }
+                
+                // 重新创建域
+                domain1 = ecrt_master_create_domain(master);
+                if (!domain1) {
+                    fprintf(stderr, "重新创建域失败\n");
+                    ecrt_release_master(master);
+                    master = nullptr;
+                    g_system_running.store(false);
+                    continue;
+                }
+                
+                // 重新配置从站和PDO
+                global_node->init_axes(master);
+                global_node->register_pdo_entries(domain1);
+                
+                // 重新激活主站
+                if (ecrt_master_activate(master)) {
+                    fprintf(stderr, "主站重新激活失败\n");
+                    safe_shutdown(false);
+                    continue;
+                }
+                
+                // 重新获取域数据指针
+                domain1_pd = ecrt_domain_data(domain1);
+                if (!domain1_pd) {
+                    fprintf(stderr, "重新获取域数据失败\n");
+                    safe_shutdown(false);
+                    continue;
+                }
+            }
+            
+            // 创建新的实时线程
+            running = 1;
+            if (pthread_create(&thread, &attr, rt_task_wrapper, NULL)) {
+                perror("创建实时线程失败");
+                safe_shutdown(false);
+                continue;
+            }
+            pthread_setname_np(thread, "ethercat-rt");
+            printf("实时线程重新创建成功\n");
+            
+            printf("系统重新启动完成\n");
+        }
+        
+        // 检查暂停按钮
+        if (g_pause_button_pressed.load() && g_system_running.load()) {
+            printf("开始安全暂停系统...\n");
+            g_system_running.store(false);
+            g_pause_button_pressed.store(false);
+            // // 安全暂停操作 to do后续可简化方向
+            // if (thread) {
+            //     printf("等待实时线程退出...\n");
+            //     pthread_join(thread, nullptr);
+            //     thread = 0;
+            //     printf("实时线程已退出\n");
+            // }
+            
+            // // 禁用EtherCAT主站
+            // if (master) {
+            //     printf("禁用EtherCAT主站...\n");
+            //     ecrt_master_deactivate(master);
+            //     ecrt_release_master(master);
+            //     master = nullptr;
+            // }
+            safe_shutdown(true);  // true表示暂停模式
+            
+            printf("系统已暂停，等待启动按钮...\n");
+        }
         
         // 定期检查退出标志
         if (g_should_exit) {
             break;
         }
     }
-    printf("ROS2执行器已退出，开始清理...\n");
-    safe_shutdown();
-    
-    return 0;
+    return 0; // 添加适当的返回值
 }

@@ -43,6 +43,17 @@ void ServoAxisBase::initialize_members() {
     jog_forward_requested_ = false;
     jog_reverse_requested_ = false;
     jog_stop_requested_ = false;
+    
+    // +++ 新增：目标到达标志重置 +++
+    target_reached_flag_.store(false);
+    target_reached_ = false;
+    
+    // +++ 新增：逐步逼近相关变量重置 +++
+    target_offset_ = 0;
+    direction_flag_ = 0;
+    new_target_ = 0;
+    
+    current_error_code_ = 0;
 }
 
 // 基类的默认实现

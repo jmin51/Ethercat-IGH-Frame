@@ -41,7 +41,6 @@ public:
     void init_axes(ec_master_t* master);
     void register_pdo_entries(ec_domain_t* domain1);
     void handle_axes_state_machines(uint8_t* domain1_pd);
-    void add_axis(std::shared_ptr<ServoAxisBase> axis);
     std::vector<std::shared_ptr<ServoAxisBase>>& get_servo_axes();
     
     // 配置管理
@@ -128,9 +127,6 @@ private:
     DI_Interface current_di_status_;
     DO_Interface current_do_control_;
     pthread_mutex_t io_mutex_;
-
-    // 删除BusinessLogicProcessor相关代码
-    // std::unique_ptr<BusinessLogicProcessor> business_processor_;
     
     // std::vector<AxisCommand> last_executed_commands_;
     // 层指令处理器
@@ -188,10 +184,14 @@ extern ec_master_t *master;
 extern ec_domain_t *domain1;
 extern uint8_t *domain1_pd;
 extern std::atomic<bool> g_should_exit;
+// 在全局变量定义区域添加
+extern std::atomic<bool> g_system_running;  // 系统运行状态
+extern std::atomic<bool> g_start_button_pressed;  // 启动按钮状态
+extern std::atomic<bool> g_pause_button_pressed;  // 暂停按钮状态
 
 // 全局函数声明
 void signal_handler(int signum);
-void safe_shutdown();
+void safe_shutdown(bool is_pause);
 void* rt_task_wrapper(void* arg);
 void* io_monitor_thread(void* arg);  // 新增IO监控线程
 
