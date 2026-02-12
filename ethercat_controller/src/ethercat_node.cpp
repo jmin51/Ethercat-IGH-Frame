@@ -8,6 +8,7 @@
 #include <sstream>
 #include <std_msgs/msg/empty.hpp>  // 添加这行
 
+#define CONTROL_SOURCE_IO 1  // 1:使用IO控制手自动模式, 0:使用话题控制
 // 全局变量定义
 std::shared_ptr<EthercatNode> global_node = nullptr;
 ec_master_t *master = nullptr;
@@ -595,7 +596,6 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
-#define CONTROL_SOURCE_IO 0  // 1:使用IO控制手自动模式, 0:使用话题控制
 void EthercatNode::handle_io_signals(DI_Interface di) {
     // 发布IO状态到Python节点
     publish_py_io_status(di);

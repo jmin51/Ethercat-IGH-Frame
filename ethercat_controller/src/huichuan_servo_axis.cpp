@@ -386,7 +386,8 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
             target_reached_flag_ = false; // 新运动开始，清除标志
         }
         // 绝对位置模式：直接计算目标脉冲数
-        target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+        // target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+        target_pulses_ = displacement_to_pulses(target_displacement_);
         printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d, 当前: %d)\n", 
                 axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_, joint_position_);
         

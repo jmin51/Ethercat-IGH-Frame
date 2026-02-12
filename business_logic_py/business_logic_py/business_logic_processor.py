@@ -935,16 +935,17 @@ class BusinessLogicProcessor(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    
     processor = BusinessLogicProcessor()
     
     try:
         rclpy.spin(processor)
     except KeyboardInterrupt:
-        processor.get_logger().info('业务逻辑处理器被用户中断')
+        if processor:
+            print('业务逻辑处理器被用户中断')
     finally:
         processor.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

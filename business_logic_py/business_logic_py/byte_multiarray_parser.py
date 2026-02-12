@@ -314,6 +314,7 @@ class ByteMultiArrayParser(Node):
 
     def publish_integrated_status(self):
         """每100ms发布统一的IO状态信息"""
+    
         if not self.io_status_received:
             return  # 尚未收到IO状态数据
             
@@ -350,8 +351,10 @@ class ByteMultiArrayParser(Node):
             di_state = self.current_di_bits
             message_data.append(bytes([(di_state >> 0) & 0xFF]))   # 最低字节
             message_data.append(bytes([(di_state >> 8) & 0xFF]))   # 次低字节
-            message_data.append(bytes([(di_state >> 16) & 0xFF]))  # 次高字节
-            message_data.append(bytes([(di_state >> 24) & 0xFF]))  # 最高字节
+            message_data.append(bytes([(di_state >> 16) & 0xFF]))  
+            message_data.append(bytes([(di_state >> 24) & 0xFF]))  
+            message_data.append(bytes([(di_state >> 32) & 0xFF]))  # 次高字节
+            message_data.append(bytes([(di_state >> 48) & 0xFF]))  # 最高字节
             
             # 创建MultiArrayLayout
             layout = MultiArrayLayout()
@@ -391,8 +394,10 @@ class ByteMultiArrayParser(Node):
             do_state = self.current_do_bits
             message_data.append(bytes([(do_state >> 0) & 0xFF]))   # 最低字节
             message_data.append(bytes([(do_state >> 8) & 0xFF]))   # 次低字节
-            message_data.append(bytes([(do_state >> 16) & 0xFF]))  # 次高字节
-            message_data.append(bytes([(do_state >> 24) & 0xFF]))  # 最高字节
+            message_data.append(bytes([(do_state >> 16) & 0xFF]))  
+            message_data.append(bytes([(do_state >> 24) & 0xFF]))  
+            message_data.append(bytes([(do_state >> 32) & 0xFF]))  # 次高字节
+            message_data.append(bytes([(do_state >> 48) & 0xFF]))  # 最高字节
             
             # 创建MultiArrayLayout
             layout = MultiArrayLayout()
@@ -421,6 +426,8 @@ class ByteMultiArrayParser(Node):
             
         try:
             # 关键修复：确保所有数据都是整数类型
+            self.get_logger().info(f'=== 收到消息 ===')
+            self.get_logger().info(f'数据长度: {len(msg.data)} 字节')
             data_list = []
             for item in msg.data:
                 data_list.append(self.ensure_int(item))
@@ -629,6 +636,12 @@ class ByteMultiArrayParser(Node):
         self.warehouse_stop_pub.publish(msg)
         self.outbound_stop_pub.publish(msg)
         self.get_logger().info('发布仓库/出库停止命令')
+        # 结束作业命令，直接发布 /control_command -> stop命令
+        command_str = "stop"
+        control_msg = String()
+        control_msg.data = command_str
+        self.control_pub.publish(control_msg)
+        self.get_logger().info('发布开始作业命令: 进入自动模式')
 
     def process_axis_jog(self, payload):
         """处理轴点动命令 (0x010D) - /jog_command"""
@@ -688,12 +701,63 @@ class ByteMultiArrayParser(Node):
 
     def process_axis_stop(self, payload):
         """处理轴停止命令 (0x010F) - /jog_command"""
-        # 根据表格：所有轴停止
-        command_str = "all:stop"
+        # 检查负载长度：至少需要6字节（轴号2字节 + 方向2字节 + 其他数据）
+        if len(payload) < 6:
+            self.get_logger().warn('轴点动命令负载长度不足，需要至少6字节')
+            return
+        
+        # 解析轴号（小端序）：负载的第1-2字节（索引0-1）
+        axis_low = payload[0]  # 轴号低位字节
+        axis_high = payload[1]  # 轴号高位字节
+        axis_num = (axis_high << 8) | axis_low  # 小端序组合
+        
+        # 解析方向（小端序）：负载的第3-4字节（索引2-3）
+        direction_low = payload[2]  # 方向低位字节
+        direction_high = payload[3]  # 方向高位字节
+        direction = (direction_high << 8) | direction_low  # 小端序组合
+        
+        # 轴号映射表：数字轴号 -> 字符串轴名
+        axis_mapping = {
+            1: "axis1_1",  # 轴1的第一个电机
+            2: "axis1_2",  # 轴1的第二个电机
+            3: "axis2_1",  # 轴2的第一个电机
+            4: "axis2_2",  # 轴2的第二个电机
+            5: "axis3",    # 轴3
+            6: "axis4",    # 轴4
+            7: "axis5"     # 轴5
+        }
+        
+        # 将数字轴号转换为字符串轴名
+        axis_name = axis_mapping.get(axis_num, f"axis{axis_num}")
+        # axis_name = f"axis{axis_num}"
+        
+        # 方向映射
+        direction_map = {
+            0: "stop",
+        }
+        
+        direction_str = direction_map.get(direction, "stop")
+        command_str = f"{axis_name}:{direction_str}"
+        
+        # 发布到/jog_command话题
         msg = String()
         msg.data = command_str
         self.jog_pub.publish(msg)
-        self.get_logger().info('发布所有轴停止命令')
+        
+        # 记录详细信息
+        self.get_logger().info(f'发布点动命令: {command_str} (轴号: {axis_num}->{axis_name}, 方向: 0x{direction_high:02X}{direction_low:02X})')
+        # self.get_logger().info(f'发布点动命令: {command_str} (轴号: 0x{axis_high:02X}{axis_low:02X}, 方向: 0x{direction_high:02X}{direction_low:02X})')
+
+        # 如果有额外的数据，记录但不处理
+        if len(payload) > 4:
+            extra_data = payload[4:]  # 第5字节及以后的数据
+            self.get_logger().info(f'忽略额外数据: {extra_data}')
+        # # 根据表格：所有轴停止
+        # command_str = "all:stop"
+        # msg = String()
+        # msg.data = command_str
+        # self.jog_pub.publish(msg)
+        # self.get_logger().info('发布所有轴停止命令')
 
     def process_clear_axis_fault(self, payload):
         """处理清除轴故障命令 (0x0117) - /control_command"""
@@ -804,14 +868,16 @@ class ByteMultiArrayParser(Node):
 def main(args=None):
     rclpy.init(args=args)
     parser_node = ByteMultiArrayParser()
-    
+
     try:
         rclpy.spin(parser_node)
     except KeyboardInterrupt:
-        parser_node.get_logger().info('ByteMultiArray解析器被用户中断')
+        if parser_node:
+            print('ByteMultiArray解析器被用户中断')
     finally:
         parser_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -117,13 +117,12 @@ void safe_shutdown(bool is_pause = false) {
         printf("\n开始安全暂停流程...\n");
     } else {
         printf("\n开始安全关闭流程...\n");
+        g_should_exit.store(true, std::memory_order_release);
+        //     g_should_exit.store(true);
     }
     
     // 1. 设置退出标志
     running = 0;
-    if (!is_pause) {
-        g_should_exit.store(true);
-    }
     
     if (!is_pause) {
         // 完全关闭时才停止ROS2执行器
