@@ -197,9 +197,9 @@ void EthercatNode::init_axes(ec_master_t* master) {
 
     // 添加从站1：第二个雷赛双轴驱动器
     auto axis1_1 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);  // 从站位置=1
+        DriveBrand::LEISAI, "axis1_1", 0, AxisType::AXIS1, LEISAI_PRODUCT_CODE_3);  // 从站位置=1
     auto axis1_2 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);  // 从站位置=1（同一个从站）
+        DriveBrand::LEISAI, "axis1_2", 0, AxisType::AXIS2, LEISAI_PRODUCT_CODE_3);  // 从站位置=1（同一个从站）
 
     servo_axes_.push_back(std::move(axis1_1));
     servo_axes_.push_back(std::move(axis1_2));
@@ -212,13 +212,12 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis2_1));
     servo_axes_.push_back(std::move(axis2_2));
     
-    // 可以继续添加其他轴
-    // servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-    //     DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2)); 暂时停用
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis4", 2, AxisType::AXIS1, 0, 7.5)); // 汇川轴，减速比9.0,调式结果是7.5
+        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2));
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis5", 3, AxisType::AXIS1));
+        DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 7.5)); // 汇川轴，减速比9.0,调式结果是7.5
+    servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
+        DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
     // 配置每个轴
     for (auto& axis : servo_axes_) {
         axis->configure(master);
