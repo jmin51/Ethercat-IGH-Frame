@@ -242,7 +242,7 @@ void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd)
         }
         joint_position_ = target_pulses; // 精确对齐
     } else {
-        const int32_t MAX_STEP = 30;
+        const int32_t MAX_STEP = 40;
         int32_t step = (abs(error) > MAX_STEP) ? 
                       ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
         joint_position_ += step;
@@ -261,12 +261,12 @@ bool ServoAxisBase::set_jog_speed(double speed) {
                   << MIN_JOG_SPEED << ", " << MAX_JOG_SPEED << "]: " << speed << std::endl;
         return false;
     }
-    
-    // 只能在READY状态下设置速度
-    if (current_state_ != AxisState::READY) {
-        std::cout << "轴 " << axis_name_ << " 不在READY状态，无法设置点动速度" << std::endl;
-        return false;
-    }
+
+    // 只能在READY状态下设置速度 删除任何时候都可以设置速度
+    // if (current_state_ != AxisState::READY) {
+    //     std::cout << "轴 " << axis_name_ << " 不在READY状态，无法设置点动速度" << std::endl;
+    //     return false;
+    // }
     
     jog_speed_ = speed;
     std::cout << "轴 " << axis_name_ << " 点动速度设置为: " << jog_speed_ << " mm/s" << std::endl;

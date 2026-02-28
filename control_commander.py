@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Float64MultiArray, UInt8, Empty
+from std_msgs.msg import String, Float64MultiArray, Int8, Empty
 import threading
 import select
 import sys
@@ -24,11 +24,13 @@ class ControlCommander(Node):
         # 新增IO控制发布器
         self.io_control_pub = self.create_publisher(String, '/do_control', 10)
         # 新增仓库控制发布器
-        self.warehouse_start_pub = self.create_publisher(UInt8, '/warehouse_start', 10)
+        self.warehouse_start_pub = self.create_publisher(Int8, '/warehouse_start', 10)
         self.warehouse_stop_pub = self.create_publisher(Empty, '/warehouse_stop', 10)
         # 新增出库控制发布器
-        self.outbound_start_pub = self.create_publisher(UInt8, '/outbound_start', 10)
+        self.outbound_start_pub = self.create_publisher(Int8, '/outbound_start', 10)
         self.outbound_stop_pub = self.create_publisher(Empty, '/outbound_stop', 10)
+        # 新增层控制发布器
+        self.layer_pub = self.create_publisher(Int8, '/layer_command', 10)
         
         # 设置非阻塞输入
         self.old_settings = termios.tcgetattr(sys.stdin)
@@ -69,98 +71,145 @@ class ControlCommander(Node):
         self.print_main_menu()
     
     def print_main_menu(self):
-        """打印主菜单"""
-        print("\n" + "="*40)
-        print("   ROS2 机械臂控制主菜单   ")
-        print("="*40)
-        print("01: 进入手动模式")
-        print("02: 进入自动模式") 
-        print("03: 停止所有轴")
-        print("04: 清除故障")
-        print("05: 重置轴")
-        print("06: 发送轨迹动作")
-        print("q: 退出程序")
-        print("="*40)
-        print("请输入两位数字或字母选择命令:")
+            """打印主菜单 - 减少换行符使用"""
+            menu = (
+                "\n" + "=" * 40 + "\n" +
+                "ROS2 机械臂控制主菜单\n" +
+                "=" * 40 + "\n" +
+                "请选择操作模式或功能：\n" +
+                "  01: 进入手动模式     02: 进入自动模式\n" +
+                "  03: 停止所有轴       04: 清除故障\n" +
+                "  05: 重置轴           06: 发送轨迹动作\n" +
+                "  q : 退出程序\n" +
+                "=" * 40 + "\n" +
+                "请输入命令代码 (例如: 01 或 q): "
+            )
+            print(menu, end='', flush=True)
     
     def print_manual_menu(self):
-        """打印手动控制菜单"""
-        print("\n" + "="*40)
-        print("手动模式 - 轴控制与IO控制菜单")
-        print("="*40)
-        print("轴控制:")
-        print("  01: 轴1正转点动")
-        print("  02: 轴1反转点动") 
-        print("  03: 轴2正转点动")
-        print("  04: 轴2反转点动")
-        print("  05: 轴3正转点动")
-        print("  06: 轴3反转点动")
-        print("  07: 轴4正转点动")
-        print("  08: 轴4反转点动")
-        print("  09: 轴5正转点动")
-        print("  10: 轴5反转点动")
-        print("IO控制 (当前状态):")
-        print("  11: M800启动按钮灯 [{}]".format("ON" if self.io_status['800'] else "OFF"))
-        print("  12: M801复位按钮灯 [{}]".format("ON" if self.io_status['801'] else "OFF"))
-        print("  13: M802暂停按钮灯 [{}]".format("ON" if self.io_status['802'] else "OFF"))
-        print("  14: M803蜂鸣器 [{}]".format("ON" if self.io_status['803'] else "OFF"))
-        print("  15: M804三色红灯 [{}]".format("ON" if self.io_status['804'] else "OFF"))
-        print("  16: M805三色黄灯 [{}]".format("ON" if self.io_status['805'] else "OFF"))
-        print("  17: M806三色绿灯 [{}]".format("ON" if self.io_status['806'] else "OFF"))
-        print("  18: M810顶升气缸下降 [{}]".format("ON" if self.io_status['810'] else "OFF"))
-        print("  19: M811齿轮对接气缸伸出 [{}]".format("ON" if self.io_status['811'] else "OFF"))
-        print("  20: M812皮带正转启动 [{}]".format("ON" if self.io_status['812'] else "OFF"))
-        print("  21: M813皮带反转启动 [{}]".format("ON" if self.io_status['813'] else "OFF"))
-        print("其他控制:")
-        print("  s: 停止所有轴点动")
-        print("  r: 复位所有IO")
-        print("  b: 返回主菜单")
-        print("="*40)
-        print("请输入命令:")
+            """打印手动控制菜单 - 减少换行符使用"""
+            # 1. 构建轴控制区块字符串
+            axis_ctrl_block = (
+                "[轴控制 - 点动]\n" +
+                "  01:轴1_1正转点动   02:轴1_1反转点动   03:轴1_2正转点动   04:轴1_2反转点动\n" +
+                "  05:轴2_1正转点动   06:轴2_1反转点动   07:轴2_2正转点动   08:轴2_2反转点动\n" +
+                "  09:轴3  正转点动   10:轴3  反转点动   11:轴4  正转点动   12:轴4  反转点动\n" +
+                "  13:轴5  正转点动   14:轴5  反转点动\n"
+            )
+            
+            # 2. 构建IO控制区块字符串
+            io_lines = []
+            io_list = [
+                ("15:M800启动按钮灯", '800'), ("16:M801复位按钮灯", '801'),
+                ("17:M802暂停按钮灯", '802'), ("18:M803蜂鸣器", '803'),
+                ("19:M804三色红灯", '804'), ("20:M805三色黄灯", '805'),
+                ("21:M806三色绿灯", '806'), ("22:M810顶升气缸下降", '810'),
+                ("23:M811齿轮对接气缸伸出", '811'), ("24:M812皮带正转启动", '812'),
+                ("25:M813皮带反转启动", '813')
+            ]
+            for i in range(0, len(io_list), 4):  # 每行显示4个IO项以压缩行数
+                line_parts = []
+                for j in range(4):
+                    idx = i + j
+                    if idx < len(io_list):
+                        name, addr = io_list[idx]
+                        status = "ON" if self.io_status[addr] else "OFF"
+                        line_parts.append(f"  {name}[{status}]")
+                io_lines.append("".join(line_parts))
+            io_ctrl_block = "[IO控制] (当前状态)\n" + "\n".join(io_lines) + "\n"
+            
+            # 3. 构建其他控制区块字符串
+            other_ctrl_block = (
+                "\n[其他控制]\n" +
+                "  s:停止所有轴点动  r:复位所有IO  b:返回主菜单\n"
+            )
+            
+            # 4. 拼接最终菜单字符串并打印
+            menu = (
+                "\n" + "=" * 50 + "\n" +
+                "手动模式 - 轴控制与IO控制\n" +
+                "=" * 50 + "\n" +
+                axis_ctrl_block + "\n" +
+                io_ctrl_block +
+                other_ctrl_block +
+                "=" * 50 + "\n" +
+                "请输入命令代码: "
+            )
+            print(menu, end='', flush=True)
     
     def print_auto_menu(self):
-        """打印自动控制菜单"""
-        print("\n" + "="*40)
-        print("自动模式 - 位移控制与IO控制菜单")
-        print("="*40)
-        print("点动控制:")
-        print("  01: 轴1_1正转点动")
-        print("  02: 轴1_2反转点动")
-        print("  03: 轴2_1正转点动")
-        print("  04: 轴2_2反转点动")
-        print("轴4位移控制 (当前: {:.1f}mm):".format(self.axis4_position))
-        print("  05: 轴4移动到原点 (0.0mm)")
-        print("  06: 轴4移动到10.0mm位置")
-        print("  07: 轴4正向移动10.0mm")
-        print("  08: 轴4反向移动10.0mm")
-        print("轴5位移控制 (当前: {:.1f}mm):".format(self.axis5_position))
-        print("  09: 轴5移动到原点 (0.0mm)")
-        print("  10: 轴5移动到10.0mm位置")
-        print("  11: 轴5正向移动10.0mm")
-        print("  12: 轴5反向移动10.0mm")
-        print("IO控制 (当前状态):")
-        print("  13: M800启动按钮灯 [{}]".format("ON" if self.io_status['800'] else "OFF"))
-        print("  14: M801复位按钮灯 [{}]".format("ON" if self.io_status['801'] else "OFF"))
-        print("  15: M802暂停按钮灯 [{}]".format("ON" if self.io_status['802'] else "OFF"))
-        print("  16: M803蜂鸣器 [{}]".format("ON" if self.io_status['803'] else "OFF"))
-        print("  17: M804三色红灯 [{}]".format("ON" if self.io_status['804'] else "OFF"))
-        print("  18: M805三色黄灯 [{}]".format("ON" if self.io_status['805'] else "OFF"))
-        print("  19: M806三色绿灯 [{}]".format("ON" if self.io_status['806'] else "OFF"))
-        print("  20: M810顶升气缸下降 [{}]".format("ON" if self.io_status['810'] else "OFF"))
-        print("  21: M811齿轮对接气缸伸出 [{}]".format("ON" if self.io_status['811'] else "OFF"))
-        print("  22: M812皮带正转启动 [{}]".format("ON" if self.io_status['812'] else "OFF"))
-        print("  23: M813皮带反转启动 [{}]".format("ON" if self.io_status['813'] else "OFF"))
-        print("仓库控制:")
-        print("  24: 启动入库")
-        print("  25: 停止入库")
-        print("  26: 启动出库")
-        print("  27: 停止出库")
-        print("其他控制:")
-        print("  s: 停止所有轴")
-        print("  r: 复位所有IO")
-        print("  b: 返回主菜单")
-        print("="*40)
-        print("请输入命令:")
+            """打印自动控制菜单 - 减少换行符使用"""
+            # 1. 点动控制区块
+            jog_ctrl_block = (
+                "[点动控制]\t" +
+                "  01:轴1_1正转点动  02:轴1_1反转点动  03:轴1_2正转点动  04:轴1_2反转点动\t" +
+                "  05:轴2_1正转点动  06:轴2_1反转点动  07:轴2_2正转点动  08:轴2_2反转点动\t" +
+                "  09:轴3  正转点动  10:轴3  反转点动\t"
+            )
+            
+            # 2. 轴4位移控制区块
+            axis4_block = f"[轴4位移控制] (当前位置: {self.axis4_position:.1f}mm)\t" + \
+                        "  11:移动到原点(0.0mm)  12:移动到10.0mm位置  13:正向移动10.0mm  14:反向移动10.0mm\t"
+            
+            # 3. 轴5位移控制区块
+            axis5_block = f"[轴5位移控制] (当前位置: {self.axis5_position:.1f}mm)\t" + \
+                        "  15:移动到原点(0.0mm)  16:移动到10.0mm位置  17:正向移动10.0mm  18:反向移动10.0mm\n"
+            
+            # 4. IO控制区块 (构建方式同手动模式)
+            io_lines = []
+            io_list = [
+                ("19:M800启动按钮灯", '800'), ("20:M801复位按钮灯", '801'),
+                ("21:M802暂停按钮灯", '802'), ("22:M803蜂鸣器", '803'),
+                ("23:M804三色红灯", '804'), ("24:M805三色黄灯", '805'),
+                ("25:M806三色绿灯", '806'), ("26:M810顶升气缸下降", '810'),
+                ("27:M811齿轮对接气缸伸出", '811'), ("28:M812皮带正转启动", '812'),
+                ("29:M813皮带反转启动", '813')
+            ]
+            for i in range(0, len(io_list), 4):
+                line_parts = []
+                for j in range(4):
+                    idx = i + j
+                    if idx < len(io_list):
+                        name, addr = io_list[idx]
+                        status = "ON" if self.io_status[addr] else "OFF"
+                        line_parts.append(f"  {name}[{status}]")
+                io_lines.append("".join(line_parts))
+            io_ctrl_block = "\n[IO控制] (当前状态)" + "\t".join(io_lines) + "\t"
+            
+            # 5. 仓库控制区块
+            warehouse_block = (
+                "\n[仓库控制]" +
+                "  30:启动入库  31:停止入库  32:启动出库  33:停止出库\t"
+            )
+            
+            # 6. 层控制区块
+            layer_block = (
+                "\t[层控制]" +
+                "  34:移动到指定层（请输入层号: -20~30）\t"
+            )
+            
+            # 7. 其他控制区块
+            other_ctrl_block = (
+                "\t[其他控制]" +
+                "  s:停止所有轴(含点动和位移)  r:复位所有IO  b:返回主菜单\t"
+            )
+            
+            # 8. 拼接最终菜单
+            menu = (
+                "\n" + "=" * 50 + "\n" +
+                "自动模式 - 位移控制与IO控制\n" +
+                "=" * 50 + "\n" +
+                jog_ctrl_block + "\n" +
+                axis4_block + "\n" +
+                axis5_block +
+                io_ctrl_block +
+                warehouse_block +
+                layer_block +
+                other_ctrl_block +
+                "=" * 50 + "\n" +
+                "请输入命令代码: "
+            )
+            print(menu, end='', flush=True)
     
     def send_control_command(self, command_data):
         """发送控制命令"""
@@ -240,8 +289,8 @@ class ControlCommander(Node):
     
     def send_warehouse_start(self):
         """发送入库启动命令"""
-        msg = UInt8()
-        msg.data = 9
+        msg = Int8()
+        msg.data = 24
         self.warehouse_start_pub.publish(msg)
         print("启动入库")
     
@@ -253,8 +302,8 @@ class ControlCommander(Node):
     
     def send_outbound_start(self):
         """发送出库启动命令"""
-        msg = UInt8()
-        msg.data = 9
+        msg = Int8()
+        msg.data = 24
         self.outbound_start_pub.publish(msg)
         print("启动出库")
     
@@ -272,12 +321,6 @@ class ControlCommander(Node):
             msg.data = '{}:stop'.format(axis)
             self.jog_pub.publish(msg)
         print("停止所有轴")
-    
-    def stop_all_motion(self):
-        """停止所有运动（包括点动和位移） - 简化输出"""
-        self.stop_all_jog()
-        self.send_control_command('stop')
-        print("停止所有运动")
     
     def enter_manual_mode(self):
         """进入手动模式"""
@@ -303,53 +346,62 @@ class ControlCommander(Node):
         self.manual_mode_active = False
         self.auto_mode_active = False
         self.stop_all_jog()  # 返回主菜单时停止所有轴
+        self.send_control_command('stop')  # 发送停止命令以确保所有运动停止
         self.print_main_menu()
     
     def handle_manual_mode_command(self, key):
-        """处理手动模式下的命令"""
-        # 手动模式下的轴控制
+        """处理手动模式下的命令 - 更新命令映射以支持所有轴的完整正反转"""
+        # 手动模式下的轴控制命令映射 (所有轴都有正反转)
         jog_commands = {
-            '01': 'axis1_1:forward',
-            '02': 'axis1_2:reverse', 
-            '03': 'axis2_1:forward',
-            '04': 'axis2_2:reverse',
-            '05': 'axis3:forward',
-            '06': 'axis3:reverse',
-            '07': 'axis4:forward',
-            '08': 'axis4:reverse',
-            '09': 'axis5:forward',
-            '10': 'axis5:reverse',
+            '01': 'axis1_1:forward',   # 轴1_1 正转
+            '02': 'axis1_1:reverse',   # 轴1_1 反转
+            '03': 'axis1_2:forward',   # 轴1_2 正转
+            '04': 'axis1_2:reverse',   # 轴1_2 反转
+            '05': 'axis2_1:forward',   # 轴2_1 正转
+            '06': 'axis2_1:reverse',   # 轴2_1 反转
+            '07': 'axis2_2:forward',   # 轴2_2 正转
+            '08': 'axis2_2:reverse',   # 轴2_2 反转
+            '09': 'axis3:forward',     # 轴3 正转
+            '10': 'axis3:reverse',     # 轴3 反转
+            '11': 'axis4:forward',     # 轴4 正转
+            '12': 'axis4:reverse',     # 轴4 反转
+            '13': 'axis5:forward',     # 轴5 正转
+            '14': 'axis5:reverse',     # 轴5 反转
         }
         
         # IO控制命令映射
         io_commands = {
-            '11': '800',  # M800启动按钮灯
-            '12': '801',  # M801复位按钮灯
-            '13': '802',  # M802暂停按钮灯
-            '14': '803',  # M803蜂鸣器
-            '15': '804',  # M804三色红灯
-            '16': '805',  # M805三色黄灯
-            '17': '806',  # M806三色绿灯
-            '18': '810',  # M810顶升气缸下降
-            '19': '811',  # M811齿轮对接气缸伸出
-            '20': '812',  # M812皮带正转启动
-            '21': '813',  # M813皮带反转启动
+            '15': '800',  # M800启动按钮灯
+            '16': '801',  # M801复位按钮灯
+            '17': '802',  # M802暂停按钮灯
+            '18': '803',  # M803蜂鸣器
+            '19': '804',  # M804三色红灯
+            '20': '805',  # M805三色黄灯
+            '21': '806',  # M806三色绿灯
+            '22': '810',  # M810顶升气缸下降
+            '23': '811',  # M811齿轮对接气缸伸出
+            '24': '812',  # M812皮带正转启动
+            '25': '813',  # M813皮带反转启动
         }
         
         if key in jog_commands:
             self.send_jog_command(jog_commands[key])
             # 显示简化的执行信息
             axis_map = {
-                'axis1_1:forward': '轴1正转',
-                'axis1_2:reverse': '轴1反转',
-                'axis2_1:forward': '轴2正转',
-                'axis2_2:reverse': '轴2反转',
-                'axis3:forward': '轴3正转',
-                'axis3:reverse': '轴3反转',
-                'axis4:forward': '轴4正转',
-                'axis4:reverse': '轴4反转',
-                'axis5:forward': '轴5正转',
-                'axis5:reverse': '轴5反转',
+                'axis1_1:forward': '轴1_1正转执行',
+                'axis1_1:reverse': '轴1_1反转执行',
+                'axis1_2:forward': '轴1_2正转执行',
+                'axis1_2:reverse': '轴1_2反转执行',
+                'axis2_1:forward': '轴2_1正转执行',
+                'axis2_1:reverse': '轴2_1反转执行',
+                'axis2_2:forward': '轴2_2正转执行',
+                'axis2_2:reverse': '轴2_2反转执行',
+                'axis3:forward': '轴3正转执行',
+                'axis3:reverse': '轴3反转执行',
+                'axis4:forward': '轴4正转执行',
+                'axis4:reverse': '轴4反转执行',
+                'axis5:forward': '轴5正转执行',
+                'axis5:reverse': '轴5反转执行',
             }
             print(axis_map.get(jog_commands[key], "执行"))
         elif key in io_commands:
@@ -366,111 +418,175 @@ class ControlCommander(Node):
             self.print_manual_menu()
     
     def handle_auto_mode_command(self, key):
-        """处理自动模式下的命令"""
-        # 点动控制命令
+        """处理自动模式下的命令 - 更新命令映射以支持所有轴的完整正反转"""
+        # 点动控制命令映射 (所有细分轴都有正反转)
         jog_commands = {
-            '01': 'axis1_1:forward',
-            '02': 'axis1_2:reverse',
-            '03': 'axis2_1:forward',
-            '04': 'axis2_2:reverse',
+            '01': 'axis1_1:forward',   # 轴1_1 正转
+            '02': 'axis1_1:reverse',   # 轴1_1 反转
+            '03': 'axis1_2:forward',   # 轴1_2 正转
+            '04': 'axis1_2:reverse',   # 轴1_2 反转
+            '05': 'axis2_1:forward',   # 轴2_1 正转
+            '06': 'axis2_1:reverse',   # 轴2_1 反转
+            '07': 'axis2_2:forward',   # 轴2_2 正转
+            '08': 'axis2_2:reverse',   # 轴2_2 反转
+            '09': 'axis3:forward',     # 轴3 正转
+            '10': 'axis3:reverse',     # 轴3 反转
         }
         
         # IO控制命令映射
         io_commands = {
-            '13': '800',  # M800启动按钮灯
-            '14': '801',  # M801复位按钮灯
-            '15': '802',  # M802暂停按钮灯
-            '16': '803',  # M803蜂鸣器
-            '17': '804',  # M804三色红灯
-            '18': '805',  # M805三色黄灯
-            '19': '806',  # M806三色绿灯
-            '20': '810',  # M810顶升气缸下降
-            '21': '811',  # M811齿轮对接气缸伸出
-            '22': '812',  # M812皮带正转启动
-            '23': '813',  # M813皮带反转启动
+            '19': '800',  # M800启动按钮灯
+            '20': '801',  # M801复位按钮灯
+            '21': '802',  # M802暂停按钮灯
+            '22': '803',  # M803蜂鸣器
+            '23': '804',  # M804三色红灯
+            '24': '805',  # M805三色黄灯
+            '25': '806',  # M806三色绿灯
+            '26': '810',  # M810顶升气缸下降
+            '27': '811',  # M811齿轮对接气缸伸出
+            '28': '812',  # M812皮带正转启动
+            '29': '813',  # M813皮带反转启动
         }
         
         if key in jog_commands:
             self.send_jog_command(jog_commands[key])
             # 显示简化的执行信息
             axis_map = {
-                'axis1_1:forward': '轴1_1正转',
-                'axis1_2:reverse': '轴1_2反转',
-                'axis2_1:forward': '轴2_1正转',
-                'axis2_2:reverse': '轴2_2反转',
+                'axis1_1:forward': '轴1_1正转执行',
+                'axis1_1:reverse': '轴1_1反转执行',
+                'axis1_2:forward': '轴1_2正转执行',
+                'axis1_2:reverse': '轴1_2反转执行',
+                'axis2_1:forward': '轴2_1正转执行',
+                'axis2_1:reverse': '轴2_1反转执行',
+                'axis2_2:forward': '轴2_2正转执行',
+                'axis2_2:reverse': '轴2_2反转执行',
+                'axis3:forward': '轴3正转执行',
+                'axis3:reverse': '轴3反转执行',
             }
             print(axis_map.get(jog_commands[key], "执行"))
         elif key in io_commands:
             # 处理IO控制
             self.toggle_io(io_commands[key])
         elif key == 's':
-            self.stop_all_motion()
+            self.stop_all_jog()
         elif key == 'r':  # 复位所有IO
             self.reset_all_io()
         elif key == 'b':
             self.return_to_main_menu()
-        # 轴4位移控制
-        elif key == '05':  # 轴4移动到原点
+        # 轴4位移控制 (命令代码更新为11-14)
+        elif key == '11':  # 轴4移动到原点
             self.axis4_position = 0.0
             self.send_displacement_command('axis4', 0.0)
             print("轴4移动到原点")
             self.print_auto_menu()
         
-        elif key == '06':  # 轴4移动到10mm
+        elif key == '12':  # 轴4移动到10mm
             self.axis4_position = 10.0
             self.send_displacement_command('axis4', 10.0)
             print("轴4移动到10mm")
             self.print_auto_menu()
-        
-        elif key == '07':  # 轴4正向移动10mm
+
+        elif key == '13':  # 轴4正向移动10mm
             self.axis4_position += 10.0
             self.send_displacement_command('axis4', self.axis4_position)
             print("轴4正向移动10mm")
             self.print_auto_menu()
-        
-        elif key == '08':  # 轴4反向移动10mm
+
+        elif key == '14':  # 轴4反向移动10mm
             self.axis4_position -= 10.0
             self.send_displacement_command('axis4', self.axis4_position)
             print("轴4反向移动10mm")
             self.print_auto_menu()
         
-        # 轴5位移控制
-        elif key == '09':  # 轴5移动到原点
+        # 轴5位移控制 (命令代码更新为15-18)
+        elif key == '15':  # 轴5移动到原点
             self.axis5_position = 0.0
             self.send_displacement_command('axis5', 0.0)
             print("轴5移动到原点")
             self.print_auto_menu()
-        
-        elif key == '10':  # 轴5移动到10mm
+
+        elif key == '16':  # 轴5移动到10mm
             self.axis5_position = 10.0
             self.send_displacement_command('axis5', 10.0)
             print("轴5移动到10mm")
             self.print_auto_menu()
-        
-        elif key == '11':  # 轴5正向移动10mm
+
+        elif key == '17':  # 轴5正向移动10mm
             self.axis5_position += 10.0
             self.send_displacement_command('axis5', self.axis5_position)
             print("轴5正向移动10mm")
             self.print_auto_menu()
-        
-        elif key == '12':  # 轴5反向移动10mm
+
+        elif key == '18':  # 轴5反向移动10mm
             self.axis5_position -= 10.0
             self.send_displacement_command('axis5', self.axis5_position)
             print("轴5反向移动10mm")
             self.print_auto_menu()
         
-        # 仓库控制命令
-        elif key == '24':  # 启动入库
+        # 仓库控制命令 (命令代码更新为30-33)
+        elif key == '30':  # 启动入库
             self.send_warehouse_start()
         
-        elif key == '25':  # 停止入库
+        elif key == '31':  # 停止入库
             self.send_warehouse_stop()
         
-        elif key == '26':  # 启动出库
+        elif key == '32':  # 启动出库
             self.send_outbound_start()
         
-        elif key == '27':  # 停止出库
+        elif key == '33':  # 停止出库
             self.send_outbound_stop()
+        # 层控制命令 (新增命令34)
+        elif key == '34':  # 移动到指定层
+            print("请输入要移动到的层号（-20~30），按回车确认: ", end='', flush=True)
+            
+            # 临时恢复终端设置以读取整行输入
+            import termios
+            import tty
+            import sys
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            
+            try:
+                # 读取用户输入的层号
+                layer_input = ""
+                while True:
+                    char = sys.stdin.read(1)
+                    if char == '\n' or char == '\r':  # 回车结束输入
+                        break
+                    elif char == '\x7f' or char == '\b':  # 退格键
+                        if layer_input:
+                            layer_input = layer_input[:-1]
+                            # 回显退格
+                            sys.stdout.write('\b \b')
+                            sys.stdout.flush()
+                    else:
+                        layer_input += char
+                        sys.stdout.write(char)
+                        sys.stdout.flush()
+                
+                sys.stdout.write('\n')
+                sys.stdout.flush()
+                
+                if layer_input:
+                    try:
+                        layer_num = int(layer_input)
+                        if -20 <= layer_num <= 30:
+                            # 发送层控制命令
+                            msg = Int8()
+                            msg.data = layer_num
+                            self.layer_pub.publish(msg)
+                            print(f"已发送移动至层 {layer_num} 的命令: ros2 topic pub /layer_command std_msgs/msg/Int8 \"data: {layer_num}\" --once")
+                        else:
+                            print(f"错误：层号 {layer_num} 超出范围（-20~30）")
+                    except ValueError:
+                        print(f"错误：'{layer_input}' 不是有效的整数")
+            finally:
+                # 恢复终端设置
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                tty.setraw(sys.stdin.fileno())
+            
+            # 重新打印菜单
+            self.print_auto_menu()
         
         else:
             print("未知命令: {}".format(key))

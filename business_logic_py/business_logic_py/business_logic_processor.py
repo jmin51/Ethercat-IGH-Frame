@@ -269,6 +269,7 @@ class BusinessLogicProcessor(Node):
 
     def warehouse_stop_callback(self, msg):
         """处理入库停止命令"""
+        self._reset_key_do_signals()
         self.warehouse_process_stop_requested = True
         self.get_logger().info('收到入库流程停止请求')
 
@@ -289,6 +290,7 @@ class BusinessLogicProcessor(Node):
 
     def outbound_stop_callback(self, msg):
         """处理出库停止命令"""
+        self._reset_key_do_signals()
         self.outbound_process_stop_requested = True
         self.get_logger().info('收到出库流程停止请求')
 
@@ -414,6 +416,7 @@ class BusinessLogicProcessor(Node):
             # 等待启动信号
             if (self.warehouse_process_requested and not buffer_out and 
                 not conveyor_in and not conveyor_out):
+                self._reset_key_do_signals()  # 重置关键DO信号，确保安全状态
                 self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
                 self.warehouse_process_requested = False
                 self.get_logger().info(f'入库流程启动，进入等待入库状态，目标层: {self.target_layer}')
@@ -640,6 +643,7 @@ class BusinessLogicProcessor(Node):
             # 等待启动信号
             if (self.outbound_process_requested and 
                 self.check_outbound_condition()):
+                self._reset_key_do_signals()
                 self.outbound_state = OutboundState.WAIT_FOR_EXIT
                 self.outbound_process_requested = False
                 self.get_logger().info(f'出库流程启动，进入等待出库状态，源层: {self.source_layer}')
@@ -890,6 +894,14 @@ class BusinessLogicProcessor(Node):
             # 重置特定DO命令状态
             self.do_command_sent[do_address] = False
             self.get_logger().info(f'重置DO命令发送状态: {do_address}')
+
+    def _reset_key_do_signals(self):
+        """重置关键DO信号（M810-M813）为0"""
+        self.send_do_control_once("810", False)  # 顶升气缸下降
+        self.send_do_control_once("811", False)  # 齿轮对接气缸伸出
+        self.send_do_control_once("812", False)  # 皮带正转启动
+        self.send_do_control_once("813", False)  # 皮带反转启动
+        self.get_logger().info('已发送关键DO信号复位命令 (M810-M813 -> 0)')
 
     def reset_business_logic(self):
         """重置业务逻辑状态"""

@@ -161,7 +161,7 @@ protected:
 
     // 速度限制参数
     const double MIN_JOG_SPEED = 1.0;    // 最小点动速度 (mm/s)
-    const double MAX_JOG_SPEED = 500.0;  // 最大点动速度 (mm/s)
+    const double MAX_JOG_SPEED = 200.0;  // 最大点动速度 (mm/s)
     const double DEFAULT_JOG_SPEED = 20.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
 											//	现在是每秒20000	对应两圈，一分?120rpm
     

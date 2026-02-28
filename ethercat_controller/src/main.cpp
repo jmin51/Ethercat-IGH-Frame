@@ -456,8 +456,6 @@ int main(int argc, char **argv) {
     printf("  - 实时线程: 等待启动按钮\n");
     
     // 使用非阻塞的spin方式，添加启动/暂停检测
-    bool system_initialized = false;
-
     while (rclcpp::ok() && !g_should_exit) {
         executor.spin_some(std::chrono::milliseconds(100));
         

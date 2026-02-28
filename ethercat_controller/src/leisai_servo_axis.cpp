@@ -408,31 +408,39 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
         jog_stop_requested_ = false;
     }
     
-    // 平滑移动到目标位置
-    static int position_counter = 0;
-    if (position_counter++ >= 10) {
-        position_counter = 0;
+    // 限制最大速度
+    const int32_t MAX_STEP = displacement_to_pulses(MAX_JOG_SPEED * PERIOD);
+    int32_t error = target_pulses_ - joint_position_;
+    int32_t step = (abs(error) > MAX_STEP) ? 
+                  ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+    
+    joint_position_ += step;
+    EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+    // // 平滑移动到目标位置
+    // static int position_counter = 0;
+    // if (position_counter++ >= 10) {
+    //     position_counter = 0;
         
-        const int32_t TOLERANCE = 100; //PULSE_Tolerance;
-        int32_t error = target_pulses_ - joint_position_;
+    //     const int32_t TOLERANCE = 100; //PULSE_Tolerance;
+    //     int32_t error = target_pulses_ - joint_position_;
         
-        // 基于速度的匀速移动（单位：脉冲/周期）
-        if (abs(error) > TOLERANCE) {
-            const int32_t VELOCITY = 500; // 速度值，可根据需要调整
-            int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
+    //     // 基于速度的匀速移动（单位：脉冲/周期）
+    //     if (abs(error) > TOLERANCE) {
+    //         const int32_t VELOCITY = 500; // 速度值，可根据需要调整
+    //         int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
             
-            // 如果剩余距离小于步长，直接到达目标
-            if (abs(error) <= abs(step)) {
-                joint_position_ = target_pulses_;
-            } else {
-                joint_position_ += step;
-            }
-        } else {
-            joint_position_ = target_pulses_;
-        }
+    //         // 如果剩余距离小于步长，直接到达目标
+    //         if (abs(error) <= abs(step)) {
+    //             joint_position_ = target_pulses_;
+    //         } else {
+    //             joint_position_ += step;
+    //         }
+    //     } else {
+    //         joint_position_ = target_pulses_;
+    //     }
 
-        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    }
+    //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+    // }
 }
 
 void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {
@@ -440,7 +448,7 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
     if (!position_initialized_) {
         joint_position_ = current_pos;
         initial_position_ = current_pos;
-        target_pulses_ = current_pos;
+        target_pulses_ = initial_position_;
         position_initialized_ = true;
         printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
     }
@@ -460,30 +468,23 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
         jog_stop_requested_ = false;
     }
     
-    // 平滑移动到目标位置
-    static int position_counter = 0;
-    if (position_counter++ >= 10) {
-        position_counter = 0;
-        
-        const int32_t TOLERANCE = 100; //PULSE_Tolerance;
-        int32_t error = target_pulses_ - joint_position_;
-        
-        // 基于速度的匀速移动（单位：脉冲/周期）
-        if (abs(error) > TOLERANCE) {
-            const int32_t VELOCITY = 150; // 速度值，可根据需要调整
-            int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
-            
-            // 如果剩余距离小于步长，直接到达目标
-            if (abs(error) <= abs(step)) {
-                joint_position_ = target_pulses_;
-            } else {
-                joint_position_ += step;
-            }
-        } else {
-            joint_position_ = target_pulses_;
+    if (displacement_updated_) {
+        displacement_updated_ = false;
+        target_reached_ = false;
+        {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = false; // 新运动开始，清除标志
         }
-
-        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+        // 绝对位置模式：直接计算目标脉冲数
+        // target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
+        target_pulses_ = displacement_to_pulses(target_displacement_);
+        printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d, 当前: %d)\n", 
+                axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_, joint_position_);
+    }
+    
+    // 使用逐步逼近
+    if (target_pulses_ != joint_position_) {
+        gradual_approach(target_pulses_, domain1_pd);
     }
     // // 实现自动模式操作逻辑
     // if (!homing_completed_) {

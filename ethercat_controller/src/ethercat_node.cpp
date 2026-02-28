@@ -8,7 +8,7 @@
 #include <sstream>
 #include <std_msgs/msg/empty.hpp>  // 添加这行
 
-#define CONTROL_SOURCE_IO 1  // 1:使用IO控制手自动模式, 0:使用话题控制
+#define CONTROL_SOURCE_IO 0  // 1:使用IO控制手自动模式, 0:使用话题控制
 // 全局变量定义
 std::shared_ptr<EthercatNode> global_node = nullptr;
 ec_master_t *master = nullptr;
@@ -41,7 +41,6 @@ pthread_t modbus_thread;
 volatile int modbus_running = 1;
 std::atomic<int> di13_state{0};
 std::atomic<bool> homing_completed{false};
-std::atomic<bool> system_initialized{false};
 
 EthercatNode::EthercatNode(std::string name) : Node(name) {
     initialize_node();
@@ -223,6 +222,22 @@ void EthercatNode::init_axes(ec_master_t* master) {
         axis->configure(master);
     }
     
+    // 新增：为每个轴设置独立的初始点动速度
+    for (auto& axis : servo_axes_) {
+        std::string name = axis->get_name();
+        if (name == "axis4") {
+            axis->set_jog_speed(3.0); // 将 axis4 的点动速度初始化为 3 mm/s
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 3.0 mm/s", name.c_str());
+        } else if (name == "axis1_1" || name == "axis1_2" || name == "axis2_1" || name == "axis2_2") {
+            // 示例：为 axis1_1 和 axis1_2 设置其他速度
+            axis->set_jog_speed(40.0);
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 40.0 mm/s", name.c_str());
+        } else {
+            // 其他轴保持默认速度（DEFAULT_JOG_SPEED，当前为20.0 mm/s）
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 使用默认点动速度: %.1f mm/s", 
+                         name.c_str(), axis->get_jog_speed());
+        }
+    }
     last_target_positions_.resize(servo_axes_.size(), 0.0);
     start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态
     RCLCPP_INFO(this->get_logger(), "伺服轴初始化完成，共 %zu 个轴", servo_axes_.size());
