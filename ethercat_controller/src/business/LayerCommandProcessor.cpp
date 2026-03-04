@@ -27,7 +27,7 @@ void LayerCommandProcessor::initialize_default_layer_heights() {
     layer_heights_.clear();
 
         // 默认配置：每层25mm间距，第1层为0mm
-    for (int8_t layer = -20; layer <= 25; ++layer) {
+    for (int8_t layer = -20; layer <= 28; ++layer) {
         layer_heights_[layer] = (layer - 1) * 25.0;
     }
     RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，共%ld层", layer_heights_.size());

@@ -152,7 +152,13 @@ private:
     // 板宽控制相关
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr board_width_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr board_width_status_pub_;
-    
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr axis3_width_sub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr axis3_width_status_pub_;
+  
+    // 板宽控制参数 (axis4 - 保持不变)
+    double screw_lead_;                   // 丝杠导程10mm
+    double gear_ratio_;                   // 减速比9.0
+    int pulses_per_rev_;                  // 每转脉冲数10000
     double current_board_width_;           // 当前板宽（cm）
     double target_board_width_;           // 目标板宽（cm）
     double min_board_width_;              // 最小板宽10cm
@@ -161,11 +167,17 @@ private:
     bool board_width_moving_;             // 板宽调整中标志
     std::atomic<bool> board_width_updated_; // 板宽更新标志
     
-    // 机械参数
-    double screw_lead_;                   // 丝杠导程10mm
-    double gear_ratio_;                   // 减速比9.0
-    int pulses_per_rev_;                  // 每转脉冲数10000
-    
+    // +++ 新增：axis3 板宽控制专用变量 +++
+    double axis3_min_width_;     // axis3 最小板宽
+    double axis3_max_width_;     // axis3 最大板宽
+    double axis3_current_width_; // axis3 当前板宽
+    double axis3_target_width_;  // axis3 目标板宽
+    bool axis3_width_moving_;    // axis3 调整中标志
+    std::atomic<bool> axis3_width_updated_; // axis3 更新标志
+    // 注意：axis3可能需要独立的机械参数（导程、减速比），需根据实际情况设置
+    double axis3_screw_lead_;
+    double axis3_gear_ratio_;
+
     // 板宽控制方法
     void initialize_board_width_parameters();
     void handle_board_width_command(const std_msgs::msg::Float64::SharedPtr msg);
@@ -176,6 +188,13 @@ private:
     void publish_board_width_status(double current_width, double target_width, 
                                    bool moving, const std::string& status);
     int find_axis4_index();  // 查找axis4的索引
+    // Axis3 板宽控制相关函数声明
+    void handle_axis3_width_command(const std_msgs::msg::Float64::SharedPtr msg);
+    void execute_axis3_width_adjustment();
+    double calculate_axis3_displacement_from_width(double board_width_cm);
+    int find_axis3_index();
+    void publish_axis3_width_status(double current_width, double target_width,
+                                   bool moving, const std::string& status);
 };
 
 // 全局变量声明

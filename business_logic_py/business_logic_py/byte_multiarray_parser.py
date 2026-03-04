@@ -69,7 +69,13 @@ class ByteMultiArrayParser(Node):
             self.product_arrival_callback,
             10
         )
-        
+        self.fault_sub = self.create_subscription(
+            String,
+            '/fault_code',
+            self.fault_callback,
+            10
+        )       
+
         # 创建原有的多个话题发布器
         self.control_pub = self.create_publisher(String, '/control_command', 10)
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
@@ -113,6 +119,70 @@ class ByteMultiArrayParser(Node):
             except (ValueError, TypeError):
                 self.get_logger().warn(f'无法转换为整数: {value}')
                 return 0
+
+    def fault_callback(self, msg):
+        """处理故障码话题回调，发布归一化消息 (0x0119)"""
+        try:
+            fault_data_str = msg.data
+
+            # 1. 解析故障码
+            # 格式可能为：“0”（无故障）或 “axis1_1:0x1234,axis4:0x5678”（多个故障）
+            fault_code_combined = 0x0000  # 默认无故障
+
+            if fault_data_str != "0" and fault_data_str:
+                # 尝试解析多个轴的故障码。这里采用一种策略：取第一个非零错误码，或进行位组合。
+                # 示例：简单取第一个遇到的错误码（根据实际需求调整逻辑）。
+                import re
+                # 匹配模式：轴名:0xXXXX
+                pattern = r'0x([0-9A-Fa-f]+)'
+                matches = re.findall(pattern, fault_data_str)
+                if matches:
+                    # 取第一个错误码，并确保其在0-65535（2字节）范围内
+                    try:
+                        first_code = int(matches[0], 16) & 0xFFFF
+                        fault_code_combined = first_code
+                    except ValueError:
+                        self.get_logger().warn(f'无法解析故障码: {matches[0]}')
+                        fault_code_combined = 0xFFFF  # 或定义为未知错误
+                # 注意：如果需要将多个轴故障组合为一个代码，需要在此定义更复杂的映射规则。
+
+            # 2. 发布归一化消息 (命令码 0x0119)
+            self.publish_fault_status(fault_code_combined)
+
+        except Exception as e:
+            self.get_logger().error(f'故障码处理错误: {e}')
+
+    def publish_fault_status(self, fault_code):
+        """发布故障状态归一化消息 (命令码0x0119)"""
+        try:
+            # 构建4字节消息 (小端序)
+            # 格式: [命令码低8位, 命令码高8位, 故障码低8位, 故障码高8位]
+            message_data = []
+
+            # 命令码: 0x0119 (小端序: 0x19, 0x01)
+            message_data.append(bytes([0x19]))  # 低字节
+            message_data.append(bytes([0x01]))  # 高字节
+
+            # 故障码: 16位小端序
+            message_data.append(bytes([fault_code & 0xFF]))        # 低字节
+            message_data.append(bytes([(fault_code >> 8) & 0xFF])) # 高字节
+
+            # 创建并发布 ByteMultiArray 消息
+            # 注意：这里发布到统一的状态话题，与 publish_integrated_status 一致。
+            layout = MultiArrayLayout()
+            layout.data_offset = 0
+            layout.dim = [MultiArrayDimension()]
+            layout.dim[0].label = 'fault_status'
+            layout.dim[0].size = len(message_data)
+            layout.dim[0].stride = 1
+
+            msg = ByteMultiArray()
+            msg.layout = layout
+            msg.data = message_data
+            self.integrated_pub.publish(msg)  # 发布到统一状态话题
+
+        except Exception as e:
+            self.get_logger().error(f'发布故障状态消息失败: {e}')
 
     def io_status_callback(self, msg):
         """处理IO状态话题回调"""
