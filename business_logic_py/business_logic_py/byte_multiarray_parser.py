@@ -557,9 +557,47 @@ class ByteMultiArrayParser(Node):
         self.control_pub.publish(msg)
         self.get_logger().info('发布开始作业命令: 进入自动模式')
         
+        # 发布开始结果响应 (0x0106)
+        self.publish_start_result()
+        
         # 如果有负载数据，记录但不处理
         if len(payload) > 0:
             self.get_logger().info(f'忽略开始作业命令的负载数据: {payload}')
+
+    def publish_start_result(self):
+        """发布开始结果响应 (命令码0x0106)"""
+        try:
+            # 构建4字节响应消息 (小端序)
+            # 格式: [命令码低8位0x06, 命令码高8位0x01, 0x00, 0x00]
+            message_data = []
+            
+            # 命令码: 0x0106 (小端序: 0x06, 0x01)
+            message_data.append(bytes([0x06]))  # 低字节
+            message_data.append(bytes([0x01]))  # 高字节
+            # 两个填充字节
+            message_data.append(bytes([0x00]))
+            message_data.append(bytes([0x00]))
+            
+            # 创建MultiArrayLayout
+            layout = MultiArrayLayout()
+            layout.data_offset = 0
+            layout.dim = [MultiArrayDimension()]
+            layout.dim[0].label = 'start_result_response'
+            layout.dim[0].size = len(message_data)  # 应为4
+            layout.dim[0].stride = 1
+            
+            # 创建并发布消息
+            msg = ByteMultiArray()
+            msg.layout = layout
+            msg.data = message_data
+            
+            # 发布到统一状态话题
+            self.integrated_pub.publish(msg)
+            
+            self.get_logger().info('发布开始结果响应: 0x06 0x01 0x00 0x00')
+            
+        except Exception as e:
+            self.get_logger().error(f'发布开始结果响应失败: {e}')
 
     def process_write_io(self, payload):
         """处理写IO命令 (0x0115) - /do_control，支持状态翻转检测"""
@@ -646,28 +684,44 @@ class ByteMultiArrayParser(Node):
             # 取最后2个字节作为层高
             layer_low = payload[-2]  # 层高低位字节
             layer_high = payload[-1]  # 层高高位字节
-            layer = (layer_high << 8) | layer_low  # 小端序组合
+            original_layer = (layer_high << 8) | layer_low  # 小端序组合
         else:
             # 如果只有2个字节，直接使用
             layer_low = payload[0]
             layer_high = payload[1]
-            layer = (layer_high << 8) | layer_low
+            original_layer = (layer_high << 8) | layer_low
+        
+        # 层号映射：1-41 映射到 -15 到 28
+        # 映射规律：
+        # 1-15 -> -15 到 -1
+        # 16-41 -> 3 到 28
+        if 1 <= original_layer <= 15:
+            mapped_layer = original_layer - 16
+        elif 16 <= original_layer <= 41:
+            mapped_layer = original_layer - 13
+        else:
+            # 如果层号超出范围，记录警告并尝试默认映射
+            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}，尝试使用默认映射')
+            if original_layer <= 15:
+                mapped_layer = original_layer - 16
+            else:
+                mapped_layer = original_layer - 13
         
         # 发布到/warehouse_start话题
         msg = Int8()
-        msg.data = layer
-        self.warehouse_start_pub.publish(msg)
-        
+        msg.data = mapped_layer
+        self.warehouse_start_pub.publish(msg)   
+            
         # 记录详细信息
-        self.get_logger().info(f'发布仓库启动命令: 第{layer}层 (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
+        self.get_logger().info(f'发布仓库启动命令: 原始层{original_layer} -> 映射层{mapped_layer} (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
         
         # 如果有额外的数据（组号和IO状态），记录但不处理
         if len(payload) > 2:
             extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
             self.get_logger().info(f'忽略额外数据: {extra_data}')
-
+            
     def process_notify_retrieval(self, payload):
-        """处理通知取出命令 (0x0103) - /outbound_start"""
+        """处理通知取出命令 (0x0103) - /outbound_start，包含层号映射（1-41 映射到 -15 到 28）"""
         # 检查负载长度：至少需要2字节（层高）
         if len(payload) < 6:
             self.get_logger().warn('通知取出命令负载长度不足，需要至少6字节')
@@ -684,15 +738,31 @@ class ByteMultiArrayParser(Node):
             layer_low = payload[0]
             layer_high = payload[1]
         
-        layer = (layer_high << 8) | layer_low  # 小端序组合
+        original_layer = (layer_high << 8) | layer_low  # 小端序组合
+        
+        # 层号映射：1-41 映射到 -15 到 28
+        # 映射规律：
+        # 1-15 -> -15 到 -1
+        # 16-41 -> 3 到 28
+        if 1 <= original_layer <= 15:
+            mapped_layer = original_layer - 16
+        elif 16 <= original_layer <= 41:
+            mapped_layer = original_layer - 13
+        else:
+            # 如果层号超出范围，记录警告并尝试默认映射
+            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}，尝试使用默认映射')
+            if original_layer <= 15:
+                mapped_layer = original_layer - 16
+            else:
+                mapped_layer = original_layer - 13
         
         # 发布到/outbound_start话题
         msg = Int8()
-        msg.data = layer
+        msg.data = mapped_layer
         self.outbound_start_pub.publish(msg)
         
         # 记录详细信息
-        self.get_logger().info(f'发布出库启动命令: 第{layer}层 (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
+        self.get_logger().info(f'发布出库启动命令: 原始层{original_layer} -> 映射层{mapped_layer} (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
         
         # 如果有额外的数据（组号和IO状态），记录但不处理
         if len(payload) > 2:
@@ -730,6 +800,11 @@ class ByteMultiArrayParser(Node):
         direction_high = payload[3]  # 方向高位字节
         direction = (direction_high << 8) | direction_low  # 小端序组合
         
+        # 解析速度（小端序）：负载的第5-6字节（索引4-5）
+        speed_low = payload[4]  # 速度低位字节
+        speed_high = payload[5]  # 速度高位字节
+        speed = (speed_high << 8) | speed_low  # 小端序组合，单位：mm/s * 10
+
         # 轴号映射表：数字轴号 -> 字符串轴名
         axis_mapping = {
             1: "axis1_1",  # 轴1的第一个电机
@@ -760,13 +835,18 @@ class ByteMultiArrayParser(Node):
         msg.data = command_str
         self.jog_pub.publish(msg)
         
+        # 发布到/jog_speed_command话题
+        speed_command_str = f"{axis_name}:{speed}"
+        speed_msg = String()
+        speed_msg.data = speed_command_str
+        self.jog_speed_pub.publish(speed_msg)
+
         # 记录详细信息
-        self.get_logger().info(f'发布点动命令: {command_str} (轴号: {axis_num}->{axis_name}, 方向: 0x{direction_high:02X}{direction_low:02X})')
-        # self.get_logger().info(f'发布点动命令: {command_str} (轴号: 0x{axis_high:02X}{axis_low:02X}, 方向: 0x{direction_high:02X}{direction_low:02X})')
+        self.get_logger().info(f'发布点动命令: {command_str}, 速度: {speed}mm/s (轴号: {axis_num}->{axis_name}, 方向: 0x{direction_high:02X}{direction_low:02X}, 速度: 0x{speed_high:02X}{speed_low:02X})')
 
         # 如果有额外的数据，记录但不处理
-        if len(payload) > 4:
-            extra_data = payload[4:]  # 第5字节及以后的数据
+        if len(payload) > 6:
+            extra_data = payload[6:]  # 第7字节及以后的数据
             self.get_logger().info(f'忽略额外数据: {extra_data}')
 
     def process_axis_stop(self, payload):

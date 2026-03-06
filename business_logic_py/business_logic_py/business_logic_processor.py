@@ -96,9 +96,9 @@ class BusinessLogicProcessor(Node):
         self.layer_command_sent = False  # 标记层指令是否已发送
 
         # 常量定义
-        self.DELAY_BEFORE_STOP_MS = 10000
+        self.DELAY_BEFORE_STOP_MS = 5000
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
-        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 500
+        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 300
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
         
         # 待处理命令队列
@@ -590,8 +590,8 @@ class BusinessLogicProcessor(Node):
                         self.send_do_control_once("812", False)
                         self.get_logger().info('延迟结束，停止轴2并进入完成状态')
                     else:
-                        # 延迟中，每5秒记录一次
-                        if self.delay_counter % 50 == 0:
+                        # 延迟中，每3秒记录一次
+                        if self.delay_counter % 30 == 0:
                             remaining_seconds = self.DELAY_BEFORE_STOP_MS//1000 - self.delay_counter//10
                             self.get_logger().info(f'延迟剩余时间: {remaining_seconds}秒')
 

@@ -205,8 +205,8 @@ void EthercatNode::init_axes(ec_master_t* master) {
     board_width_moving_ = false;
     board_width_updated_.store(false);
     // +++ 新增：重置axis3板宽控制状态 +++
-    axis3_current_width_ = 10.0; // 与initialize中默认值一致
-    axis3_target_width_ = 10.0;
+    axis3_current_width_ = 15.0; // 与initialize中默认值一致
+    axis3_target_width_ = 15.0;
     axis3_width_moving_ = false;
     axis3_width_updated_.store(false);
 
