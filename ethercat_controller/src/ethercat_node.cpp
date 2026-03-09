@@ -242,12 +242,12 @@ void EthercatNode::init_axes(ec_master_t* master) {
     for (auto& axis : servo_axes_) {
         std::string name = axis->get_name();
         if (name == "axis4") {
-            axis->set_jog_speed(3.0); // 将 axis4 的点动速度初始化为 3 mm/s
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 3.0 mm/s", name.c_str());
+            axis->set_jog_speed(5.0); // 将 axis4 的点动速度初始化为 5 mm/s
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 5.0 mm/s", name.c_str());
         } else if (name == "axis1_1" || name == "axis1_2" || name == "axis2_1" || name == "axis2_2") {
             // 示例：为 axis1_1 和 axis1_2 设置其他速度
-            axis->set_jog_speed(40.0);
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 40.0 mm/s", name.c_str());
+            axis->set_jog_speed(60.0);
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 60.0 mm/s", name.c_str());
         } else {
             // 其他轴保持默认速度（DEFAULT_JOG_SPEED，当前为20.0 mm/s）
             RCLCPP_DEBUG(this->get_logger(), "轴 %s 使用默认点动速度: %.1f mm/s", 
@@ -1111,8 +1111,8 @@ void EthercatNode::initialize_board_width_parameters() {
     screw_lead_ = 10.0;           // 丝杠导程10mm
     // gear_ratio_ = 9.0;            // 减速比9.0
     pulses_per_rev_ = 10000;      // 每转脉冲数10000
-    min_board_width_ = 10.0;      // 最小板宽10cm
-    max_board_width_ = 50.0;      // 最大板宽50cm
+    min_board_width_ = 8.0;      // 最小板宽10cm
+    max_board_width_ = 40.0;      // 最大板宽50cm
     board_width_resolution_ = 0.01; // 板宽分辨率0.01cm
     current_board_width_ = 15.0;   // 默认板宽10cm
     target_board_width_ = 15.0;
@@ -1122,8 +1122,8 @@ void EthercatNode::initialize_board_width_parameters() {
     // +++ 新增：axis3 板宽参数初始化 +++
     axis3_screw_lead_ = 5.0;         // 示例：axis3丝杠导程可能不同
     axis3_gear_ratio_ = 1.0;         // 示例：减速比
-    axis3_min_width_ = 5.0;          // axis3的最小板宽范围
-    axis3_max_width_ = 30.0;
+    axis3_min_width_ = 8.0;          // axis3的最小板宽范围
+    axis3_max_width_ = 40.0;
     axis3_current_width_ = 15.0;     // 默认板宽
     axis3_target_width_ = 15.0;
     axis3_width_moving_ = false;
@@ -1212,7 +1212,7 @@ void EthercatNode::execute_axis3_width_adjustment() {
     
     // 使用现有的位移命令接口控制电机
     // 假设零点相同或不同，这里使用绝对位移。零点偏移需根据实际情况确定。
-    double absolute_displacement_mm = (axis3_target_width_ - 15.0) * 10.0; // 示例：基于最小板宽计算绝对位移
+    double absolute_displacement_mm = (15.0 - axis3_target_width_) * 10.0; // 基于15.0板宽计算绝对位移，运动方向相反
     handle_axis_command(axis3_index, absolute_displacement_mm);
     
     // 发布状态
@@ -1371,7 +1371,7 @@ void EthercatNode::execute_board_width_adjustment() {
     
     // 使用现有的位移命令接口控制电机
     // handle_axis_command(axis4_index, displacement_mm);
-    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0; // 15.0为板宽零点
+    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0 + 2.5; // 15.0为板宽零点
     handle_axis_command(axis4_index, absolute_displacement_mm);
     
     // 发布状态

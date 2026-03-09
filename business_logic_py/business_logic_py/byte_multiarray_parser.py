@@ -88,6 +88,7 @@ class ByteMultiArrayParser(Node):
         self.outbound_stop_pub = self.create_publisher(Empty, '/outbound_stop', 10)
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
         self.board_width_pub = self.create_publisher(Float64, '/board_width_command', 10)
+        self.axis3_width_pub = self.create_publisher(Float64, '/axis3_width_command', 10)
         
         # 新增：创建统一控制状态发布器
         self.integrated_pub = self.create_publisher(ByteMultiArray, '/integrated_control_status', 10)
@@ -549,20 +550,45 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'消息解析错误: {e}')
 
     def process_start_operation(self, payload):
-        """处理开始作业命令 (0x0105) - /control_command -> start_auto"""
-        # 开始作业命令不需要负载数据，直接发布start_auto命令
+        """处理开始作业命令 (0x0105) - /control_command -> start_auto，并解析宽度信息"""
+        # 1. 发布开始自动模式命令
         command_str = "start_auto"
         msg = String()
         msg.data = command_str
         self.control_pub.publish(msg)
         self.get_logger().info('发布开始作业命令: 进入自动模式')
-        
-        # 发布开始结果响应 (0x0106)
+
+        # 2. 解析并发布宽度信息（从第3和第4字节提取，放大10倍的小端序整数）
+        if len(payload) >= 4:
+            # 提取第3和第4字节（索引2和3）作为宽度数据
+            # 消息格式：[0x05, 0x01, width_low, width_high, ...]
+            width_low = payload[2]  # 第3字节（低位）
+            width_high = payload[3]  # 第4字节（高位）
+            
+            # 小端序转换为整数（16位）
+            width_integer = (width_high << 8) | width_low
+            
+            # 除以10.0得到实际宽度值（单位：厘米）
+            actual_width_cm = width_integer * 0.1
+
+            self.get_logger().info(f'解析到宽度信息: 原始值={width_integer}, 实际值={actual_width_cm}cm')
+
+            # 发布到 axis4 板宽控制话题
+            width_msg_axis4 = Float64()
+            width_msg_axis4.data = actual_width_cm
+            self.board_width_pub.publish(width_msg_axis4)
+            self.get_logger().info(f'已下发axis4板宽命令: {actual_width_cm}cm')
+
+            # 发布到 axis3 板宽控制话题
+            width_msg_axis3 = Float64()
+            width_msg_axis3.data = actual_width_cm
+            self.axis3_width_pub.publish(width_msg_axis3)
+            self.get_logger().info(f'已下发axis3板宽命令: {actual_width_cm}cm')
+        else:
+            self.get_logger().warn('开始作业命令负载长度不足，需要至少4字节，仅启动自动模式。')
+
+        # 3. 发布开始结果响应 (0x0106)
         self.publish_start_result()
-        
-        # 如果有负载数据，记录但不处理
-        if len(payload) > 0:
-            self.get_logger().info(f'忽略开始作业命令的负载数据: {payload}')
 
     def publish_start_result(self):
         """发布开始结果响应 (命令码0x0106)"""
@@ -723,16 +749,16 @@ class ByteMultiArrayParser(Node):
     def process_notify_retrieval(self, payload):
         """处理通知取出命令 (0x0103) - /outbound_start，包含层号映射（1-41 映射到 -15 到 28）"""
         # 检查负载长度：至少需要2字节（层高）
-        if len(payload) < 6:
-            self.get_logger().warn('通知取出命令负载长度不足，需要至少6字节')
+        if len(payload) < 4:
+            self.get_logger().warn('通知取出命令负载长度不足，需要至少4字节')
             return
         
         # 完整格式：[组号低位, 组号高位, IO状态低位, IO状态高位, 层高低位, 层高高位]
         # 我们只关心最后2个字节（层高）
-        if len(payload) >= 6:
+        if len(payload) >= 4:
             # 取最后2个字节作为层高
-            layer_low = payload[4]  # 第5个字节是层高低位
-            layer_high = payload[5]  # 第6个字节是层高高位
+            layer_low = payload[2]  # 第3个字节是层高低位
+            layer_high = payload[3]  # 第4个字节是层高高位
         else:
             # 如果只有2个字节，直接使用（简化格式）
             layer_low = payload[0]

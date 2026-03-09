@@ -19,6 +19,8 @@ def main():
                         help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制) 或 start_result(开始结果)')
     parser.add_argument('--layer', type=int, default=1,
                        help='层高（仅warehouse和outbound指令有效，默认1）')
+    parser.add_argument('--width', type=float, default=15.0,
+                    help='板宽值，单位厘米（仅start指令有效，默认15.0）')
     parser.add_argument('--axis', type=int, default=1,
                        help='轴号（仅jog指令有效，默认1）')
     parser.add_argument('--direction', type=int, choices=[0, 1, 2], default=1,
@@ -45,20 +47,30 @@ def main():
     
     # 根据指令类型构造不同的消息
     if args.command == 'start':
-        # 开始作业指令 (0x0105)
-        # 格式: [指令码低位0x05, 指令码高位0x01] (不需要负载)
+        # 开始作业指令 (0x0105)，附带4字节板宽信息
+        # 格式: [指令码低位0x05, 指令码高位0x01, 板宽数据(4字节，小端序)]
         
+        # 1. 将板宽（厘米）转换为放大10倍后的整数(先不放大)
+        width_integer = int(args.width * 1.0)
+        
+        # 2. 将整数拆分为4字节，小端序
+        width_bytes = width_integer.to_bytes(2, byteorder='little', signed=False)
+        
+        # 3. 构造消息数据：指令码(2字节) + 板宽数据(2字节)
         msg_data = [
             bytes([0x05]),  # 指令码低位
             bytes([0x01]),  # 指令码高位 (0x0105 = 开始作业指令)
         ]
+        # 将2字节板宽数据依次加入
+        for b in width_bytes:
+            msg_data.append(bytes([b]))
         
         layout.dim = [MultiArrayDimension()]
-        layout.dim[0].label = 'start_command'
-        layout.dim[0].size = 2
+        layout.dim[0].label = 'start_command_with_width'
+        layout.dim[0].size = 4  # 总字节数变为 2 + 2 = 4
         layout.dim[0].stride = 1
         
-        node.get_logger().info('构造开始作业指令: 进入自动模式')
+        node.get_logger().info(f'构造开始作业指令: 进入自动模式，板宽={args.width}cm (编码值={width_integer})')
 
     elif args.command == 'start_result':
         # 开始结果指令 (0x0106)
