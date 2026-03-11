@@ -207,6 +207,7 @@ extern std::atomic<bool> g_should_exit;
 extern std::atomic<bool> g_system_running;  // 系统运行状态
 extern std::atomic<bool> g_start_button_pressed;  // 启动按钮状态
 extern std::atomic<bool> g_pause_button_pressed;  // 暂停按钮状态
+extern std::atomic<bool> g_reset_button_pressed;  // 新增：复位按钮状态
 
 // 全局函数声明
 void signal_handler(int signum);

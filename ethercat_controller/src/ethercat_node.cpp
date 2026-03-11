@@ -20,6 +20,7 @@ std::atomic<bool> node_shutting_down_{false};
 std::atomic<bool> g_system_running(false);
 std::atomic<bool> g_start_button_pressed(false);
 std::atomic<bool> g_pause_button_pressed(false);
+std::atomic<bool> g_reset_button_pressed(false);  // 复位按钮状态
 
 // 添加缺失的常量定义
 // const int HOMING_TOLERANCE = 100;
@@ -228,9 +229,9 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis2_2));
     
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2, 1.92));
+        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2, 1.8)); // 轴，减速比2.0*20/22 =1.818,调式结果是1.8
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 7.5)); // 汇川轴，减速比9.0,调式结果是7.5
+        DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 7.34)); // 汇川轴，减速比9.0*28/34 =7.411,调式结果是7.5
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis5", 4, AxisType::AXIS1));
     // 配置每个轴
@@ -255,7 +256,7 @@ void EthercatNode::init_axes(ec_master_t* master) {
         }
     }
     last_target_positions_.resize(servo_axes_.size(), 0.0);
-    start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态
+    start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态 todo3.11
     RCLCPP_INFO(this->get_logger(), "伺服轴初始化完成，共 %zu 个轴", servo_axes_.size());
 }
 
@@ -667,6 +668,15 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
         RCLCPP_INFO(this->get_logger(), "暂停按钮按下，开始安全关闭");
     }
     last_pause_button = di.pause_button;
+
+    // +++ 新增：复位按钮处理（上升沿触发） +++
+    static bool last_reset_button = false;
+    if (di.reset_button && !last_reset_button) {
+        g_reset_button_pressed.store(true);
+        RCLCPP_INFO(this->get_logger(), "复位按钮按下，准备回原流程");
+    }
+    last_reset_button = di.reset_button;
+
     // 新增：IO控制模式切换（仅在宏开关启用时生效）
 #if CONTROL_SOURCE_IO
     bool current_manual_auto_state = di.manual_auto_button; // 当前按钮状态（DI04）
@@ -1112,7 +1122,7 @@ void EthercatNode::initialize_board_width_parameters() {
     // gear_ratio_ = 9.0;            // 减速比9.0
     pulses_per_rev_ = 10000;      // 每转脉冲数10000
     min_board_width_ = 8.0;      // 最小板宽10cm
-    max_board_width_ = 40.0;      // 最大板宽50cm
+    max_board_width_ = 48.0;      // 最大板宽50cm
     board_width_resolution_ = 0.01; // 板宽分辨率0.01cm
     current_board_width_ = 15.0;   // 默认板宽10cm
     target_board_width_ = 15.0;
@@ -1123,7 +1133,7 @@ void EthercatNode::initialize_board_width_parameters() {
     axis3_screw_lead_ = 5.0;         // 示例：axis3丝杠导程可能不同
     axis3_gear_ratio_ = 1.0;         // 示例：减速比
     axis3_min_width_ = 8.0;          // axis3的最小板宽范围
-    axis3_max_width_ = 40.0;
+    axis3_max_width_ = 48.0;
     axis3_current_width_ = 15.0;     // 默认板宽
     axis3_target_width_ = 15.0;
     axis3_width_moving_ = false;
@@ -1371,7 +1381,7 @@ void EthercatNode::execute_board_width_adjustment() {
     
     // 使用现有的位移命令接口控制电机
     // handle_axis_command(axis4_index, displacement_mm);
-    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0 + 2.5; // 15.0为板宽零点
+    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0 + 2.0; // 15.0为板宽零点
     handle_axis_command(axis4_index, absolute_displacement_mm);
     
     // 发布状态

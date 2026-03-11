@@ -519,7 +519,66 @@ int main(int argc, char **argv) {
             
             printf("系统重新启动完成\n");
         }
-        
+        else if (g_reset_button_pressed.load() && !g_system_running.load())
+        {
+            printf("回原启动系统...\n");
+            g_system_running.store(true);
+            
+            // 重新初始化EtherCAT资源
+            if (!master) {
+                printf("重新初始化EtherCAT资源...\n");
+                
+                // 重新请求主站
+                master = ecrt_request_master(0);
+                if (!master) {
+                    fprintf(stderr, "重新请求EtherCAT主站失败\n");
+                    g_system_running.store(false);
+                    continue;
+                }
+                
+                // 重新创建域
+                domain1 = ecrt_master_create_domain(master);
+                if (!domain1) {
+                    fprintf(stderr, "重新创建域失败\n");
+                    ecrt_release_master(master);
+                    master = nullptr;
+                    g_system_running.store(false);
+                    continue;
+                }
+                
+                // 重新配置从站和PDO
+                global_node->init_axes(master);
+                global_node->register_pdo_entries(domain1);
+                
+                // 重新激活主站
+                if (ecrt_master_activate(master)) {
+                    fprintf(stderr, "主站重新激活失败\n");
+                    safe_shutdown(false);
+                    continue;
+                }
+                
+                // 重新获取域数据指针
+                domain1_pd = ecrt_domain_data(domain1);
+                if (!domain1_pd) {
+                    fprintf(stderr, "重新获取域数据失败\n");
+                    safe_shutdown(false);
+                    continue;
+                }
+            }
+            
+            // 创建新的实时线程
+            running = 1;
+            if (pthread_create(&thread, &attr, rt_task_wrapper, NULL)) {
+                perror("创建实时线程失败");
+                safe_shutdown(false);
+                continue;
+            }
+            pthread_setname_np(thread, "ethercat-rt");
+            printf("实时线程重新创建成功\n");
+            
+            printf("系统重新启动完成\n");    
+        }
+
         // 检查暂停按钮
         if (g_pause_button_pressed.load() && g_system_running.load()) {
             printf("开始安全暂停系统...\n");

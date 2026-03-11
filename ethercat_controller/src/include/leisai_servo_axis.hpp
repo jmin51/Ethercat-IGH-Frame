@@ -40,11 +40,10 @@ public:
 
 private:
     // 雷赛特有实现
-    void handle_leisai_initialization(uint8_t* domain1_pd, uint16_t status_word);
+    void handle_leisai_initialization(uint8_t* domain1_pd, uint16_t read_status_word);
+    void handle_leisai_ready_state(uint8_t* domain1_pd, uint16_t status_word);
     void handle_leisai_manual_operation(uint8_t* domain1_pd, int32_t current_pos);
     void handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos);
-    
-    void handle_leisai_ready_state(uint8_t* domain1_pd, uint16_t status_word);
     void handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code);
 
     int leisai_specific_param_;

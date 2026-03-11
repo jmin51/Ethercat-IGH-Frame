@@ -148,7 +148,7 @@ class ByteMultiArrayParser(Node):
                 # 注意：如果需要将多个轴故障组合为一个代码，需要在此定义更复杂的映射规则。
 
             # 2. 发布归一化消息 (命令码 0x0119)
-            self.publish_fault_status(fault_code_combined)
+            # self.publish_fault_status(fault_code_combined)
 
         except Exception as e:
             self.get_logger().error(f'故障码处理错误: {e}')

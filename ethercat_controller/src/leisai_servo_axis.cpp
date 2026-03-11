@@ -61,12 +61,42 @@ void LeisaiServoAxis::configure(ec_master_t* master) {
                     "创建 %s 轴从站配置失败，产品号: 0x%08x", axis_name_.c_str(), product_code_);
         return;
     }
-    
+
     if (ecrt_slave_config_pdos(sc_, EC_END, leisai_slave_syncs)) {
         RCLCPP_FATAL(rclcpp::get_logger("ethercat_controller"), 
                     "%s 轴PDO配置失败", axis_name_.c_str());
     }
     
+    // 静态变量，用于记录是否首次上电配置，判断是否为axis3并且复位按钮被按下
+    static bool is_first_power_on = true;
+    
+    // 判断是否为axis3并且复位按钮被按下
+    if (axis_name_ == "axis3" && g_reset_button_pressed.load()) {
+        // axis3 在复位按钮按下时，配置为 HM 模式用于回原
+        ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x06);
+        RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
+                   "轴 %s 配置为 HM 模式 (复位/回原流程)", axis_name_.c_str());
+        // 重置复位按钮状态，避免重复配置
+        g_reset_button_pressed.store(false);
+        // if (is_first_power_on) {
+        //     // 首次上电，配置为 HM 模式用于回原
+        //     ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x06);
+        //     RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
+        //                "轴 %s 首次上电，配置为 HM 模式 (回原流程)", axis_name_.c_str());
+        //     is_first_power_on = false;  // 将首次上电标志设为false
+        //     g_reset_button_pressed.store(false); // 重置复位按钮状态，避免重复配置
+        // } else {
+        //     // 非首次上电，配置为 CSP 模式
+        //     ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x08);
+        //     RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
+        //                "轴 %s 配置为 CSP 模式", axis_name_.c_str());
+        // }
+    } else {
+        // 其他轴，或 axis3 在非复位状态下，配置为 CSP 模式
+        ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x08);
+        RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
+                   "轴 %s 配置为 CSP 模式", axis_name_.c_str());
+    }
     ecrt_slave_config_dc(sc_, 0x0300, PERIOD_NS, 0, 0, 0);
 }
 
@@ -373,7 +403,6 @@ void LeisaiServoAxis::handle_leisai_ready_state(uint8_t* domain1_pd, uint16_t st
         operation_mode_ = OperationMode::MANUAL;
         current_state_ = AxisState::MANUAL_MODE;
     }
-    // ... 其他逻辑
 }
 
 void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_t current_pos) {
@@ -486,77 +515,6 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
     if (target_pulses_ != joint_position_) {
         gradual_approach(target_pulses_, domain1_pd);
     }
-    // // 实现自动模式操作逻辑
-    // if (!homing_completed_) {
-    //     // handle_homing_sequence(domain1_pd, current_pos); //待完善12.04
-
-    //     // 新增：回零期间忽略位移更新
-    //     if (displacement_updated_) {
-    //         displacement_updated_ = false;
-    //         printf("轴 %s 回零期间忽略位移指令，等待回零完成\n", axis_name_.c_str());
-    //     }
-    //     return;
-    // }
-    
-    // if (!position_initialized_) {
-    //     joint_position_ = current_pos;
-    //     initial_position_ = current_pos;
-    //     target_pulses_ = current_pos;
-    //     position_initialized_ = true;
-    //     printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
-    // }
-    
-    // // 自动模式：使用绝对位置控制
-    // if (displacement_updated_) {
-    //     // printf("轴 %s 检测到位移更新标志，目标位移: %.6fmm\n", 
-    //     //        axis_name_.c_str(), target_displacement_);
-    //     displacement_updated_ = false;
-
-    //     // 自动模式使用绝对位移
-    //     target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
-
-    //     // 新增：安全检测 - 检查目标位置与当前位置的差值
-    //     const int32_t MAX_SAFE_DELTA = 3000; // 最大安全脉冲差值，可根据需要调整
-    //     int32_t position_delta = abs(target_pulses_ - joint_position_);
-
-    //     if (position_delta > MAX_SAFE_DELTA) {
-    //         // 触发故障模式
-    //         current_state_ = AxisState::FAULT;
-    //         printf("轴 %s 运动控制错误：目标位置与当前位置差值过大(%d脉冲)，可能发生飞车！\n", 
-    //                axis_name_.c_str(), position_delta);
-    //         printf("轴 %s 进入故障模式，需要手动清除故障\n", axis_name_.c_str());
-
-    //         // 发布错误状态
-    //         if (global_node) {
-    //             auto status_msg = std_msgs::msg::String();
-    //             status_msg.data = "轴 " + axis_name_ + " 运动控制错误：目标位置与当前位置差值过大";
-    //             // global_node->system_status_pub_->publish(status_msg); // 需要添加system_status_pub_的访问权限
-    //         }
-            
-    //         return; // 直接返回，不执行后续运动控制
-    //     }
-    // }
-    
-    // // 直接移动到目标位置
-    // static int position_counter = 0;
-    // if (position_counter++ >= 10) {
-    //     position_counter = 0;
-        
-    //     const int32_t TOLERANCE = 100; // PULSE_Tolerance;
-
-    //     if (abs(joint_position_ - target_pulses_) > TOLERANCE) {
-    //         // 自动模式使用更直接的移动
-    //         joint_position_ = target_pulses_;
-    //     }
-
-    //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-
-    //     // 检查是否到达目标
-    //     if (abs(joint_position_ - target_pulses_) <= TOLERANCE && !target_reached_) {
-    //         target_reached_ = true;
-    //         printf("轴 %s 已到达目标位置 %d!\n", axis_name_.c_str(), target_pulses_);
-    //     }
-    // }
 }
 
 void LeisaiServoAxis::handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code) {
