@@ -256,7 +256,7 @@ void EthercatNode::init_axes(ec_master_t* master) {
         }
     }
     last_target_positions_.resize(servo_axes_.size(), 0.0);
-    start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态 todo3.11
+    start_io_monitoring();  // 在轴初始化后启动IO监控，确保轴配置完成后才开始监控IO状态 todo3.11不能删，删了后暂停会出问题
     RCLCPP_INFO(this->get_logger(), "伺服轴初始化完成，共 %zu 个轴", servo_axes_.size());
 }
 

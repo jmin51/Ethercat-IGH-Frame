@@ -344,47 +344,6 @@ int main(int argc, char **argv) {
         perror("mlockall失败");
         return 1;
     }
-    
-    // 请求EtherCAT主站
-    master = ecrt_request_master(0);
-    if (!master) {
-        fprintf(stderr, "请求EtherCAT主站失败\n");
-        return 1;
-    }
-    
-    // 创建域
-    domain1 = ecrt_master_create_domain(master);
-    if (!domain1) {
-        fprintf(stderr, "创建域失败\n");
-        safe_shutdown(false);
-        return 1;
-    }
-    
-    // 初始化轴和PDO
-    global_node->init_axes(master);
-    global_node->register_pdo_entries(domain1);
-    
-    // 配置分布式时钟
-    auto slave_configs = global_node->get_all_slave_configs();
-    for (auto sc : slave_configs) {
-        if (sc) {
-            ecrt_slave_config_dc(sc, 0x0300, PERIOD_NS, 0, 0, 0);
-        }
-    }
-    // 激活主站
-    printf("激活EtherCAT主站...\n");
-    if (ecrt_master_activate(master)) {
-        fprintf(stderr, "主站激活失败\n");
-        safe_shutdown(false);
-        return 1;
-    }
-    
-    // 获取域数据指针
-    if (!(domain1_pd = ecrt_domain_data(domain1))) {
-        fprintf(stderr, "获取域数据失败\n");
-        safe_shutdown(false);
-        return 1;
-    }
       
     // 初始化Modbus监控
     if (init_modbus_monitor() != 0) {
@@ -394,7 +353,7 @@ int main(int argc, char **argv) {
     printf("启动IO监控模块...\n");
     global_node->start_io_monitoring();
     // 在轴初始化后初始化业务逻辑和层处理器
-    global_node->initialize_after_axes();
+    // global_node->initialize_after_axes();
     
     // 设置实时线程属性
     pthread_attr_t attr;
@@ -505,6 +464,8 @@ int main(int argc, char **argv) {
                     safe_shutdown(false);
                     continue;
                 }
+                // 在轴初始化后初始化业务逻辑和层处理器
+                global_node->initialize_after_axes();
             }
             
             // 创建新的实时线程
@@ -564,6 +525,8 @@ int main(int argc, char **argv) {
                     safe_shutdown(false);
                     continue;
                 }
+                // 在轴初始化后初始化业务逻辑和层处理器
+                global_node->initialize_after_axes();
             }
             
             // 创建新的实时线程
@@ -583,6 +546,8 @@ int main(int argc, char **argv) {
         if (g_pause_button_pressed.load() && g_system_running.load()) {
             printf("开始安全暂停系统...\n");
             g_system_running.store(false);
+            g_start_button_pressed.store(false);
+            g_reset_button_pressed.store(false);
             g_pause_button_pressed.store(false);
             // // 安全暂停操作 to do后续可简化方向
             // if (thread) {
