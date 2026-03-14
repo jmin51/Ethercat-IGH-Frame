@@ -67,30 +67,16 @@ void LeisaiServoAxis::configure(ec_master_t* master) {
                     "%s 轴PDO配置失败", axis_name_.c_str());
     }
     
-    // 静态变量，用于记录是否首次上电配置，判断是否为axis3并且复位按钮被按下
-    static bool is_first_power_on = true;
+    // // 静态变量，用于记录是否首次上电配置，判断是否为axis3并且复位按钮被按下
+    // static bool is_first_power_on = true;
     
     // 判断是否为axis3并且复位按钮被按下
     if (axis_name_ == "axis3" && g_reset_button_pressed.load()) {
-        // axis3 在复位按钮按下时，配置为 HM 模式用于回原
         ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x06);
         RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
                    "轴 %s 配置为 HM 模式 (复位/回原流程)", axis_name_.c_str());
         // 重置复位按钮状态，避免重复配置
         g_reset_button_pressed.store(false);
-        // if (is_first_power_on) {
-        //     // 首次上电，配置为 HM 模式用于回原
-        //     ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x06);
-        //     RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
-        //                "轴 %s 首次上电，配置为 HM 模式 (回原流程)", axis_name_.c_str());
-        //     is_first_power_on = false;  // 将首次上电标志设为false
-        //     g_reset_button_pressed.store(false); // 重置复位按钮状态，避免重复配置
-        // } else {
-        //     // 非首次上电，配置为 CSP 模式
-        //     ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x08);
-        //     RCLCPP_INFO(rclcpp::get_logger("ethercat_controller"),
-        //                "轴 %s 配置为 CSP 模式", axis_name_.c_str());
-        // }
     } else {
         // 其他轴，或 axis3 在非复位状态下，配置为 CSP 模式
         ecrt_slave_config_sdo8(sc_, 0x6060, 0x00, 0x08);

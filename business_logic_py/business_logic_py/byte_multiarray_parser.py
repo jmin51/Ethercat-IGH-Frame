@@ -559,11 +559,11 @@ class ByteMultiArrayParser(Node):
         self.get_logger().info('发布开始作业命令: 进入自动模式')
 
         # 2. 解析并发布宽度信息（从第3和第4字节提取，放大10倍的小端序整数）
-        if len(payload) >= 4:
+        if len(payload) >= 2:
             # 提取第3和第4字节（索引2和3）作为宽度数据
             # 消息格式：[0x05, 0x01, width_low, width_high, ...]
-            width_low = payload[2]  # 第3字节（低位）
-            width_high = payload[3]  # 第4字节（高位）
+            width_low = payload[0]  # 第3字节（低位）
+            width_high = payload[1]  # 第4字节（高位）
             
             # 小端序转换为整数（16位）
             width_integer = (width_high << 8) | width_low

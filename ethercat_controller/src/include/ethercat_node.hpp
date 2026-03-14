@@ -5,6 +5,7 @@
 #include "servo_axis_factory.hpp"
 #include "io_interface.hpp"
 #include "LayerCommandProcessor.hpp" 
+#include "fault_management_system.hpp"
 #include <std_msgs/msg/u_int8.hpp> 
 #include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -65,6 +66,9 @@ public:
     // 新增：层运动完成检查函数
     void check_layer_motion_completion();
 
+    void print_warning(const std::string& message);
+    void print_error(const std::string& message);
+
 private:
     void initialize_node();
     void handle_displacement_command(const std_msgs::msg::String::SharedPtr msg);
@@ -110,9 +114,12 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr do_control_sub_;
     // 添加点动速度设置订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_speed_sub_;
-    // 新增：故障码发布器
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
     
+    // 10ms 定时器，用于发布关节状态和检查层移动完成
+    rclcpp::TimerBase::SharedPtr periodic_timer_;
+    // 定时器回调函数
+    void periodic_timer_callback();
+
     // 添加点动速度设置处理函数
     void handle_jog_speed_command(const std_msgs::msg::String::SharedPtr msg);
     
@@ -121,6 +128,10 @@ private:
 
     std::atomic<bool> node_shutting_down_;
     
+    // 故障管理相关：在现有成员变量中添加
+    std::unique_ptr<fault_management::FaultManagementSystem> fault_manager_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
+
     // IO模块相关
     pthread_t io_thread_;
     std::atomic<bool> io_running_{false};
@@ -144,8 +155,6 @@ private:
     // 添加出库处理函数
     void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg);
     void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg);
-    // 故障状态发布方法
-    void publish_fault_status();
     
 // 在EthercatNode类定义中添加
 private:

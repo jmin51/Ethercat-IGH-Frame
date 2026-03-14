@@ -48,7 +48,7 @@ def main():
     # 根据指令类型构造不同的消息
     if args.command == 'start':
         # 开始作业指令 (0x0105)，附带4字节板宽信息
-        # 格式: [指令码低位0x05, 指令码高位0x01, 板宽数据(4字节，小端序)]
+        # 格式: [指令码低位0x05, 指令码高位0x01, 板宽数据(2字节，小端序)]
         
         # 1. 将板宽（厘米）转换为放大10倍后的整数(先不放大)
         width_integer = int(args.width * 1.0)
@@ -60,14 +60,18 @@ def main():
         msg_data = [
             bytes([0x05]),  # 指令码低位
             bytes([0x01]),  # 指令码高位 (0x0105 = 开始作业指令)
+            bytes([width_bytes[0]]), # 板宽数据低位 (width_low) 转换为bytes
+            bytes([width_bytes[1]]), # 板宽数据高位 (width_high) 转换为bytes
+            bytes([0x00]),           # 额外字节1
+            bytes([0x00]),           # 额外字节2
         ]
-        # 将2字节板宽数据依次加入
-        for b in width_bytes:
-            msg_data.append(bytes([b]))
+        # # 将2字节板宽数据依次加入
+        # for b in width_bytes:
+        #     msg_data.append(bytes([b]))
         
         layout.dim = [MultiArrayDimension()]
         layout.dim[0].label = 'start_command_with_width'
-        layout.dim[0].size = 4  # 总字节数变为 2 + 2 = 4
+        layout.dim[0].size = 6  # 总字节数变为 2 + 2 = 4
         layout.dim[0].stride = 1
         
         node.get_logger().info(f'构造开始作业指令: 进入自动模式，板宽={args.width}cm (编码值={width_integer})')

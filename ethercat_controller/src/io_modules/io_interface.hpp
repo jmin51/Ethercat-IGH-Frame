@@ -7,8 +7,8 @@
 #include <string>
 
 // 宏开关配置 - 根据实际需求开启或关闭
-#define ENABLE_DI_MODULE    1  // 1:启用DI模块 0:禁用DI模块
-#define ENABLE_DO_MODULE    1  // 1:启用DO模块 0:禁用DO模块
+#define ENABLE_DI_MODULE    0  // 1:启用DI模块 0:禁用DI模块
+#define ENABLE_DO_MODULE    0  // 1:启用DO模块 0:禁用DO模块
 
 // 设备IP配置
 #define DI_DEVICE_IP        "192.168.3.12"
@@ -64,16 +64,12 @@ int init_modbus_interface(const char* di_ip, int di_port, int di_slave_id,
 void cleanup_modbus_interface();
 
 // DI 读取接口
-#if ENABLE_DI_MODULE
 DI_Interface read_all_di_signals();
 bool read_single_di_signal(int di_address);
-#endif
 
 // DO 写入接口
-#if ENABLE_DO_MODULE
 int write_do_signals(DO_Interface do_signals);
 int write_single_do_signal(int do_address, bool state);
-#endif
 
 // 获取当前DO状态
 DO_Interface get_current_do_state();
