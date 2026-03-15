@@ -191,12 +191,12 @@ bool read_single_di_signal(int di_address) {
 // DI模块禁用时的空实现
 DI_Interface read_all_di_signals() {
     DI_Interface di = {0};
-    fprintf(stderr, "警告: DI模块已禁用，返回空数据\n");
+    // fprintf(stderr, "警告: DI模块已禁用，返回空数据\n");
     return di;
 }
 
 bool read_single_di_signal(int di_address) {
-    fprintf(stderr, "警告: DI模块已禁用，无法读取信号\n");
+    // fprintf(stderr, "警告: DI模块已禁用，无法读取信号\n");
     return false;
 }
 #endif

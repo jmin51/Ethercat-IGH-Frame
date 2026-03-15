@@ -16,7 +16,8 @@ class CommandType(Enum):
     AXIS_JOG = 0x010D             # 轴点动 /jog_command
     AXIS_STOP = 0x010F            # 轴停止 /jog_command
     WRITE_IO = 0x0115             # 写IO /do_control
-    CLEAR_AXIS_FAULT = 0x0117     # 清除轴故障 /control_command
+    CLEAR_SYSTEM_FAULT = 0x0117   # 告警和错误清除 /fault_code
+    CLEAR_AXIS_FAULT = 0x011B     # 清除轴故障 /control_command
 
     # 原有的指令码定义（不在图片中的）
     SYSTEM_CONTROL = 0x01
@@ -106,6 +107,9 @@ class ByteMultiArrayParser(Node):
         # 添加IO状态跟踪
         self.last_io_state = 0  # 初始状态为全0
         
+        # 新增：当前故障码存储
+        self.current_fault_code = 0x0000  # 默认无故障
+        
         self.get_logger().info('ByteMultiArray解析器已启动（支持统一IO状态发布和业务完成状态发布）')
 
     def ensure_int(self, value):
@@ -122,19 +126,17 @@ class ByteMultiArrayParser(Node):
                 return 0
 
     def fault_callback(self, msg):
-        """处理故障码话题回调，发布归一化消息 (0x0119)"""
+        """处理故障码话题回调，存储当前故障码状态"""
         try:
             fault_data_str = msg.data
 
-            # 1. 解析故障码
-            # 格式可能为：“0”（无故障）或 “axis1_1:0x1234,axis4:0x5678”（多个故障）
+            # 解析故障码
+            # 格式可能为："0"（无故障）或 "axis1_1:0x1234,axis4:0x5678"（多个故障）
             fault_code_combined = 0x0000  # 默认无故障
 
             if fault_data_str != "0" and fault_data_str:
-                # 尝试解析多个轴的故障码。这里采用一种策略：取第一个非零错误码，或进行位组合。
-                # 示例：简单取第一个遇到的错误码（根据实际需求调整逻辑）。
                 import re
-                # 匹配模式：轴名:0xXXXX
+                # 匹配模式：0xXXXX
                 pattern = r'0x([0-9A-Fa-f]+)'
                 matches = re.findall(pattern, fault_data_str)
                 if matches:
@@ -144,18 +146,27 @@ class ByteMultiArrayParser(Node):
                         fault_code_combined = first_code
                     except ValueError:
                         self.get_logger().warn(f'无法解析故障码: {matches[0]}')
-                        fault_code_combined = 0xFFFF  # 或定义为未知错误
-                # 注意：如果需要将多个轴故障组合为一个代码，需要在此定义更复杂的映射规则。
-
-            # 2. 发布归一化消息 (命令码 0x0119)
-            # self.publish_fault_status(fault_code_combined)
+                        fault_code_combined = 0xFFFF  # 未知错误
+                        
+            # 存储当前故障码
+            self.current_fault_code = fault_code_combined
+            
+            # 故障变化时记录日志
+            if fault_code_combined != 0:
+                self.get_logger().warn(f'当前系统故障码: 0x{fault_code_combined:04X}')
+                self.publish_fault_status(fault_code_combined)
 
         except Exception as e:
             self.get_logger().error(f'故障码处理错误: {e}')
 
+
     def publish_fault_status(self, fault_code):
-        """发布故障状态归一化消息 (命令码0x0119)"""
+        """发布故障状态归一化消息 (命令码0x0119)，只在有故障时上报"""
         try:
+            # 无故障时不上报
+            if fault_code == 0x0000:
+                return
+            
             # 构建4字节消息 (小端序)
             # 格式: [命令码低8位, 命令码高8位, 故障码低8位, 故障码高8位]
             message_data = []
@@ -181,6 +192,8 @@ class ByteMultiArrayParser(Node):
             msg.layout = layout
             msg.data = message_data
             self.integrated_pub.publish(msg)  # 发布到统一状态话题
+            
+            self.get_logger().warn(f'发布故障状态0x0119: 故障码=0x{fault_code:04X}')
 
         except Exception as e:
             self.get_logger().error(f'发布故障状态消息失败: {e}')
@@ -248,19 +261,20 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'发布产品到位消息失败: {e}')
 
     def publish_warehouse_completion(self, result_code):
-        """发布入库完成消息 (命令码0x0102)"""
+        """发布入库完成消息 (命令码0x0102)，根据/fault_code反馈决定异常码"""
         try:
             # 构建4字节消息 (小端序)
-            # 格式: [命令码低8位, 命令码高8位, 结果码低8位, 结果码高8位]
+            # 格式: [命令码低8位, 命令码高8位, 异常码低8位, 异常码高8位]
             message_data = []
             
             # 命令码: 0x0102 (小端序: 0x02, 0x01)
             message_data.append(bytes([0x02]))  # 低字节
             message_data.append(bytes([0x01]))  # 高字节
             
-            # 结果码: 0x0000 (小端序: 0x00, 0x00)
-            message_data.append(bytes([result_code & 0xFF]))   # 低字节
-            message_data.append(bytes([(result_code >> 8) & 0xFF]))  # 高字节
+            # 异常码: 有故障用故障码，无故障用0x0000
+            error_code = self.current_fault_code if self.current_fault_code != 0 else 0x0000
+            message_data.append(bytes([error_code & 0xFF]))   # 低字节
+            message_data.append(bytes([(error_code >> 8) & 0xFF]))  # 高字节
             
             # 创建MultiArrayLayout
             layout = MultiArrayLayout()
@@ -277,25 +291,26 @@ class ByteMultiArrayParser(Node):
             
             self.integrated_pub.publish(msg)
             
-            self.get_logger().info(f'发布入库完成消息: 命令=0x0102, 结果码=0x{result_code:04X}')
+            self.get_logger().info(f'发布入库完成消息: 命令=0x0102, 异常码=0x{error_code:04X}')
             
         except Exception as e:
             self.get_logger().error(f'发布入库完成消息失败: {e}')
 
     def publish_outbound_completion(self, result_code):
-        """发布出库完成消息 (命令码0x0104)"""
+        """发布出库完成消息 (命令码0x0104)，根据/fault_code反馈决定异常码"""
         try:
             # 构建4字节消息 (小端序)
-            # 格式: [命令码低8位, 命令码高8位, 结果码低8位, 结果码高8位]
+            # 格式: [命令码低8位, 命令码高8位, 异常码低8位, 异常码高8位]
             message_data = []
             
             # 命令码: 0x0104 (小端序: 0x04, 0x01)
             message_data.append(bytes([0x04]))  # 低字节
             message_data.append(bytes([0x01]))  # 高字节
             
-            # 结果码: 0x0000 (小端序: 0x00, 0x00)
-            message_data.append(bytes([result_code & 0xFF]))   # 低字节
-            message_data.append(bytes([(result_code >> 8) & 0xFF]))  # 高字节
+            # 异常码: 有故障用故障码，无故障用0x0000
+            error_code = self.current_fault_code if self.current_fault_code != 0 else 0x0000
+            message_data.append(bytes([error_code & 0xFF]))   # 低字节
+            message_data.append(bytes([(error_code >> 8) & 0xFF]))  # 高字节
             
             # 创建MultiArrayLayout
             layout = MultiArrayLayout()
@@ -312,7 +327,7 @@ class ByteMultiArrayParser(Node):
             
             self.integrated_pub.publish(msg)
             
-            self.get_logger().info(f'发布出库完成消息: 命令=0x0104, 结果码=0x{result_code:04X}')
+            self.get_logger().info(f'发布出库完成消息: 命令=0x0104, 异常码=0x{error_code:04X}')
             
         except Exception as e:
             self.get_logger().error(f'发布出库完成消息失败: {e}')
@@ -530,6 +545,8 @@ class ByteMultiArrayParser(Node):
                 self.process_axis_stop(payload)
             elif command_code == CommandType.WRITE_IO.value:  # 写IO
                 self.process_write_io(payload)
+            elif command_code == CommandType.CLEAR_SYSTEM_FAULT.value:  # 清除系统故障和告警
+                self.process_clear_system_fault(payload)
             elif command_code == CommandType.CLEAR_AXIS_FAULT.value:  # 清除轴故障
                 self.process_clear_axis_fault(payload)
             # 原有的指令码处理
@@ -591,18 +608,20 @@ class ByteMultiArrayParser(Node):
         self.publish_start_result()
 
     def publish_start_result(self):
-        """发布开始结果响应 (命令码0x0106)"""
+        """发布开始结果响应 (命令码0x0106)，根据/fault_code反馈决定异常码"""
         try:
             # 构建4字节响应消息 (小端序)
-            # 格式: [命令码低8位0x06, 命令码高8位0x01, 0x00, 0x00]
+            # 格式: [命令码低8位, 命令码高8位, 异常码低8位, 异常码高8位]
             message_data = []
             
             # 命令码: 0x0106 (小端序: 0x06, 0x01)
             message_data.append(bytes([0x06]))  # 低字节
             message_data.append(bytes([0x01]))  # 高字节
-            # 两个填充字节
-            message_data.append(bytes([0x00]))
-            message_data.append(bytes([0x00]))
+            
+            # 异常码: 有故障用故障码，无故障用0x0000
+            error_code = self.current_fault_code if self.current_fault_code != 0 else 0x0000
+            message_data.append(bytes([error_code & 0xFF]))        # 低字节
+            message_data.append(bytes([(error_code >> 8) & 0xFF])) # 高字节
             
             # 创建MultiArrayLayout
             layout = MultiArrayLayout()
@@ -620,7 +639,7 @@ class ByteMultiArrayParser(Node):
             # 发布到统一状态话题
             self.integrated_pub.publish(msg)
             
-            self.get_logger().info('发布开始结果响应: 0x06 0x01 0x00 0x00')
+            self.get_logger().info(f'发布开始结果响应: 命令=0x0106, 异常码=0x{error_code:04X}')
             
         except Exception as e:
             self.get_logger().error(f'发布开始结果响应失败: {e}')
@@ -935,8 +954,19 @@ class ByteMultiArrayParser(Node):
         # self.jog_pub.publish(msg)
         # self.get_logger().info('发布所有轴停止命令')
 
+    def process_clear_system_fault(self, payload):
+        """处理清除系统故障和告警命令 (0x0117) - /fault_code"""
+        # 根据需求：清除所有系统故障和告警
+        # 通过发布 "clear_all" 到 /control_command 话题
+        # 或直接调用 EthercatNode 的 clear_all_faults 方法
+        command_str = "clear_all_faults"
+        msg = String()
+        msg.data = command_str
+        self.control_pub.publish(msg)
+        self.get_logger().info('发布清除系统故障和告警命令 (0x0117)')
+
     def process_clear_axis_fault(self, payload):
-        """处理清除轴故障命令 (0x0117) - /control_command"""
+        """处理清除轴故障命令 (0x011B) - /control_command"""
         # 根据表格：清除轴故障
         command_str = "clear_fault"
         msg = String()

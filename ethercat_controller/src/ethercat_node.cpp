@@ -212,7 +212,7 @@ void EthercatNode::initialize_after_axes() {
     
     // 检查轴是否已初始化
     if (servo_axes_.empty()) {
-        RCLCPP_ERROR(this->get_logger(), "伺服轴未初始化，无法初始化业务逻辑模块");
+        print_error("伺服轴未初始化，无法初始化业务逻辑模块");
         return;
     }
     
@@ -428,8 +428,9 @@ void EthercatNode::handle_control_command(const std::string& command) {
         if (any_axis_in_manual && fault_manager_) {
             // 手动模式下收到自动指令，上报故障
             uint16_t fault_code = fault_manager_->handle_auto_command_in_manual_mode();
-            RCLCPP_WARN(this->get_logger(), 
-                       "手动模式下收到自动指令，已上报故障码: 0x%04X", fault_code);
+            std::stringstream warn_ss;
+            warn_ss << "手动模式下收到自动指令，已上报故障码: 0x" << std::hex << std::setw(4) << std::setfill('0') << fault_code;
+            print_warning(warn_ss.str());
         }
         
         // 仍然尝试启动自动模式（轴内部会处理请求）
@@ -459,8 +460,15 @@ void EthercatNode::handle_control_command(const std::string& command) {
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到重置命令");
         
+    } else if (command == "clear_all_faults") {
+        // 清除所有系统故障和告警
+        if (fault_manager_) {
+            fault_manager_->clear_all_faults();
+            RCLCPP_INFO(this->get_logger(), "已清除所有系统故障和告警");
+        }
+        
     } else {
-        RCLCPP_WARN(this->get_logger(), "未知控制命令: %s", command.c_str());
+        print_warning("未知控制命令: " + command);
     }
 }
 
@@ -481,7 +489,7 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::String::Shar
     // 解析命令
     std::vector<std::pair<std::string, double>> axis_commands;
     if (!parse_displacement_command(command, axis_commands)) {
-        RCLCPP_ERROR(this->get_logger(), "位移指令解析失败: %s", command.c_str());
+        print_error("位移指令解析失败: " + command);
         return;
     }
     
@@ -506,7 +514,7 @@ void EthercatNode::handle_displacement_command(const std_msgs::msg::String::Shar
         }
         
         if (!axis_found) {
-            RCLCPP_ERROR(this->get_logger(), "未找到轴: %s", axis_name.c_str());
+            print_error("未找到轴: " + axis_name);
         }
     }
 }
@@ -535,7 +543,7 @@ bool EthercatNode::parse_displacement_command(const std::string& command,
     for (const auto& part : parts) {
         size_t colon_pos = part.find(':');
         if (colon_pos == std::string::npos) {
-            RCLCPP_ERROR(this->get_logger(), "无效指令格式，缺少冒号: %s", part.c_str());
+            print_error("无效指令格式，缺少冒号: " + part);
             return false;
         }
         
@@ -549,7 +557,7 @@ bool EthercatNode::parse_displacement_command(const std::string& command,
         value_str.erase(value_str.find_last_not_of(" \t") + 1);
         
         if (axis_name.empty() || value_str.empty()) {
-            RCLCPP_ERROR(this->get_logger(), "轴名或值为空: %s", part.c_str());
+            print_error("轴名或值为空: " + part);
             return false;
         }
         
@@ -557,7 +565,7 @@ bool EthercatNode::parse_displacement_command(const std::string& command,
             double value = std::stod(value_str);
             axis_commands.push_back({axis_name, value});
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "数值转换失败: %s, 错误: %s", value_str.c_str(), e.what());
+            print_error("数值转换失败: " + value_str + ", 错误: " + e.what());
             return false;
         }
     }
@@ -605,7 +613,7 @@ void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg
     // 解析格式："axis1_1:forward" 或 "axis1_1:reverse" 或 "axis1_1:stop"
     size_t colon_pos = command.find(':');
     if (colon_pos == std::string::npos) {
-        RCLCPP_ERROR(this->get_logger(), "无效命令格式，应为 '轴名:命令'");
+        print_error("无效命令格式，应为 '轴名:命令'");
         return;
     }
     
@@ -648,7 +656,7 @@ void EthercatNode::start_io_monitoring() {
     
     if (init_modbus_interface(di_ip, MODBUS_PORT, MODBUS_SLAVE_ID,
                              do_ip, MODBUS_PORT, MODBUS_SLAVE_ID) != 0) {
-        RCLCPP_ERROR(this->get_logger(), "Modbus初始化失败");
+        print_error("Modbus初始化失败");
         return;
     }
     
@@ -656,7 +664,7 @@ void EthercatNode::start_io_monitoring() {
     
     // 创建IO监控线程
     if (pthread_create(&io_thread_, nullptr, io_monitor_thread, this) != 0) {
-        RCLCPP_ERROR(this->get_logger(), "创建IO监控线程失败");
+        print_error("创建IO监控线程失败");
         io_running_.store(false);
         cleanup_modbus_interface();
         return;
@@ -764,26 +772,6 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     publish_io_status();
 }
 
-// void EthercatNode::publish_io_status() {
-//     if (node_shutting_down_.load() || !rclcpp::ok()) {
-//         return;
-//     }
-    
-//     auto msg = std_msgs::msg::String();
-//     std::stringstream ss;
-    
-//     pthread_mutex_lock(&io_mutex_);
-//     ss << "DI状态: 启动按钮=" << (current_di_status_.start_button ? "按下" : "释放")
-//        << ", 急停=" << (current_di_status_.emergency_stop ? "激活" : "正常");
-    
-//     DO_Interface do_status = get_current_do_state();
-//     ss << " | DO状态: 启动灯=" << (do_status.start_button_light ? "亮" : "灭")
-//        << ", 绿灯=" << (do_status.green_light ? "亮" : "灭");
-//     pthread_mutex_unlock(&io_mutex_);
-    
-//     msg.data = ss.str();
-//     io_status_pub_->publish(msg);
-// }
 void EthercatNode::publish_io_status() {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
         return;
@@ -852,7 +840,10 @@ void EthercatNode::publish_io_status() {
 void* io_monitor_thread(void* arg) {
     EthercatNode* node = static_cast<EthercatNode*>(arg);
     time_t last_display = time(NULL);
-    
+    // 静态标志位，确保禁用警告只报告一次
+    static bool di_disabled_warned = false;
+    static bool do_disabled_warned = false;
+
     RCLCPP_INFO(node->get_logger(), "IO监控线程开始运行");
     
     while (node->is_io_running() && !g_should_exit.load()) {
@@ -868,13 +859,19 @@ void* io_monitor_thread(void* arg) {
 #if ENABLE_DI_MODULE
             // print_di_status(di);
 #else
-            node->print_warning("DI模块已禁用");
+            if (!di_disabled_warned) {
+                node->print_warning("DI模块已禁用");
+                di_disabled_warned = true;
+            }
 #endif
             
 #if ENABLE_DO_MODULE
             // print_do_status(do_control);
 #else
-            node->print_warning("DO模块已禁用");
+            if (!do_disabled_warned) {
+                node->print_warning("DO模块已禁用");
+                do_disabled_warned = true;
+            }
 #endif
             // printf("\n----------------------------------------\n");
         }
@@ -913,7 +910,7 @@ void EthercatNode::initialize_layer_processor() {
     }
     
     if (!axis5_found) {
-        RCLCPP_ERROR(this->get_logger(), "未找到axis5，使用默认索引0");
+        print_error("未找到axis5，使用默认索引0");
         axis5_index = 0; // 如果找不到，可能需要调整这个默认值
     }
     // // 查找axis5的索引
@@ -950,7 +947,7 @@ void EthercatNode::handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg
     if (layer_processor_) {
         layer_processor_->process_layer_command(layer);
     } else {
-        RCLCPP_ERROR(this->get_logger(), "层指令处理器未初始化");
+        print_error("层指令处理器未初始化");
     }
 
     // 调试信息（todo删）：打印当前所有轴的状态
@@ -1020,7 +1017,7 @@ void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg)
     // 解析命令
     DOControlCommand do_cmd;
     if (!parse_do_control_command(command, do_cmd)) {
-        RCLCPP_ERROR(this->get_logger(), "DO控制命令解析失败: %s", command.c_str());
+        print_error("DO控制命令解析失败: " + command);
         return;
     }
     
@@ -1036,8 +1033,7 @@ void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg)
         // 发布状态更新
         publish_io_status();
     } else {
-        RCLCPP_ERROR(this->get_logger(), "DO控制失败: %s, 错误码: %d", 
-                     command.c_str(), result);
+        print_error("DO控制失败: " + command + ", 错误码: " + std::to_string(result));
     }
 }
 
@@ -1054,7 +1050,7 @@ void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedP
     double speed;
     
     if (!parse_jog_speed_command(command, axis_name, speed)) {
-        RCLCPP_ERROR(this->get_logger(), "点动速度命令解析失败: %s", command.c_str());
+        print_error("点动速度命令解析失败: " + command);
         return;
     }
     
@@ -1071,10 +1067,7 @@ void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedP
                 status_msg.data = "轴 " + axis_name + " 点动速度设置为: " + std::to_string(speed) + " mm/s";
                 system_status_pub_->publish(status_msg);
             } else {
-                RCLCPP_ERROR(this->get_logger(), "设置轴 %s 的点动速度失败", axis_name.c_str());
-                if (fault_manager_) {
-                    fault_manager_->add_system_error("设置轴 " + axis_name + " 点动速度失败");
-                }
+                print_error("设置轴 " + axis_name + " 的点动速度失败");
             }
             axis_found = true;
             break;
@@ -1082,7 +1075,7 @@ void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedP
     }
     
     if (!axis_found) {
-        RCLCPP_ERROR(this->get_logger(), "未找到轴: %s", axis_name.c_str());
+        print_error("未找到轴: " + axis_name);
     }
 }
 
@@ -1091,7 +1084,7 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
     // 格式: "axis_name:speed" 例如: "axis1_1:30.5"
     size_t colon_pos = command.find(':');
     if (colon_pos == std::string::npos) {
-        RCLCPP_ERROR(this->get_logger(), "无效命令格式，应为 '轴名:速度'");
+        print_error("无效命令格式，应为 '轴名:速度'");
         return false;
     }
     
@@ -1105,7 +1098,7 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
     speed_str.erase(speed_str.find_last_not_of(" \t") + 1);
     
     if (axis_name.empty() || speed_str.empty()) {
-        RCLCPP_ERROR(this->get_logger(), "轴名或速度值为空");
+        print_error("轴名或速度值为空");
         return false;
     }
     
@@ -1113,7 +1106,7 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
         speed = std::stod(speed_str);
         return true;
     } catch (const std::exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "速度值转换失败: %s, 错误: %s", speed_str.c_str(), e.what());
+        print_error("速度值转换失败: " + speed_str + ", 错误: " + e.what());
         return false;
     }
 }
@@ -1197,9 +1190,10 @@ void EthercatNode::handle_axis3_width_command(const std_msgs::msg::Float64::Shar
     
     // 验证板宽范围 (使用axis3的专用范围)
     if (target_width < axis3_min_width_ || target_width > axis3_max_width_) {
-        RCLCPP_ERROR(this->get_logger(), 
-                    "[Axis3] 无效板宽: %.2fcm, 有效范围: %.2f-%.2fcm", 
-                    target_width, axis3_min_width_, axis3_max_width_);
+        std::stringstream err_ss;
+        err_ss << "[Axis3] 无效板宽: " << std::fixed << std::setprecision(2) << target_width
+               << "cm, 有效范围: " << axis3_min_width_ << "-" << axis3_max_width_ << "cm";
+        print_error(err_ss.str());
         return;
     }
     
@@ -1247,7 +1241,7 @@ void EthercatNode::execute_axis3_width_adjustment() {
     // 查找axis3的索引
     int axis3_index = find_axis3_index();
     if (axis3_index == -1) {
-        RCLCPP_ERROR(this->get_logger(), "未找到axis3，无法执行板宽调整");
+        print_error("未找到axis3，无法执行板宽调整");
         axis3_width_moving_ = false;
         return;
     }
@@ -1313,9 +1307,10 @@ void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::Shar
     
     // 验证板宽范围
     if (!validate_board_width(target_width)) {
-        RCLCPP_ERROR(this->get_logger(), 
-                    "无效板宽: %.2fcm, 有效范围: %.2f-%.2fcm", 
-                    target_width, min_board_width_, max_board_width_);
+        std::stringstream err_ss;
+        err_ss << "无效板宽: " << std::fixed << std::setprecision(2) << target_width
+               << "cm, 有效范围: " << min_board_width_ << "-" << max_board_width_ << "cm";
+        print_error(err_ss.str());
         return;
     }
     
@@ -1347,8 +1342,10 @@ bool EthercatNode::validate_board_width(double width) {
     // 检查分辨率
     double remainder = fmod(width * 100, board_width_resolution_ * 100);
     if (fabs(remainder) > 0.001) {  // 浮点数精度容差
-        RCLCPP_WARN(this->get_logger(), 
-                   "板宽%.2fcm超出分辨率%.2fcm，将四舍五入", width, board_width_resolution_);
+        std::stringstream warn_ss;
+        warn_ss << "板宽" << std::fixed << std::setprecision(2) << width 
+                << "cm超出分辨率" << board_width_resolution_ << "cm，将四舍五入";
+        print_warning(warn_ss.str());
     }
     
     return true;
@@ -1406,7 +1403,7 @@ void EthercatNode::execute_board_width_adjustment() {
     // 查找axis4（板宽调整轴）
     int axis4_index = find_axis4_index();
     if (axis4_index == -1) {
-        RCLCPP_ERROR(this->get_logger(), "未找到axis4，无法执行板宽调整");
+        print_error("未找到axis4，无法执行板宽调整");
         board_width_moving_ = false;
         return;
     }

@@ -2,7 +2,7 @@
 """
 ROS2 ByteMultiArray 发布脚本 - 支持多种指令
 支持入库指令（0x0101）、出库指令（0x0103）、结束作业指令（0x0107）、
-轴点动指令（0x010D）和IO控制指令（0x0115）
+轴点动指令（0x010D）、IO控制指令（0x0115）、清除系统故障（0x0117）和清除轴故障（0x011B）
 """
 
 import rclpy
@@ -15,8 +15,9 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='发布ByteMultiArray消息')
     parser.add_argument('--command', type=str, required=True, 
-                        choices=['start', 'warehouse', 'outbound', 'stop', 'jog', 'io', 'start_result'], 
-                        help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制) 或 start_result(开始结果)')
+                        choices=['start', 'warehouse', 'outbound', 'stop', 'jog', 'io', 
+                                'start_result', 'clear_system_fault', 'clear_axis_fault'], 
+                        help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制) 或 start_result(开始结果) 或 clear_system_fault(清除系统故障) 或 clear_axis_fault(清除轴故障)')
     parser.add_argument('--layer', type=int, default=1,
                        help='层高（仅warehouse和outbound指令有效，默认1）')
     parser.add_argument('--width', type=float, default=15.0,
@@ -217,6 +218,40 @@ def main():
         layout.dim[0].stride = 1
         
         node.get_logger().info(f'构造IO控制指令: IO状态=0x{args.io_high:02X}{args.io_low:02X}')
+    
+    # +++ 新增：清除系统故障指令 (0x0117) +++
+    elif args.command == 'clear_system_fault':
+        # 清除系统故障和告警指令 (0x0117)
+        # 格式: [指令码低位0x17, 指令码高位0x01]
+        
+        msg_data = [
+            bytes([0x17]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x0117 = 清除系统故障和告警指令)
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'clear_system_fault_command'
+        layout.dim[0].size = 2
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info('构造清除系统故障和告警指令: 指令码 0x0117')
+    
+    # +++ 新增：清除轴故障指令 (0x011B) +++
+    elif args.command == 'clear_axis_fault':
+        # 清除轴故障指令 (0x011B)
+        # 格式: [指令码低位0x1B, 指令码高位0x01]
+        
+        msg_data = [
+            bytes([0x1B]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x011B = 清除轴故障指令)
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'clear_axis_fault_command'
+        layout.dim[0].size = 2
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info('构造清除轴故障指令: 指令码 0x011B')
     
     # 创建ByteMultiArray消息
     msg = ByteMultiArray()

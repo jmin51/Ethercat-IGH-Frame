@@ -51,17 +51,69 @@ void FaultManagementSystem::add_axis_fault(const std::string& axis_name, uint16_
     add_fault(axis_name, fault_code, description.empty() ? "轴故障" : description);
 }
 
+// 预定义的系统警告故障码映射
+uint16_t get_system_warning_code(const std::string& warning_msg) {
+    // DI/DO模块相关
+    if (warning_msg.find("DI模块已禁用") != std::string::npos) return 0x9001;
+    if (warning_msg.find("DO模块已禁用") != std::string::npos) return 0x9002;
+    
+    // 板宽相关警告
+    if (warning_msg.find("板宽") != std::string::npos && warning_msg.find("超出分辨率") != std::string::npos) return 0x9003;
+    
+    // 模式相关警告
+    if (warning_msg.find("手动模式下收到自动指令") != std::string::npos) return 0x9004;
+    if (warning_msg.find("未知控制命令") != std::string::npos) return 0x9005;
+    if (warning_msg.find("IO监控线程已在运行") != std::string::npos) return 0x9006;
+    
+    // 默认：未定义的警告使用通用码
+    return 0x9000;
+}
+
+// 预定义的系统错误故障码映射
+uint16_t get_system_error_code(const std::string& error_msg) {
+    // 轴相关错误
+    if (error_msg.find("未找到轴") != std::string::npos) return 0x9101;
+    if (error_msg.find("位移指令解析失败") != std::string::npos) return 0x9102;
+    if (error_msg.find("无效指令格式") != std::string::npos) return 0x9103;
+    if (error_msg.find("轴名或值为空") != std::string::npos) return 0x9104;
+    if (error_msg.find("数值转换失败") != std::string::npos) return 0x9105;
+    if (error_msg.find("设置轴") != std::string::npos && error_msg.find("点动速度失败") != std::string::npos) return 0x9106;
+    if (error_msg.find("速度值转换失败") != std::string::npos) return 0x9107;
+    
+    // Modbus/IO相关错误
+    if (error_msg.find("Modbus初始化失败") != std::string::npos) return 0x9108;
+    if (error_msg.find("创建IO监控线程失败") != std::string::npos) return 0x9109;
+    
+    // 层指令相关错误
+    if (error_msg.find("层指令处理器未初始化") != std::string::npos) return 0x910A;
+    
+    // DO控制相关错误
+    if (error_msg.find("DO控制命令解析失败") != std::string::npos) return 0x910B;
+    if (error_msg.find("DO控制失败") != std::string::npos) return 0x910C;
+    
+    // 点动相关错误
+    if (error_msg.find("点动速度命令解析失败") != std::string::npos) return 0x910D;
+    if (error_msg.find("轴名或速度值为空") != std::string::npos) return 0x910E;
+    
+    // 板宽相关错误
+    if (error_msg.find("无效板宽") != std::string::npos) return 0x910F;
+    if (error_msg.find("未找到axis3") != std::string::npos) return 0x9110;
+    if (error_msg.find("未找到axis4") != std::string::npos) return 0x9111;
+    if (error_msg.find("未找到axis5") != std::string::npos) return 0x9112;
+    
+    // 默认：未定义的错误使用通用码
+    return 0x9100;
+}
+
 void FaultManagementSystem::add_system_warning(const std::string& warning_msg) {
-    // 使用固定故障码，相同消息只上报一次
-    // 使用消息哈希的低8位作为子代码，确保不同消息有不同码，相同消息有相同码
-    uint16_t warning_code = 0x9001 + (std::hash<std::string>{}(warning_msg) & 0xFF);
+    // 使用预定义的固定故障码映射
+    uint16_t warning_code = get_system_warning_code(warning_msg);
     add_fault("system_warning", warning_code, warning_msg);
 }
 
 void FaultManagementSystem::add_system_error(const std::string& error_msg) {
-    // 使用固定故障码，相同消息只上报一次
-    // 使用消息哈希的低8位作为子代码，确保不同消息有不同码，相同消息有相同码
-    uint16_t error_code = 0x9101 + (std::hash<std::string>{}(error_msg) & 0xFF);
+    // 使用预定义的固定故障码映射
+    uint16_t error_code = get_system_error_code(error_msg);
     add_fault("system_error", error_code, error_msg);
 }
 
@@ -99,7 +151,8 @@ void FaultManagementSystem::clear_fault(const std::string& source, uint16_t code
 void FaultManagementSystem::clear_all_faults() {
     std::lock_guard<std::mutex> lock(fault_mutex_);
     fault_map_.clear();
-    // 无故障时不发布
+    // 清除后发布更新状态（发布 "0" 表示无故障）
+    publish_fault_status();
 }
 
 bool FaultManagementSystem::has_active_faults() const {
@@ -139,13 +192,8 @@ void FaultManagementSystem::publish_fault_status() {
         return;
     }
     
-    // 只有存在活动故障时才发布
-    if (!has_active_faults()) {
-        return;
-    }
-    
     auto msg = std_msgs::msg::String();
-    msg.data = get_fault_string();
+    msg.data = get_fault_string_internal();
     fault_publisher_->publish(msg);
 }
 
@@ -216,6 +264,32 @@ std::string FaultManagementSystem::get_fault_status_json() const {
 std::string FaultManagementSystem::generate_fault_key(const std::string& source, uint16_t code) const {
     std::stringstream ss;
     ss << source << ":" << std::hex << code;
+    return ss.str();
+}
+
+std::string FaultManagementSystem::get_fault_string_internal() const {
+    // 调用者必须已持有 fault_mutex_ 锁
+    
+    if (fault_map_.empty()) {
+        return "0";
+    }
+    
+    std::stringstream ss;
+    bool first = true;
+    
+    for (const auto& pair : fault_map_) {
+        if (!first) ss << ",";
+        first = false;
+        
+        size_t colon_pos = pair.first.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string source = pair.first.substr(0, colon_pos);
+            ss << source << ":" << "0x" 
+               << std::hex << std::setw(4) << std::setfill('0') 
+               << pair.second;
+        }
+    }
+    
     return ss.str();
 }
 
