@@ -95,8 +95,13 @@ class BusinessLogicProcessor(Node):
         self.last_layer_command = None  # 存储最后发送的层指令
         self.layer_command_sent = False  # 标记层指令是否已发送
 
+        # 新增：产品到位发布状态管理（0x0109）
+        self.product_arrival_cycle_active = False  # 是否处于产品到位发布周期中
+        self.product_arrival_published_in_cycle = False  # 本轮周期是否已发布过到位
+        self.product_arrival_phase = "idle"  # 当前阶段: idle/pre_warehouse/warehouse/post_warehouse
+
         # 常量定义
-        self.DELAY_BEFORE_STOP_MS = 5000
+        self.DELAY_BEFORE_STOP_MS = 1500
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
         self.OUTBOUND_DELAY_BEFORE_STOP_MS = 300
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
@@ -127,6 +132,14 @@ class BusinessLogicProcessor(Node):
         self.warehouse_completed_pub = self.create_publisher(Bool, '/warehouse_completed', 10)
         self.outbound_completed_pub = self.create_publisher(Bool, '/outbound_completed', 10)
         self.product_arrival_pub = self.create_publisher(Bool, '/product_arrival', 10)
+        
+        # 新增：订阅开始作业信号（用于启动产品到位发布周期）
+        self.start_operation_sub = self.create_subscription(
+            Bool,
+            '/start_operation_signal',
+            self.start_operation_signal_callback,
+            10
+        )
    
         # 创建订阅器
         self.io_status_sub = self.create_subscription(
@@ -265,6 +278,8 @@ class BusinessLogicProcessor(Node):
         self.target_layer = msg.data
         self.warehouse_process_requested = True
         self.warehouse_process_stop_requested = False
+        # 重置完成发布标志，确保下次入库可以正常发布完成消息
+        self.warehouse_completion_published = False
         self.get_logger().info(f'收到入库流程启动请求，目标层: {self.target_layer}')
 
     def warehouse_stop_callback(self, msg):
@@ -272,6 +287,39 @@ class BusinessLogicProcessor(Node):
         self._reset_key_do_signals()
         self.warehouse_process_stop_requested = True
         self.get_logger().info('收到入库流程停止请求')
+
+    def start_operation_signal_callback(self, msg):
+        """处理开始作业信号（0x0105收到后触发）"""
+        if msg.data:
+            self.get_logger().info('收到开始作业信号(0x0105)，启动产品到位发布周期')
+            # 启动产品到位发布周期
+            self.product_arrival_cycle_active = True
+            self.product_arrival_published_in_cycle = False
+            self.product_arrival_phase = "pre_warehouse"
+
+    def _handle_product_arrival_publication(self, buffer_in: bool):
+        """处理产品到位发布逻辑（0x0109）
+        
+        逻辑：
+        1. 开始作业(0x0105)到第一次入库开始前：只发布一次0x0109
+        2. 入库完成后到下一次入库开始前：只发布一次0x0109
+        """
+        # 如果没有处于产品到位发布周期，不处理
+        if not self.product_arrival_cycle_active:
+            return
+        
+        # 如果本轮已经发布过到位信息，不重复发布
+        if self.product_arrival_published_in_cycle:
+            return
+        
+        # 检查是否有产品到位
+        if buffer_in:
+            # 发布产品到位消息
+            arrival_msg = Bool()
+            arrival_msg.data = True
+            self.product_arrival_pub.publish(arrival_msg)
+            self.product_arrival_published_in_cycle = True
+            self.get_logger().info(f'✅ 检测到产品到位，发布0x0109（阶段: {self.product_arrival_phase}）')
 
     def outbound_start_callback(self, msg):
         """处理出库启动命令"""
@@ -286,6 +334,8 @@ class BusinessLogicProcessor(Node):
         self.source_layer = msg.data
         self.outbound_process_requested = True
         self.outbound_process_stop_requested = False
+        # 重置完成发布标志，确保下次出库可以正常发布完成消息
+        self.outbound_completion_published = False
         self.get_logger().info(f'收到出库流程启动请求，源层: {self.source_layer}')
 
     def outbound_stop_callback(self, msg):
@@ -384,25 +434,10 @@ class BusinessLogicProcessor(Node):
             )
             self.previous_warehouse_state = self.warehouse_state
         
-        # === 修改点：替换原有的简单检测为有条件限制的检测 ===
-        # 条件：IDLE状态 + 未停止 + buffer_in为1
-        if (self.warehouse_state == WarehouseState.IDLE and 
-            not self.warehouse_process_stop_requested and 
-            buffer_in):
-            
-            # 添加时间间隔控制，避免频繁发送
-            current_time = time.time()
-            if not hasattr(self, 'last_product_arrival_time'):
-                self.last_product_arrival_time = 0
-
-            # 控制上报频率，至少间隔3秒
-            if current_time - self.last_product_arrival_time >= 3.0:
-                # 发布产品到位消息
-                arrival_msg = Bool()
-                arrival_msg.data = True
-                self.product_arrival_pub.publish(arrival_msg)
-                self.last_product_arrival_time = current_time
-                self.get_logger().info('✅ 检测到产品到位（IDLE状态+buffer_in=1），发布产品到位消息')
+        # === 产品到位发布逻辑（0x0109）===
+        # 情况1：入库前/出库前，收到产品到位，发布一次
+        # 情况2：入库/出库流程完成后，收到产品到位，再次发布，形成循环
+        self._handle_product_arrival_publication(buffer_in)
     
         # 处理停止请求
         if self.warehouse_process_stop_requested:
@@ -419,6 +454,10 @@ class BusinessLogicProcessor(Node):
                 self._reset_key_do_signals()  # 重置关键DO信号，确保安全状态
                 self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
                 self.warehouse_process_requested = False
+                # 更新产品到位发布阶段为"入库中"（入库前检测到到位仍可发布）
+                if self.product_arrival_cycle_active and self.product_arrival_phase == "pre_warehouse":
+                    self.product_arrival_phase = "warehouse"
+                    self.get_logger().info('入库流程启动，更新产品到位发布阶段为: warehouse')
                 self.get_logger().info(f'入库流程启动，进入等待入库状态，目标层: {self.target_layer}')
 
         elif self.warehouse_state == WarehouseState.WAIT_FOR_ENTRY:
@@ -469,8 +508,8 @@ class BusinessLogicProcessor(Node):
             if self.conveyor_in_then_out_delay_started:
                 self.conveyor_in_then_out_delay_counter += 1
                 
-                # 1秒延迟（10个周期，每周期100ms）
-                if self.conveyor_in_then_out_delay_counter >= 10:
+                # 0.2秒延迟（4个周期，每周期100ms）
+                if self.conveyor_in_then_out_delay_counter >= 2:
                     board_in_position = True
                     self.conveyor_in_then_out_delay_started = False
                     self.get_logger().info('条件二延迟结束，认为板子到位')
@@ -610,6 +649,12 @@ class BusinessLogicProcessor(Node):
                     self.warehouse_completion_published = True
                     self.get_logger().info('入库流程完成，发布完成消息')
                 self.get_logger().info('回到初始状态，等待下一次入库')
+                
+                # 入库流程完成后，重置产品到位发布状态，允许再次发布
+                if self.product_arrival_cycle_active:
+                    self.product_arrival_published_in_cycle = False
+                    self.product_arrival_phase = "post_warehouse"
+                    self.get_logger().info('入库流程完成，重置产品到位发布状态，等待下一轮产品到位')
 
     def process_outbound_logic(self):
         """处理出库业务流程"""
@@ -802,6 +847,12 @@ class BusinessLogicProcessor(Node):
                     if hasattr(self, 'outbound_conveyor_started'):
                         self.outbound_conveyor_started = False
                     self.get_logger().info('出库流程完成')
+                    
+                    # 出库流程完成后，重置产品到位发布状态，允许再次发布
+                    if self.product_arrival_cycle_active:
+                        self.product_arrival_published_in_cycle = False
+                        self.product_arrival_phase = "post_outbound"
+                        self.get_logger().info('出库流程完成，重置产品到位发布状态，等待下一轮产品到位')
 
     def check_outbound_condition(self) -> bool:
         """检查出库启动条件"""
@@ -939,6 +990,10 @@ class BusinessLogicProcessor(Node):
 
         # 重置DO命令发送状态，允许重新发送
         self.reset_do_command_state()
+        
+        # 关键修复：重置完成发布标志，确保下次流程能正常发布
+        self.warehouse_completion_published = False
+        self.outbound_completion_published = False
         
         # 清空待处理命令
         self.pending_commands.clear()

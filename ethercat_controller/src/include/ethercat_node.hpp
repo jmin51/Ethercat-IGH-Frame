@@ -186,6 +186,9 @@ private:
     // 注意：axis3可能需要独立的机械参数（导程、减速比），需根据实际情况设置
     double axis3_screw_lead_;
     double axis3_gear_ratio_;
+    
+    // 板宽校正标志（启动后读取实际位置校正板宽）
+    bool board_width_calibrated_;  // 板宽是否已校正
 
     // 板宽控制方法
     void initialize_board_width_parameters();
@@ -204,6 +207,10 @@ private:
     int find_axis3_index();
     void publish_axis3_width_status(double current_width, double target_width,
                                    bool moving, const std::string& status);
+    bool are_all_axes_in_auto_mode();  // 检查所有轴是否都在自动模式
+    
+    // +++ 新增：根据实际位置校正板宽 +++
+    void calibrate_board_width_from_position();
 };
 
 // 全局变量声明

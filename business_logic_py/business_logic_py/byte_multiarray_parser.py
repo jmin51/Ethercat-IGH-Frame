@@ -30,6 +30,12 @@ class CommandType(Enum):
     UPDATE_DI_STATUS = 0x0111  # 更新输入IO状态
     UPDATE_DO_STATUS = 0x0113  # 更新输出IO状态
 
+# 故障码定义（业务逻辑层）
+class FaultCode(Enum):
+    """故障码定义 - 高字节0xE0表示业务逻辑层错误"""
+    NO_FAULT = 0x0000           # 无故障
+    BOARD_WIDTH_TIMEOUT = 0xE001  # 板宽调整超时
+    
 class ByteMultiArrayParser(Node):
     def __init__(self):
         super().__init__('byte_multiarray_parser')
@@ -94,6 +100,35 @@ class ByteMultiArrayParser(Node):
         # 新增：创建统一控制状态发布器
         self.integrated_pub = self.create_publisher(ByteMultiArray, '/integrated_control_status', 10)
         
+        # 新增：创建开始作业信号发布器（用于通知business_logic_processor启动产品到位周期）
+        self.start_operation_signal_pub = self.create_publisher(Bool, '/start_operation_signal', 10)
+        
+        # 新增：订阅板宽调整状态话题
+        self.board_width_status_sub = self.create_subscription(
+            String,
+            '/board_width_status',
+            self.board_width_status_callback,
+            10
+        )
+        self.axis3_width_status_sub = self.create_subscription(
+            String,
+            '/axis3_width_status',
+            self.axis3_width_status_callback,
+            10
+        )
+        
+        # 新增：板宽调整状态追踪
+        self.axis4_width_adjusting = False
+        self.axis3_width_adjusting = False
+        self.axis4_width_completed = False
+        self.axis3_width_completed = False
+        self.pending_start_result = False  # 标记是否有待发布的0x0106响应
+        self.start_result_wait_start_time = None  # 等待开始时间
+        self.START_RESULT_TIMEOUT = 100.0  # 超时时间100秒
+        
+        # 新增：创建定时器检查超时
+        self.start_result_timer = self.create_timer(0.5, self.check_start_result_timeout)
+        
         # 新增：IO状态变量
         self.current_di_bits = 0  # 32位DI状态位掩码
         self.current_do_bits = 0  # 32位DO状态位掩码
@@ -109,6 +144,11 @@ class ByteMultiArrayParser(Node):
         
         # 新增：当前故障码存储
         self.current_fault_code = 0x0000  # 默认无故障
+        self.last_published_fault_code = 0x0000  # 上次发布的故障码（避免重复上报）
+        
+        # 新增：命令追踪（用于故障时回包）
+        self.pending_command = None  # 当前待响应的命令: 0x0101/0x0103/0x0105
+        self.pending_response_sent = False  # 标记是否已发送故障响应
         
         self.get_logger().info('ByteMultiArray解析器已启动（支持统一IO状态发布和业务完成状态发布）')
 
@@ -125,6 +165,108 @@ class ByteMultiArrayParser(Node):
                 self.get_logger().warn(f'无法转换为整数: {value}')
                 return 0
 
+    def board_width_status_callback(self, msg):
+        """处理axis4板宽状态回调"""
+        try:
+            status_str = msg.data
+            # 解析状态字符串: "current:XX,target:XX,moving:true/false,status:XXX"
+            status_dict = {}
+            for item in status_str.split(','):
+                if ':' in item:
+                    key, value = item.split(':', 1)
+                    status_dict[key.strip()] = value.strip()
+            
+            moving = status_dict.get('moving', 'false') == 'true'
+            status = status_dict.get('status', '')
+            
+            # 更新调整状态
+            if moving:
+                self.axis4_width_adjusting = True
+                self.axis4_width_completed = False
+            elif self.axis4_width_adjusting and not moving:
+                # 从运动中变为停止，表示调整完成
+                self.axis4_width_adjusting = False
+                self.axis4_width_completed = True
+                self.get_logger().info('Axis4板宽调整完成')
+                # 检查是否可以发布0x0106
+                self.check_and_publish_start_result()
+            elif '已到达目标板宽' in status or '调整完成' in status:
+                self.axis4_width_completed = True
+                self.axis4_width_adjusting = False
+                self.get_logger().info('Axis4板宽已到达目标值（无需调整）')
+                # 检查是否可以发布0x0106
+                self.check_and_publish_start_result()
+                
+        except Exception as e:
+            self.get_logger().error(f'板宽状态解析错误: {e}')
+
+    def axis3_width_status_callback(self, msg):
+        """处理axis3板宽状态回调"""
+        try:
+            status_str = msg.data
+            # 解析状态字符串: "current:XX,target:XX,moving:true/false,status:XXX"
+            status_dict = {}
+            for item in status_str.split(','):
+                if ':' in item:
+                    key, value = item.split(':', 1)
+                    status_dict[key.strip()] = value.strip()
+            
+            moving = status_dict.get('moving', 'false') == 'true'
+            status = status_dict.get('status', '')
+            
+            # 更新调整状态
+            if moving:
+                self.axis3_width_adjusting = True
+                self.axis3_width_completed = False
+            elif self.axis3_width_adjusting and not moving:
+                # 从运动中变为停止，表示调整完成
+                self.axis3_width_adjusting = False
+                self.axis3_width_completed = True
+                self.get_logger().info('Axis3板宽调整完成')
+                # 检查是否可以发布0x0106
+                self.check_and_publish_start_result()
+            elif '已到达目标板宽' in status or '调整完成' in status:
+                self.axis3_width_completed = True
+                self.axis3_width_adjusting = False
+                self.get_logger().info('Axis3板宽已到达目标值（无需调整）')
+                # 检查是否可以发布0x0106
+                self.check_and_publish_start_result()
+                
+        except Exception as e:
+            self.get_logger().error(f'Axis3板宽状态解析错误: {e}')
+
+    def check_and_publish_start_result(self):
+        """检查两个轴是否都完成，如果是则发布0x0106响应"""
+        if self.pending_start_result and self.axis4_width_completed and self.axis3_width_completed:
+            self.publish_start_result()
+            self.pending_start_result = False
+            self.start_result_wait_start_time = None
+            # 重置完成标志
+            self.axis4_width_completed = False
+            self.axis3_width_completed = False
+            self.get_logger().info('Axis3和Axis4板宽调整均完成，发布0x0106响应')
+
+    def check_start_result_timeout(self):
+        """检查0x0106响应是否超时"""
+        if not self.pending_start_result:
+            return
+        
+        if self.start_result_wait_start_time is None:
+            self.start_result_wait_start_time = time.time()
+            return
+        
+        elapsed = time.time() - self.start_result_wait_start_time
+        if elapsed > self.START_RESULT_TIMEOUT:
+            # 超时，强制发布0x0106，并附带板宽调整超时故障码
+            fault_code = FaultCode.BOARD_WIDTH_TIMEOUT.value
+            self.get_logger().warn(f'板宽调整等待超时({self.START_RESULT_TIMEOUT}秒)，强制发布0x0106响应，故障码=0x{fault_code:04X}')
+            self.publish_start_result(extra_fault_code=fault_code)
+            self.pending_start_result = False
+            self.start_result_wait_start_time = None
+            # 重置完成标志
+            self.axis4_width_completed = False
+            self.axis3_width_completed = False
+
     def fault_callback(self, msg):
         """处理故障码话题回调，存储当前故障码状态"""
         try:
@@ -135,8 +277,10 @@ class ByteMultiArrayParser(Node):
             fault_code_combined = 0x0000  # 默认无故障
 
             if fault_data_str != "0" and fault_data_str:
+                # 尝试解析多个轴的故障码。这里采用一种策略：取第一个非零错误码，或进行位组合。
+                # 示例：简单取第一个遇到的错误码（根据实际需求调整逻辑）。
                 import re
-                # 匹配模式：0xXXXX
+                # 匹配模式：轴名:0xXXXX
                 pattern = r'0x([0-9A-Fa-f]+)'
                 matches = re.findall(pattern, fault_data_str)
                 if matches:
@@ -154,18 +298,65 @@ class ByteMultiArrayParser(Node):
             # 故障变化时记录日志
             if fault_code_combined != 0:
                 self.get_logger().warn(f'当前系统故障码: 0x{fault_code_combined:04X}')
+                
+                # 上报119前，先回包待处理的命令（102/104/106），带故障码
+                self._send_pending_response_with_fault(fault_code_combined)
+                
                 self.publish_fault_status(fault_code_combined)
+            else:
+                # 故障已清除，重置上次发布的故障码记录
+                if self.last_published_fault_code != 0x0000:
+                    self.get_logger().info('系统故障已清除，重置故障码发布记录')
+                    self.last_published_fault_code = 0x0000
 
         except Exception as e:
             self.get_logger().error(f'故障码处理错误: {e}')
-
+    
+    def _send_pending_response_with_fault(self, fault_code):
+        """故障时回包待处理的命令响应（带故障码）"""
+        try:
+            # 情况1: 有待处理的入库命令(101)未回102
+            if self.pending_command == 0x0101 and not self.pending_response_sent:
+                self.get_logger().warn(f'故障时回包102(入库响应)，故障码=0x{fault_code:04X}')
+                self.publish_command_response(0x0102, fault_code)
+                self.pending_response_sent = True
+            
+            # 情况2: 有待处理的出库命令(103)未回104  
+            elif self.pending_command == 0x0103 and not self.pending_response_sent:
+                self.get_logger().warn(f'故障时回包104(出库响应)，故障码=0x{fault_code:04X}')
+                self.publish_command_response(0x0104, fault_code)
+                self.pending_response_sent = True
+            
+            # 情况3: 有待处理的开始作业命令(105)未回106
+            elif self.pending_start_result:
+                # 105的特殊处理：正在等待板宽调整完成，故障时立即回106带故障码
+                self.get_logger().warn(f'故障时回包106(开始作业响应)，故障码=0x{fault_code:04X}')
+                self.publish_command_response(0x0106, fault_code)
+                self.pending_start_result = False
+                self.start_result_wait_start_time = None
+                # 重置板宽调整状态
+                self.axis4_width_adjusting = False
+                self.axis3_width_adjusting = False
+                self.axis4_width_completed = False
+                self.axis3_width_completed = False
+                
+        except Exception as e:
+            self.get_logger().error(f'故障时回包失败: {e}')
 
     def publish_fault_status(self, fault_code):
-        """发布故障状态归一化消息 (命令码0x0119)，只在有故障时上报"""
+        """发布故障状态归一化消息 (命令码0x0119)，只在有故障时上报，相同故障码只返回一次"""
         try:
             # 无故障时不上报
             if fault_code == 0x0000:
                 return
+            
+            # 检查是否与上次发布的故障码相同，相同则跳过（避免重复上报）
+            if fault_code == self.last_published_fault_code:
+                self.get_logger().debug(f'故障码0x{fault_code:04X}已发布过，跳过重复上报')
+                return
+            
+            # 记录本次发布的故障码
+            self.last_published_fault_code = fault_code
             
             # 构建4字节消息 (小端序)
             # 格式: [命令码低8位, 命令码高8位, 故障码低8位, 故障码高8位]
@@ -213,8 +404,13 @@ class ByteMultiArrayParser(Node):
             current_state = msg.data
             # 检测状态变化（从False变为True）
             if current_state:
-                self.publish_warehouse_completion(0)  # 0代表成功
-                self.get_logger().info('检测到入库流程完成，发布完成消息')
+                # 正常完成，回102带故障码0
+                self.publish_command_response(0x0102, 0x0000)
+                self.get_logger().info('检测到入库流程完成，发布102响应(正常)')
+                # 重置待处理命令状态
+                if self.pending_command == 0x0101:
+                    self.pending_command = None
+                    self.pending_response_sent = False
             
         except Exception as e:
             self.get_logger().error(f'入库完成状态处理错误: {e}')
@@ -225,8 +421,13 @@ class ByteMultiArrayParser(Node):
             current_state = msg.data
             # 检测状态变化（从False变为True）
             if current_state:
-                self.publish_outbound_completion(0)  # 0代表成功
-                self.get_logger().info('检测到出库流程完成，发布完成消息')
+                # 正常完成，回104带故障码0
+                self.publish_command_response(0x0104, 0x0000)
+                self.get_logger().info('检测到出库流程完成，发布104响应(正常)')
+                # 重置待处理命令状态
+                if self.pending_command == 0x0103:
+                    self.pending_command = None
+                    self.pending_response_sent = False
         except Exception as e:
             self.get_logger().error(f'出库完成状态处理错误: {e}')
             
@@ -243,19 +444,23 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'产品到位处理错误: {e}')
 
     def publish_product_arrival(self):
-        """发布产品到位归一化消息 (0x0109) - 2字节小端序"""
+        """发布产品到位归一化消息 (0x0109) - 4字节小端序"""
         try:
-            # 构建2字节消息：命令码0x0109（小端序）
-            message_data = bytearray(2)
-            message_data[0] = 0x09  # 低字节：0x09
-            message_data[1] = 0x01  # 高字节：0x01
+            # 构建4字节消息：命令码0x0109 + 2字节数据0x0000（小端序）
+            # ByteMultiArray.data 需要是 bytes 类型的列表
+            message_data = [
+                bytes([0x09]),  # 命令码低字节
+                bytes([0x01]),  # 命令码高字节
+                bytes([0x00]),  # 数据低字节
+                bytes([0x00])   # 数据高字节
+            ]
             
             # 创建并发布消息
             msg = ByteMultiArray()
-            msg.data = bytes(message_data)
+            msg.data = message_data
             self.integrated_pub.publish(msg)
             
-            self.get_logger().debug('发布产品到位归一化消息: 0x09 0x01')
+            self.get_logger().debug('发布产品到位归一化消息: 0x09 0x01 0x00 0x00')
             
         except Exception as e:
             self.get_logger().error(f'发布产品到位消息失败: {e}')
@@ -568,6 +773,12 @@ class ByteMultiArrayParser(Node):
 
     def process_start_operation(self, payload):
         """处理开始作业命令 (0x0105) - /control_command -> start_auto，并解析宽度信息"""
+        # 0. 首先发布开始作业信号（启动产品到位发布周期）
+        start_signal = Bool()
+        start_signal.data = True
+        self.start_operation_signal_pub.publish(start_signal)
+        self.get_logger().info('发布开始作业信号(0x0105)，启动产品到位发布周期')
+        
         # 1. 发布开始自动模式命令
         command_str = "start_auto"
         msg = String()
@@ -590,36 +801,74 @@ class ByteMultiArrayParser(Node):
 
             self.get_logger().info(f'解析到宽度信息: 原始值={width_integer}, 实际值={actual_width_cm}cm')
 
-            # 发布到 axis4 板宽控制话题
+            # ========== 关键修复：先设置等待状态，再下发命令 ==========
+            # 避免竞态条件：ethercat_node处理太快，状态在设置标志前就发布了
+            
+            # 1. 先重置板宽完成状态并标记等待（必须在publish之前！）
+            self.axis4_width_completed = False
+            self.axis3_width_completed = False
+            self.axis4_width_adjusting = False
+            self.axis3_width_adjusting = False
+            self.pending_start_result = True
+            self.start_result_wait_start_time = time.time()
+            self.get_logger().info('准备下发板宽命令，已设置等待标志（竞态条件修复）')
+
+            # 2. 再下发 axis4 板宽控制话题
             width_msg_axis4 = Float64()
             width_msg_axis4.data = actual_width_cm
             self.board_width_pub.publish(width_msg_axis4)
             self.get_logger().info(f'已下发axis4板宽命令: {actual_width_cm}cm')
 
-            # 发布到 axis3 板宽控制话题
+            # 3. 再下发 axis3 板宽控制话题
             width_msg_axis3 = Float64()
             width_msg_axis3.data = actual_width_cm
             self.axis3_width_pub.publish(width_msg_axis3)
             self.get_logger().info(f'已下发axis3板宽命令: {actual_width_cm}cm')
+            
+            self.get_logger().info('等待axis3和axis4调整完成后发布0x0106响应')
         else:
             self.get_logger().warn('开始作业命令负载长度不足，需要至少4字节，仅启动自动模式。')
+            # 没有板宽调整，直接发布0x0106
+            self.publish_start_result()
 
-        # 3. 发布开始结果响应 (0x0106)
-        self.publish_start_result()
+    def publish_start_result(self, extra_fault_code=None):
+        """发布开始结果响应 (命令码0x0106)，根据/fault_code反馈决定异常码
+        
+        Args:
+            extra_fault_code: 额外的故障码（如板宽调整超时），优先级高于系统故障码
+        """
+        try:
+            # 异常码优先级：extra_fault_code > current_fault_code > 0x0000
+            if extra_fault_code is not None and extra_fault_code != 0:
+                error_code = extra_fault_code
+            elif self.current_fault_code != 0:
+                error_code = self.current_fault_code
+            else:
+                error_code = 0x0000
+            
+            # 使用通用响应函数发布106
+            self.publish_command_response(0x0106, error_code)
+            
+        except Exception as e:
+            self.get_logger().error(f'发布开始结果响应失败: {e}')
 
-    def publish_start_result(self):
-        """发布开始结果响应 (命令码0x0106)，根据/fault_code反馈决定异常码"""
+    def publish_command_response(self, command_code, error_code):
+        """发布通用命令响应 (102/104/106等)，带指定故障码
+        
+        Args:
+            command_code: 响应命令码 (如 0x0102, 0x0104, 0x0106)
+            error_code: 故障码 (0x0000 表示正常，非0表示故障)
+        """
         try:
             # 构建4字节响应消息 (小端序)
             # 格式: [命令码低8位, 命令码高8位, 异常码低8位, 异常码高8位]
             message_data = []
             
-            # 命令码: 0x0106 (小端序: 0x06, 0x01)
-            message_data.append(bytes([0x06]))  # 低字节
-            message_data.append(bytes([0x01]))  # 高字节
+            # 命令码 (小端序)
+            message_data.append(bytes([command_code & 0xFF]))      # 低字节
+            message_data.append(bytes([(command_code >> 8) & 0xFF]))  # 高字节
             
-            # 异常码: 有故障用故障码，无故障用0x0000
-            error_code = self.current_fault_code if self.current_fault_code != 0 else 0x0000
+            # 异常码 (小端序)
             message_data.append(bytes([error_code & 0xFF]))        # 低字节
             message_data.append(bytes([(error_code >> 8) & 0xFF])) # 高字节
             
@@ -627,8 +876,8 @@ class ByteMultiArrayParser(Node):
             layout = MultiArrayLayout()
             layout.data_offset = 0
             layout.dim = [MultiArrayDimension()]
-            layout.dim[0].label = 'start_result_response'
-            layout.dim[0].size = len(message_data)  # 应为4
+            layout.dim[0].label = 'command_response'
+            layout.dim[0].size = len(message_data)
             layout.dim[0].stride = 1
             
             # 创建并发布消息
@@ -636,13 +885,13 @@ class ByteMultiArrayParser(Node):
             msg.layout = layout
             msg.data = message_data
             
-            # 发布到统一状态话题
             self.integrated_pub.publish(msg)
             
-            self.get_logger().info(f'发布开始结果响应: 命令=0x0106, 异常码=0x{error_code:04X}')
+            cmd_name = {0x0102: '入库完成(102)', 0x0104: '出库完成(104)', 0x0106: '开始作业响应(106)'}.get(command_code, f'未知(0x{command_code:04X})')
+            self.get_logger().info(f'发布命令响应: {cmd_name}, 异常码=0x{error_code:04X}')
             
         except Exception as e:
-            self.get_logger().error(f'发布开始结果响应失败: {e}')
+            self.get_logger().error(f'发布命令响应失败: {e}')
 
     def process_write_io(self, payload):
         """处理写IO命令 (0x0115) - /do_control，支持状态翻转检测"""
@@ -764,6 +1013,11 @@ class ByteMultiArrayParser(Node):
         if len(payload) > 2:
             extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
             self.get_logger().info(f'忽略额外数据: {extra_data}')
+        
+        # 追踪命令：标记有待响应的101命令
+        self.pending_command = 0x0101
+        self.pending_response_sent = False
+        self.get_logger().debug('标记待响应命令: 0x0101（入库）')
             
     def process_notify_retrieval(self, payload):
         """处理通知取出命令 (0x0103) - /outbound_start，包含层号映射（1-41 映射到 -15 到 28）"""

@@ -175,15 +175,9 @@ protected:
     int32_t new_target_;              // 新目标位置
     
     void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd);
-    // {
-    //     const int32_t MAX_STEP = 30; // 最大步进脉冲数
-    //     int32_t error = target_pulses - joint_position_;
-    //     int32_t step = (abs(error) > MAX_STEP) ? 
-    //                   ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
-    //     // printf("轴 %s 在运动中!\n", axis_name_.c_str());
-    //     joint_position_ += step;
-    //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    // }
+    
+    // 获取最大步进脉冲数（子类可重写以支持不同限速）
+    virtual int32_t get_max_step() const { return 40; }
 
     uint16_t current_error_code_ = 0;  // 当前错误代码
 };

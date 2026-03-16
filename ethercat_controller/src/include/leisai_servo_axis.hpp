@@ -37,6 +37,9 @@ public:
     int get_leisai_specific_parameter() const;
     // 添加产品号获取函数
     uint32_t get_product_code() const override { return product_code_; }
+    
+    // 重写最大步长：axis3板宽调整限制速度，其他轴不限速（使用较大步长）
+    int32_t get_max_step() const override;
 
 private:
     // 雷赛特有实现

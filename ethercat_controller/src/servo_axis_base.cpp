@@ -231,6 +231,14 @@ bool ServoAxisBase::is_target_reached() const {
 void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
     const int32_t TOLERANCE = 50;
     int32_t error = target_pulses - joint_position_;
+    int32_t max_step = 0;  // 声明在函数顶部
+    int32_t step = 0;      // 声明在函数顶部
+    
+    // 速度打印计数器（每1000次打印一次，约1秒）
+    static std::map<std::string, int> print_counters;
+    static std::map<std::string, int32_t> last_positions;
+    int& counter = print_counters[axis_name_];
+    int32_t& last_pos = last_positions[axis_name_];
     
     if (abs(error) <= TOLERANCE) {
         if (!target_reached_) {
@@ -242,11 +250,24 @@ void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd)
         }
         joint_position_ = target_pulses; // 精确对齐
     } else {
-        const int32_t MAX_STEP = 40;
-        int32_t step = (abs(error) > MAX_STEP) ? 
-                      ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+        // 使用虚函数获取最大步长，支持不同轴不同限速
+        max_step = get_max_step();
+        step = (abs(error) > max_step) ? 
+               ((error > 0) ? max_step : -max_step) : error;
         joint_position_ += step;
         target_reached_ = false; // 离开目标位置
+        
+        // 定期打印速度信息（每3000个周期约3000ms）
+        counter++;
+        if (counter >= 3000) {
+            counter = 0;
+            // 计算实际速度: 脉冲差/周期 = 脉冲/s，再转换为mm/s
+            int32_t pos_diff = abs(joint_position_ - last_pos);
+            double speed_mm_per_s = pulses_to_displacement(pos_diff); // 1秒内移动的mm数
+            printf("[速度监控] 轴 %s: 步长=%d脉冲, 当前速度=%.2f mm/s (MAX_STEP=%d, error=%d)\n", 
+                   axis_name_.c_str(), step, speed_mm_per_s, max_step, error);
+            last_pos = joint_position_;
+        }
     }
     
     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);

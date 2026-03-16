@@ -406,15 +406,28 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     // 使用逐步逼近
     if (target_pulses_ != joint_position_) {
         gradual_approach(target_pulses_, domain1_pd);
+        // // 自动模式使用固定最大速度
+        // int32_t error = target_pulses_ - joint_position_;
         
-        // // 检查是否到达目标
-        // const int32_t TOLERANCE = 100;
-        // if (abs(joint_position_ - target_pulses_) <= TOLERANCE) {
+        // // 判断是否到达目标
+        // const int32_t TOLERANCE = 50;
+        // if (abs(error) <= TOLERANCE) {
         //     if (!target_reached_) {
-        //         printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
+        //         std::lock_guard<std::mutex> lock(flag_mutex_);
+        //         target_reached_flag_ = true;
         //         target_reached_ = true;
+        //         printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
         //     }
+        //     joint_position_ = target_pulses_; // 精确对齐
+        // } else {
+        //     const int32_t MAX_STEP = 40;
+        //     int32_t step = (abs(error) > MAX_STEP) ? 
+        //                   ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
+        //     joint_position_ += step;
+        //     target_reached_ = false;
         // }
+        
+        // EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
     }
     // if (displacement_updated_) {
     //     displacement_updated_ = false;
@@ -462,4 +475,17 @@ uint16_t HuichuanServoAxis::get_error_code() const {
 
 AxisState HuichuanServoAxis::get_current_state() const {
     return current_state_;
+}
+
+// 根据轴名返回最大步长：axis4(板宽调整)限速，axis5使用较大步长
+int32_t HuichuanServoAxis::get_max_step() const {
+    // axis4 是板宽调整轴，需要限制速度(MAX_STEP=40)
+    // axis5 使用较大步长(不限速)
+    int32_t max_step = 40;
+    if (axis_name_ == "axis4") {
+        max_step = 100;  // 板宽调整轴限速
+    } else {
+        max_step = 40;  // 默认限速
+    }
+    return max_step;
 }

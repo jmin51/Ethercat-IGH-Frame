@@ -517,3 +517,17 @@ uint16_t LeisaiServoAxis::get_error_code() const {
 AxisState LeisaiServoAxis::get_current_state() const {
     return current_state_;
 }
+
+// 根据轴名返回最大步长：axis3(板宽调整)限速，其他轴(点动轴)不限速
+int32_t LeisaiServoAxis::get_max_step() const {
+    // axis3 是板宽调整轴，需要限制速度(MAX_STEP=40)
+    // axis1_1, axis1_2, axis2_1, axis2_2 是点动轴，使用较大步长(不限速)
+    int32_t max_step = 40; // 默认值
+    if (axis_name_ == "axis3") {
+        max_step = 40;  // 板宽调整轴限速
+    } else {
+        max_step = 200; // 点动轴使用较大步长(实际不限速)
+    }
+    printf("[DEBUG] LeisaiServoAxis::get_max_step() 轴=%s, 返回=%d\n", axis_name_.c_str(), max_step);
+    return max_step;
+}

@@ -185,6 +185,11 @@ void EthercatNode::periodic_timer_callback() {
     if (fault_manager_) {
         fault_manager_->publish_fault_status();
     }
+    
+    // 4. 启动后校正板宽（所有轴进入自动模式后只执行一次）
+    if (!board_width_calibrated_ && are_all_axes_in_auto_mode()) {
+        calibrate_board_width_from_position();
+    }
 }
 
 void EthercatNode::handle_py_control_command(const std_msgs::msg::String::SharedPtr msg) {
@@ -238,6 +243,9 @@ void EthercatNode::init_axes(ec_master_t* master) {
     axis3_target_width_ = 15.0;
     axis3_width_moving_ = false;
     axis3_width_updated_.store(false);
+    
+    // 重置板宽校正标志（下次启动时重新校正）
+    board_width_calibrated_ = false;
 
     // 添加从站1：第二个雷赛双轴驱动器
     auto axis1_1 = ServoAxisFactory::create_servo_axis(
@@ -271,12 +279,12 @@ void EthercatNode::init_axes(ec_master_t* master) {
     for (auto& axis : servo_axes_) {
         std::string name = axis->get_name();
         if (name == "axis4") {
-            axis->set_jog_speed(5.0); // 将 axis4 的点动速度初始化为 5 mm/s
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 5.0 mm/s", name.c_str());
+            axis->set_jog_speed(8.0); // 将 axis4 的点动速度初始化为 8 mm/s
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 8.0 mm/s", name.c_str());
         } else if (name == "axis1_1" || name == "axis1_2" || name == "axis2_1" || name == "axis2_2") {
             // 示例：为 axis1_1 和 axis1_2 设置其他速度
-            axis->set_jog_speed(60.0);
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 60.0 mm/s", name.c_str());
+            axis->set_jog_speed(120.0);
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 120.0 mm/s", name.c_str());
         } else {
             // 其他轴保持默认速度（DEFAULT_JOG_SPEED，当前为20.0 mm/s）
             RCLCPP_DEBUG(this->get_logger(), "轴 %s 使用默认点动速度: %.1f mm/s", 
@@ -445,6 +453,11 @@ void EthercatNode::handle_control_command(const std::string& command) {
             axis->stop();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到停止命令");
+        // 清除所有系统故障和告警
+        if (fault_manager_) {
+            fault_manager_->clear_all_faults();
+            RCLCPP_INFO(this->get_logger(), "已清除所有系统故障和告警");
+        }
         
     } else if (command == CMD_CLEAR_FAULT) {
         // 清除故障
@@ -1171,6 +1184,9 @@ void EthercatNode::initialize_board_width_parameters() {
     axis3_width_moving_ = false;
     axis3_width_updated_ = false;
     
+    // 板宽校正标志初始化（启动后需要读取实际位置校正）
+    board_width_calibrated_ = false;
+    
     RCLCPP_INFO(this->get_logger(),
                "axis3板宽控制参数: 范围%.2f-%.2fcm, 导程%.2fmm, 减速比%.2f",
                axis3_min_width_, axis3_max_width_, axis3_screw_lead_, axis3_gear_ratio_);
@@ -1386,6 +1402,65 @@ double EthercatNode::calculate_displacement_from_width(double board_width_cm) {
 //     return current_board_width_ + width_change_cm;
 // }
 
+// +++ 新增：根据实际位置校正板宽（启动后执行一次）+++
+void EthercatNode::calibrate_board_width_from_position() {
+    // 检查轴是否已初始化
+    if (servo_axes_.empty()) {
+        return;
+    }
+    
+    int axis3_index = find_axis3_index();
+    int axis4_index = find_axis4_index();
+    
+    if (axis3_index == -1 || axis4_index == -1) {
+        RCLCPP_WARN(this->get_logger(), "板宽校正：未找到axis3或axis4，跳过校正");
+        board_width_calibrated_ = true;  // 标记为已校正，避免重复尝试
+        return;
+    }
+    
+    // 获取axis3和axis4的当前实际位置（脉冲）
+    int32_t axis3_actual_pos = servo_axes_[axis3_index]->get_actual_position();
+    int32_t axis4_actual_pos = servo_axes_[axis4_index]->get_actual_position();
+    
+    // 获取轴的减速比（从轴对象或成员变量）
+    double axis3_gear_ratio = 1.8;  // axis3减速比
+    double axis4_gear_ratio = 7.34; // axis4减速比
+    const double PULSES_PER_REV = 10000.0; // 10000脉冲/转
+    const double SCREW_LEAD = 10.0; // 丝杠导程10mm（假设两轴相同）
+    
+    // 脉冲转换为毫米位移：displacement(mm) = (pulses / 10000) / gear_ratio * screw_lead
+    // 即：电机转数 = 脉冲数/10000，输出转数 = 电机转数/减速比，位移 = 输出转数 * 导程
+    double axis3_displacement_mm = (axis3_actual_pos / PULSES_PER_REV) / axis3_gear_ratio * SCREW_LEAD;
+    double axis4_displacement_mm = (axis4_actual_pos / PULSES_PER_REV) / axis4_gear_ratio * SCREW_LEAD;
+    
+    // 根据位移计算板宽（15cm为基准，对应脉冲/位移为0）
+    // 机械关系：板宽变化1cm = 丝杠位移10mm（根据实际机械结构确认）
+    // axis3: 位移(mm) = (15.0 - target_width) * 10.0  →  反向: width = 15.0 - displacement/10.0
+    double calculated_axis3_width = 15.0 - axis3_displacement_mm / 10.0;
+    
+    // axis4: 位移(mm) = (target_width - 15.0) * 10.0  →  反向: width = 15.0 + displacement/10.0
+    double calculated_axis4_width = 15.0 + axis4_displacement_mm / 10.0;
+    
+    // 限制在有效范围内
+    calculated_axis3_width = std::max(axis3_min_width_, std::min(axis3_max_width_, calculated_axis3_width));
+    calculated_axis4_width = std::max(min_board_width_, std::min(max_board_width_, calculated_axis4_width));
+    
+    // 更新板宽值（取两个轴的平均值或分别更新）
+    axis3_current_width_ = calculated_axis3_width;
+    current_board_width_ = calculated_axis4_width;
+    
+    // 同时更新目标值为当前值（避免启动后突然运动）
+    axis3_target_width_ = calculated_axis3_width;
+    target_board_width_ = calculated_axis4_width;
+    
+    board_width_calibrated_ = true;
+    
+    RCLCPP_INFO(this->get_logger(), 
+                "板宽校正完成: axis3=%.2fcm (位置:%d脉冲, 位移:%.2fmm), axis4=%.2fcm (位置:%d脉冲, 位移:%.2fmm)",
+                axis3_current_width_, axis3_actual_pos, axis3_displacement_mm,
+                current_board_width_, axis4_actual_pos, axis4_displacement_mm);
+}
+
 int EthercatNode::find_axis4_index() {
     for (size_t i = 0; i < servo_axes_.size(); ++i) {
         if (servo_axes_[i]->get_name() == "axis4") {
@@ -1393,6 +1468,20 @@ int EthercatNode::find_axis4_index() {
         }
     }
     return -1;  // 未找到
+}
+
+// 检查所有轴是否都在自动模式
+bool EthercatNode::are_all_axes_in_auto_mode() {
+    if (servo_axes_.empty()) {
+        return false;  // 轴未初始化
+    }
+    
+    for (const auto& axis : servo_axes_) {
+        if (axis->get_current_state() != AxisState::AUTO_MODE) {
+            return false;  // 有轴不在自动模式
+        }
+    }
+    return true;  // 所有轴都在自动模式
 }
 
 void EthercatNode::execute_board_width_adjustment() {
@@ -1417,7 +1506,7 @@ void EthercatNode::execute_board_width_adjustment() {
     
     // 使用现有的位移命令接口控制电机
     // handle_axis_command(axis4_index, displacement_mm);
-    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0 + 2.0; // 15.0为板宽零点
+    double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0; // 15.0为板宽零点，无偏移
     handle_axis_command(axis4_index, absolute_displacement_mm);
     
     // 发布状态
