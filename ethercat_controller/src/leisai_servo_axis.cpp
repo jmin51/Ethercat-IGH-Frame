@@ -500,6 +500,16 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
     // 使用逐步逼近
     if (target_pulses_ != joint_position_) {
         gradual_approach(target_pulses_, domain1_pd);
+    } else {
+        // 已经到达目标位置，确保标志位被设置
+        const int32_t TOLERANCE = 50;
+        int32_t error = target_pulses_ - joint_position_;
+        if (abs(error) <= TOLERANCE && !target_reached_) {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = true;
+            target_reached_ = true;
+            printf("轴 %s 已到达目标位置!(雷赛自动模式)\n", axis_name_.c_str());
+        }
     }
 }
 
@@ -528,6 +538,5 @@ int32_t LeisaiServoAxis::get_max_step() const {
     } else {
         max_step = 200; // 点动轴使用较大步长(实际不限速)
     }
-    printf("[DEBUG] LeisaiServoAxis::get_max_step() 轴=%s, 返回=%d\n", axis_name_.c_str(), max_step);
     return max_step;
 }

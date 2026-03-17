@@ -406,8 +406,19 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
     // 使用逐步逼近
     if (target_pulses_ != joint_position_) {
         gradual_approach(target_pulses_, domain1_pd);
-        // // 自动模式使用固定最大速度
-        // int32_t error = target_pulses_ - joint_position_;
+    } else {
+        // 已经到达目标位置，确保标志位被设置
+        const int32_t TOLERANCE = 50;
+        int32_t error = target_pulses_ - joint_position_;
+        if (abs(error) <= TOLERANCE && !target_reached_) {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = true;
+            target_reached_ = true;
+            printf("轴 %s 已到达目标位置!(汇川自动模式)\n", axis_name_.c_str());
+        }
+    }
+    // // 自动模式使用固定最大速度
+    // int32_t error = target_pulses_ - joint_position_;
         
         // // 判断是否到达目标
         // const int32_t TOLERANCE = 50;
@@ -428,7 +439,7 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
         // }
         
         // EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    }
+    // }
     // if (displacement_updated_) {
     //     displacement_updated_ = false;
     //     target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
@@ -485,7 +496,7 @@ int32_t HuichuanServoAxis::get_max_step() const {
     if (axis_name_ == "axis4") {
         max_step = 100;  // 板宽调整轴限速
     } else {
-        max_step = 40;  // 默认限速
+        max_step = 80;  // 默认限速
     }
     return max_step;
 }
