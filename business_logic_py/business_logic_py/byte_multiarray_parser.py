@@ -84,7 +84,7 @@ class ByteMultiArrayParser(Node):
         )       
 
         # 创建原有的多个话题发布器
-        self.control_pub = self.create_publisher(String, '/control_command', 10)
+        self.control_pub = self.create_publisher(String, '/py_control_command', 10)  # 改为专用话题
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
         self.jog_speed_pub = self.create_publisher(String, '/jog_speed_command', 10)
         self.displacement_pub = self.create_publisher(String, '/displacement_command', 10)
@@ -292,22 +292,26 @@ class ByteMultiArrayParser(Node):
                         self.get_logger().warn(f'无法解析故障码: {matches[0]}')
                         fault_code_combined = 0xFFFF  # 未知错误
                         
-            # 存储当前故障码
-            self.current_fault_code = fault_code_combined
-            
-            # 故障变化时记录日志
-            if fault_code_combined != 0:
-                self.get_logger().warn(f'当前系统故障码: 0x{fault_code_combined:04X}')
+            # === 边沿检测：故障码变化时才处理 ===
+            if fault_code_combined != self.current_fault_code:
+                self.current_fault_code = fault_code_combined
                 
-                # 上报119前，先回包待处理的命令（102/104/106），带故障码
-                self._send_pending_response_with_fault(fault_code_combined)
-                
-                self.publish_fault_status(fault_code_combined)
+                # 故障变化时记录日志
+                if fault_code_combined != 0:
+                    self.get_logger().warn(f'当前系统故障码: 0x{fault_code_combined:04X}')
+                    
+                    # 上报119前，先回包待处理的命令（102/104/106），带故障码
+                    self._send_pending_response_with_fault(fault_code_combined)
+                    
+                    self.publish_fault_status(fault_code_combined)
+                else:
+                    # 故障已清除，重置上次发布的故障码记录
+                    if self.last_published_fault_code != 0x0000:
+                        self.get_logger().info('系统故障已清除，重置故障码发布记录')
+                        self.last_published_fault_code = 0x0000
             else:
-                # 故障已清除，重置上次发布的故障码记录
-                if self.last_published_fault_code != 0x0000:
-                    self.get_logger().info('系统故障已清除，重置故障码发布记录')
-                    self.last_published_fault_code = 0x0000
+                # 故障码未变化，静默处理（避免海量打印）
+                pass
 
         except Exception as e:
             self.get_logger().error(f'故障码处理错误: {e}')

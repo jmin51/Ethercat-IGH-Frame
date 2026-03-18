@@ -61,6 +61,9 @@ class BusinessLogicProcessor(Node):
         }
         # 添加状态变化计数器（避免频繁打印）
         self.state_change_counter = 0
+        
+        # POST_LIFT_PROCESSING 延迟计时
+        self.post_lift_delay_start = None
 
         # 控制标志
         self.warehouse_process_requested = False
@@ -101,7 +104,7 @@ class BusinessLogicProcessor(Node):
         self.product_arrival_phase = "idle"  # 当前阶段: idle/pre_warehouse/warehouse/post_warehouse
 
         # 常量定义
-        self.DELAY_BEFORE_STOP_MS = 1500
+        self.DELAY_BEFORE_STOP_MS = 800
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
         self.OUTBOUND_DELAY_BEFORE_STOP_MS = 300
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
@@ -122,9 +125,7 @@ class BusinessLogicProcessor(Node):
         self.do_command_sent = {}   # 标记DO命令是否已发送
         
         # 创建发布器
-        self.control_pub = self.create_publisher(String, '/control_command', 10)
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
-        self.displacement_pub = self.create_publisher(String, '/displacement_command', 10)
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
         self.layer_pub = self.create_publisher(Int8, '/layer_command', 10)
         
@@ -551,11 +552,10 @@ class BusinessLogicProcessor(Node):
         elif self.warehouse_state == WarehouseState.LIFT_MOVING:
             # 等待层移动完成
             if not self.layer_motion_completed:
-                # 每5秒打印一次等待状态（避免频繁打印）
-                self.state_change_counter += 1
-                if self.state_change_counter >= 50:  # 5秒打印一次
-                    self.state_change_counter = 0
+                # === 边缘触发：只在进入等待状态时打印一次 ===
+                if not getattr(self, '_waiting_layer_motion_printed', False):
                     self.get_logger().info('等待层移动完成...')
+                    self._waiting_layer_motion_printed = True
                 return  # 继续等待
             
             # 层移动完成后执行后续操作
@@ -564,31 +564,52 @@ class BusinessLogicProcessor(Node):
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
+            self._waiting_layer_motion_printed = False  # 重置边缘打印标志
             
             # 重要修改：立即转换到新的状态，避免重新进入等待
+            self.post_lift_delay_start = None  # 重置延迟计时器
             self.warehouse_state = WarehouseState.POST_LIFT_PROCESSING
             self.get_logger().info('进入层移动后处理状态')
 
         elif self.warehouse_state == WarehouseState.POST_LIFT_PROCESSING:
             """新增：层移动后的处理状态，避免状态循环"""
-            # 执行层移动完成后的操作
-            self.get_logger().info('入库流程：层移动完成，继续执行后续操作')
+            # === 分步骤执行，轴2_2正转和DO811之间有1秒延迟 ===
             
-            # 继续执行入库流程的后续步骤
-            self.send_do_control_once("812", True)  # 启动DO13皮带正转
+            # 步骤1：首次进入状态，执行前半部分操作
+            if self.post_lift_delay_start is None:
+                self.get_logger().info('入库流程：层移动完成，继续执行后续操作')
+                
+                # 执行前半部分操作
+                self.send_do_control_once("812", True)  # 启动DO13皮带正转
+                
+                # 启动轴2反转
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis2_1", "reverse",
+                    description="启动轴2_1反转"
+                ))
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis2_2", "forward",
+                    description="启动轴2_2正转"
+                ))
+                
+                # 记录延迟开始时间
+                self.post_lift_delay_start = time.time()
+                self.get_logger().info('等待1秒后激活DO气缸...')
+                return  # 继续等待
             
-            # 启动轴2反转
-            self.add_command(ControlAction(
-                CommandType.JOG, "axis2_1", "reverse",
-                description="启动轴2_1反转"
-            ))
-            self.add_command(ControlAction(
-                CommandType.JOG, "axis2_2", "forward",
-                description="启动轴2_2正转"
-            ))
+            # 步骤2：检查延迟是否到达1秒
+            elapsed = time.time() - self.post_lift_delay_start
+            if elapsed < 1.0:
+                return  # 继续等待
+            
+            # 步骤3：延迟到达，执行后续操作
             self.send_do_control_once("811", True)  # 激活DO气缸伸出信号
-
-            # 立即转换到下一个状态
+            self.get_logger().info(f'DO气缸已激活，延迟{elapsed:.1f}秒')
+            
+            # 重置延迟计时器
+            self.post_lift_delay_start = None
+            
+            # 转换到下一个状态
             self.warehouse_state = WarehouseState.DELAY_PROCESSING
             self.get_logger().info('进入延迟处理状态')
 
@@ -707,11 +728,10 @@ class BusinessLogicProcessor(Node):
         elif self.outbound_state == OutboundState.LIFT_MOVING:
             # 等待层移动完成
             if not self.layer_motion_completed:
-                # 每5秒打印一次等待状态
-                self.state_change_counter += 1
-                if self.state_change_counter >= 50:  # 5秒打印一次
-                    self.state_change_counter = 0
-                self.get_logger().info('等待层移动完成...')
+                # === 边缘触发：只在进入等待状态时打印一次 ===
+                if not getattr(self, '_outbound_waiting_layer_motion_printed', False):
+                    self.get_logger().info('等待层移动完成...')
+                    self._outbound_waiting_layer_motion_printed = True
                 return  # 继续等待
             
             # 层移动完成后执行后续操作
@@ -720,6 +740,7 @@ class BusinessLogicProcessor(Node):
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
+            self._outbound_waiting_layer_motion_printed = False  # 重置边缘打印标志
             
             self.send_do_control_once("813", True)  # 激活DO14皮带反转
             

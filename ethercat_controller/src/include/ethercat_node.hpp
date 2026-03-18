@@ -139,6 +139,15 @@ private:
     DO_Interface current_do_control_;
     pthread_mutex_t io_mutex_;
     
+    // 状态变化检测（避免日志洪泛）
+    bool last_all_axes_ready_ = false;  // 上次所有轴就绪状态
+    bool last_manual_auto_state_ = false;  // 上次手自动状态
+    
+    // 命令去重防抖（防止重复命令洪泛）
+    std::string last_command_;              // 上次执行的命令
+    rclcpp::Time last_command_time_{0, 0, RCL_STEADY_TIME};  // 上次命令时间
+    static constexpr double CMD_DEDUP_SEC = 0.5;  // 去重窗口（秒）
+    
     // std::vector<AxisCommand> last_executed_commands_;
     // 层指令处理器
     std::unique_ptr<LayerCommandProcessor> layer_processor_;

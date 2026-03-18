@@ -133,6 +133,7 @@ protected:
     // 控制标志
     bool start_manual_requested_;
     bool start_auto_requested_;
+    bool stop_requested_;        // 停止请求（结束作业时先减速再跳转）
     bool clear_fault_requested_;
     bool reset_requested_;
     bool fault_clearing_in_progress_;

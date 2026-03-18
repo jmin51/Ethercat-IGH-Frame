@@ -32,6 +32,7 @@ void ServoAxisBase::initialize_members() {
     
     start_manual_requested_ = false;
     start_auto_requested_ = false;
+    stop_requested_ = false;
     clear_fault_requested_ = false;
     reset_requested_ = false;
     fault_clearing_in_progress_ = false;
@@ -66,9 +67,10 @@ void ServoAxisBase::set_displacement_updated(bool updated) {
 }
 
 void ServoAxisBase::stop() {
+    // 结束作业：先发送停止请求，状态机中处理减速后再跳转
     if (current_state_ == AxisState::MANUAL_MODE || current_state_ == AxisState::AUTO_MODE) {
-        current_state_ = AxisState::STOPPED;
-        std::cout << "轴 " << axis_name_ << " 进入停止状态" << std::endl;
+        stop_requested_ = true;
+        std::cout << "轴 " << axis_name_ << " 停止请求已设置" << std::endl;
     }
 }
 

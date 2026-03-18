@@ -194,6 +194,34 @@ void EthercatNode::periodic_timer_callback() {
 
 void EthercatNode::handle_py_control_command(const std_msgs::msg::String::SharedPtr msg) {
     std::string command = msg->data;
+    
+#if CONTROL_SOURCE_IO
+    // IO控制模式下，禁止通过话题切换手动/自动模式（避免与IO控制冲突）
+    if (command == CMD_START_MANUAL || command == CMD_START_AUTO) {
+        // === 即使拒绝命令，也要检查模式冲突并上报故障 ===
+        if (command == CMD_START_AUTO && fault_manager_) {
+            bool any_axis_in_manual = false;
+            for (auto& axis : servo_axes_) {
+                if (axis->get_operation_mode() == OperationMode::MANUAL) {
+                    any_axis_in_manual = true;
+                    break;
+                }
+            }
+            if (any_axis_in_manual) {
+                // 手动模式下收到自动指令，上报故障 0x9004
+                uint16_t fault_code = fault_manager_->handle_auto_command_in_manual_mode();
+                std::stringstream warn_ss;
+                warn_ss << "IO控制模式下，手动模式收到话题自动指令，已上报故障码: 0x" 
+                        << std::hex << std::setw(4) << std::setfill('0') << fault_code;
+                print_warning(warn_ss.str());
+            }
+        }
+        
+        RCLCPP_WARN(this->get_logger(), "IO控制模式已启用，忽略话题模式切换命令: %s", command.c_str());
+        return;
+    }
+#endif
+    
     RCLCPP_INFO(this->get_logger(), "收到Python控制命令: %s", command.c_str());
     handle_control_command(command);
 }
@@ -265,7 +293,7 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis2_2));
     
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2, 1.8)); // 轴，减速比2.0*20/22 =1.818,调式结果是1.8
+        DriveBrand::LEISAI, "axis3", 2, AxisType::AXIS1, LEISAI_PRODUCT_CODE_2, 1.818)); // 轴，减速比2.0*20/22 =1.818,调式结果是1.8
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
         DriveBrand::HUICHUAN, "axis4", 3, AxisType::AXIS1, 0, 7.34)); // 汇川轴，减速比9.0*28/34 =7.411,调式结果是7.5
     servo_axes_.push_back(ServoAxisFactory::create_servo_axis(
@@ -281,7 +309,11 @@ void EthercatNode::init_axes(ec_master_t* master) {
         if (name == "axis4") {
             axis->set_jog_speed(8.0); // 将 axis4 的点动速度初始化为 8 mm/s
             RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 8.0 mm/s", name.c_str());
-        } else if (name == "axis1_1" || name == "axis1_2" || name == "axis2_1" || name == "axis2_2") {
+        } else if (name == "axis1_1" || name == "axis1_2") {
+            // 示例：为 axis1_1 和 axis1_2 设置其他速度
+            axis->set_jog_speed(150.0);
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 150.0 mm/s", name.c_str());
+        } else if (name == "axis2_1" || name == "axis2_2") {
             // 示例：为 axis1_1 和 axis1_2 设置其他速度
             axis->set_jog_speed(120.0);
             RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 120.0 mm/s", name.c_str());
@@ -409,6 +441,16 @@ void EthercatNode::handle_control_command(const std::string& command) {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
         return;
     }
+    
+    // === 命令去重防抖：相同命令0.5秒内不重复执行 ===
+    auto now = this->now();
+    if (command == last_command_ && (now - last_command_time_).seconds() < CMD_DEDUP_SEC) {
+        RCLCPP_DEBUG(this->get_logger(), "忽略重复命令: %s (%.1fs内)", command.c_str(), CMD_DEDUP_SEC);
+        return;
+    }
+    last_command_ = command;
+    last_command_time_ = now;
+    
     RCLCPP_INFO(this->get_logger(), "收到控制命令: %s", command.c_str());
     
     // 发布系统状态
@@ -424,24 +466,7 @@ void EthercatNode::handle_control_command(const std::string& command) {
         RCLCPP_INFO(this->get_logger(), "所有轴接收到手动模式启动命令");
         
     } else if (command == CMD_START_AUTO) {
-        // 自动模式
-        bool any_axis_in_manual = false;
-        for (auto& axis : servo_axes_) {
-            if (axis->get_operation_mode() == OperationMode::MANUAL) {
-                any_axis_in_manual = true;
-                break;
-            }
-        }
-        
-        if (any_axis_in_manual && fault_manager_) {
-            // 手动模式下收到自动指令，上报故障
-            uint16_t fault_code = fault_manager_->handle_auto_command_in_manual_mode();
-            std::stringstream warn_ss;
-            warn_ss << "手动模式下收到自动指令，已上报故障码: 0x" << std::hex << std::setw(4) << std::setfill('0') << fault_code;
-            print_warning(warn_ss.str());
-        }
-        
-        // 仍然尝试启动自动模式（轴内部会处理请求）
+        // 自动模式 
         for (auto& axis : servo_axes_) {
             axis->start_auto_mode();
         }
@@ -755,15 +780,18 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     
     // 如果所有轴都处于READY状态，尝试模式切换
     if (all_axes_ready) {
-        RCLCPP_INFO(this->get_logger(), "所有轴已就绪，准备模式切换。手自动按钮状态: %s", 
-                   current_manual_auto_state ? "自动" : "手动");
-        
-        // 触发模式切换命令
-        std::string command = current_manual_auto_state ? CMD_START_AUTO : CMD_START_MANUAL;
-        handle_control_command(command); // 通过统一命令处理
-        
-        RCLCPP_INFO(this->get_logger(), "已发送%s模式切换命令", 
-                   current_manual_auto_state ? "自动" : "手动");
+        // 仅在状态变化时打印日志（边沿检测）
+        if (!last_all_axes_ready_ || last_manual_auto_state_ != current_manual_auto_state) {
+            RCLCPP_INFO(this->get_logger(), "所有轴已就绪，准备模式切换。手自动按钮状态: %s", 
+                       current_manual_auto_state ? "自动" : "手动");
+            
+            // 触发模式切换命令
+            std::string command = current_manual_auto_state ? CMD_START_AUTO : CMD_START_MANUAL;
+            handle_control_command(command); // 通过统一命令处理
+            
+            RCLCPP_INFO(this->get_logger(), "已发送%s模式切换命令", 
+                       current_manual_auto_state ? "自动" : "手动");
+        }
     } else {
         // 记录哪些轴未就绪（用于调试）
         static int log_counter = 0;
@@ -780,6 +808,10 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
             log_counter = 0;
         }
     }
+    
+    // 更新状态记忆（用于下次边沿检测）
+    last_all_axes_ready_ = all_axes_ready;
+    last_manual_auto_state_ = current_manual_auto_state;
 #endif
     // 发布IO状态
     publish_io_status();
@@ -1201,6 +1233,12 @@ void EthercatNode::handle_axis3_width_command(const std_msgs::msg::Float64::Shar
         return;
     }
     
+    // === 非自动模式下无视板宽设定命令 ===
+    if (!are_all_axes_in_auto_mode()) {
+        RCLCPP_WARN(this->get_logger(), "非自动模式，axis3忽略板宽设定命令");
+        return;
+    }
+    
     double target_width = msg->data;
     RCLCPP_INFO(this->get_logger(), "[Axis3] 收到板宽设定命令: %.2fcm", target_width);
     
@@ -1318,6 +1356,12 @@ void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::Shar
         return;
     }
     
+    // === 非自动模式下无视板宽设定命令 ===
+    if (!are_all_axes_in_auto_mode()) {
+        RCLCPP_WARN(this->get_logger(), "非自动模式，axis4忽略板宽设定命令");
+        return;
+    }
+    
     double target_width = msg->data;
     RCLCPP_INFO(this->get_logger(), "收到板宽设定命令: %.2fcm", target_width);
     
@@ -1423,7 +1467,7 @@ void EthercatNode::calibrate_board_width_from_position() {
     int32_t axis4_actual_pos = servo_axes_[axis4_index]->get_actual_position();
     
     // 获取轴的减速比（从轴对象或成员变量）
-    double axis3_gear_ratio = 1.8;  // axis3减速比
+    double axis3_gear_ratio = 1.818;  // axis3减速比
     double axis4_gear_ratio = 7.34; // axis4减速比
     const double PULSES_PER_REV = 10000.0; // 10000脉冲/转
     const double SCREW_LEAD = 10.0; // 丝杠导程10mm（假设两轴相同）

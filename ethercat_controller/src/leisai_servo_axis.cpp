@@ -270,6 +270,20 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::MANUAL_MODE:
             // 手动模式处理
+            // === 处理停止请求（结束作业）===
+            if (stop_requested_) {
+                // 发送停止指令：保持当前位置
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                
+                // 检查轴是否已停止（速度为0或状态字变化）
+                // 这里简单处理：直接跳转，实际可根据需求添加停止确认
+                stop_requested_ = false;
+                current_state_ = AxisState::STOPPED;
+                printf("轴 %s 收到停止请求，进入停止状态\n", axis_name_.c_str());
+                break;
+            }
+            
             if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 退出手动模式\n", axis_name_.c_str());
@@ -280,6 +294,18 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::AUTO_MODE:
             // 自动模式处理
+            // === 处理停止请求（结束作业）===
+            if (stop_requested_) {
+                // 发送停止指令：保持当前位置
+                EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                
+                stop_requested_ = false;
+                current_state_ = AxisState::STOPPED;
+                printf("轴 %s 收到停止请求，进入停止状态\n", axis_name_.c_str());
+                break;
+            }
+            
             if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
                 current_state_ = AxisState::INITIALIZING;
                 printf("轴 %s 退出自动模式\n", axis_name_.c_str());

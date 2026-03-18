@@ -211,10 +211,21 @@ uint16_t FaultManagementSystem::handle_auto_command_in_manual_mode(const std::st
     std::string source = axis_name.empty() ? "system_mode" : axis_name;
     std::string description = "手动模式下收到自动模式指令，请手动切换模式旋钮";
     
-    // 使用模式错误码
-    uint16_t fault_code = fault_codes::FAULT_MODE_MANUAL_RECEIVED_AUTO;
+    // 使用新的故障码映射 0x9004（替换旧的 0x6201）
+    uint16_t fault_code = 0x9004;
     
-    add_fault(source, fault_code, description);
+    // === 故障去重：检查是否已存在相同故障，避免重复上报 ===
+    std::lock_guard<std::mutex> lock(fault_mutex_);
+    std::string key = generate_fault_key(source, fault_code);
+    if (fault_map_.find(key) != fault_map_.end()) {
+        // 故障已存在，静默返回（不重复日志，不重复发布）
+        return fault_code;
+    }
+    
+    // 首次上报：添加到故障映射
+    fault_map_[key] = fault_code;
+    log_fault_internal(source, fault_code, description, false);
+    publish_fault_status();
     
     // 返回故障码，供调用者使用
     return fault_code;

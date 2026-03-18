@@ -1,123 +1,114 @@
 #!/bin/bash
-# start_ngbuffer_simple.sh - 简化版启动脚本
+# ============================================================================
+# start_ngbuffer_simple.sh - NGBuffer System Startup Script
+# ============================================================================
+# 用于 systemd 开机启动，依赖 sudo 免密配置：
+#   admin1 ALL=(ALL) NOPASSWD: /etc/init.d/ethercat, /usr/bin/ethercat
+# ============================================================================
 
-# 函数：检查EtherCAT主站状态
-check_ethercat_status() {
-    print_step "检查EtherCAT主站状态"
-    
-    # 检查ethercat命令是否可用
-    if ! command -v ethercat &> /dev/null; then
-        print_error "ethercat命令未找到，请检查EtherCAT安装"
-        return 1
-    fi
-    
-    # 尝试获取从站列表，判断主站是否已运行
-    if sudo ethercat slaves > /dev/null 2>&1; then
-        print_info "EtherCAT主站已在运行状态"
-        # 记录当前从站状态
-        sudo ethercat slaves > $LOG_DIR/ethercat_slaves_current.log 2>&1
-        return 0
-    else
-        print_warning "EtherCAT主站未运行或需要重启"
-        return 1
-    fi
-}
+set -e
 
-# 函数：启动EtherCAT主站（条件判断）
-start_ethercat_master() {
-    # 先检查主站状态
-    if check_ethercat_status; then
-        print_info "跳过EtherCAT主站重启"
-        return 0
-    fi
-    
-    print_step "启动EtherCAT主站"
-    
-    # 检查服务脚本是否存在
-    if [ ! -f /etc/init.d/ethercat ]; then
-        print_error "EtherCAT服务脚本不存在: /etc/init.d/ethercat"
-        return 1
-    fi
-    
-    # 执行重启
-    if sudo /etc/init.d/ethercat restart; then
-        sleep 3
-        # 验证启动结果
-        if sudo ethercat slaves > $LOG_DIR/ethercat_slaves.log 2>&1; then
-            print_info "EtherCAT主站启动成功"
-            return 0
-        else
-            print_error "EtherCAT主站启动后从站检测失败"
-            return 1
-        fi
-    else
-        print_error "EtherCAT主站重启失败"
-        return 1
-    fi
-}
-
-# 配置
+# ----------------------------------------------------------------------------
+# 日志配置
+# ----------------------------------------------------------------------------
 LOG_DIR="$HOME/ros2_launch_logs"
 mkdir -p "$LOG_DIR"
 
-# 用户密码（用于sudo）
-USER_PASSWORD="000"
+LOG_FILE="$LOG_DIR/ngbuffer_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-# 函数：带密码的sudo执行
-sudo_with_password() {
-    echo "$USER_PASSWORD" | sudo -S "$@"
+echo "========================================"
+echo "启动时间: $(date)"
+echo "用户: $(whoami)"
+echo "========================================"
+
+# ----------------------------------------------------------------------------
+# 辅助函数
+# ----------------------------------------------------------------------------
+print_step() { echo "[STEP] $1"; }
+print_info() { echo "[INFO] $1"; }
+print_warn() { echo "[WARN] $1"; }
+print_error() { echo "[ERROR] $1"; }
+
+# ----------------------------------------------------------------------------
+# EtherCAT 主站管理
+# ----------------------------------------------------------------------------
+check_ethercat_status() {
+    if ! command -v ethercat &> /dev/null; then
+        print_error "ethercat 命令未找到"
+        return 1
+    fi
+    sudo ethercat slaves &> /dev/null
 }
 
-# 函数：启动EtherCAT主站（带密码）
-start_ethercat_with_password() {
-    print_step() { echo "[步骤] $1"; }
-    print_info() { echo "[信息] $1"; }
-    print_warning() { echo "[警告] $1"; }
-    print_error() { echo "[错误] $1"; }
+start_ethercat_master() {
+    print_step "启动 EtherCAT 主站"
 
-    print_step "启动EtherCAT主站"
-
-    # 检查服务脚本是否存在
     if [ ! -f /etc/init.d/ethercat ]; then
-        print_error "EtherCAT服务脚本不存在: /etc/init.d/ethercat"
+        print_error "EtherCAT 服务脚本不存在: /etc/init.d/ethercat"
         return 1
     fi
 
-    # 停止现有服务（如果正在运行）
-    echo "$USER_PASSWORD" | sudo -S /etc/init.d/ethercat stop > /dev/null 2>&1
+    # 若已运行则跳过
+    if check_ethercat_status; then
+        print_info "EtherCAT 主站已在运行，跳过启动"
+        return 0
+    fi
+
+    # 启动主站
+    sudo /etc/init.d/ethercat stop 2>/dev/null || true
     sleep 1
 
-    # 启动服务
-    if echo "$USER_PASSWORD" | sudo -S /etc/init.d/ethercat start; then
+    if sudo /etc/init.d/ethercat start; then
         sleep 3
-        # 验证启动结果
-        if echo "$USER_PASSWORD" | sudo -S ethercat slaves > "$LOG_DIR/ethercat_slaves.log" 2>&1; then
-            print_info "EtherCAT主站启动成功"
-            cat "$LOG_DIR/ethercat_slaves.log"
+        if check_ethercat_status; then
+            print_info "EtherCAT 主站启动成功"
+            sudo ethercat slaves | head -5
             return 0
-        else
-            print_error "EtherCAT主站启动后从站检测失败"
-            return 1
         fi
-    else
-        print_error "EtherCAT主站启动失败"
-        return 1
     fi
+
+    print_error "EtherCAT 主站启动失败"
+    return 1
 }
 
-# 启动EtherCAT主站
-start_ethercat_with_password
+# ----------------------------------------------------------------------------
+# 主流程
+# ----------------------------------------------------------------------------
+print_step "NGBuffer 系统启动"
 
-# ROS2日志格式配置 - 显示时间戳
-export RCUTILS_CONSOLE_OUTPUT_FORMAT="[{time}] [{severity}] [{name}]: {message}"
-export RCUTILS_TIME_OUTPUT_FORMAT="%Y-%m-%d %H:%M:%S"
+# 启动 EtherCAT 主站
+start_ethercat_master || exit 1
 
-# 生成带日期的日志文件名
-LOG_FILE="$LOG_DIR/ngbuffer_$(date +%Y%m%d_%H%M%S).log"
+# 检查 ROS2 环境
+if [ -f /opt/ros/humble/setup.bash ]; then
+    source /opt/ros/humble/setup.bash
+elif [ -f /opt/ros/foxy/setup.bash ]; then
+    source /opt/ros/foxy/setup.bash
+else
+    print_warn "未找到 ROS2 环境脚本"
+fi
 
-# 启动并记录
-echo "启动: $(date)" > "$LOG_FILE"
-ros2 launch business_logic_py NGbuffer_system.launch.py "$@" 2>&1 | tee -a "$LOG_FILE"
-echo "结束: $(date)" >> "$LOG_FILE"
+# 检查工作空间
+WS_SETUP="$HOME/dev_ws/install/setup.bash"
+if [ -f "$WS_SETUP" ]; then
+    source "$WS_SETUP"
+else
+    print_warn "工作空间 setup.bash 不存在: $WS_SETUP"
+fi
 
-echo "日志已保存到: $LOG_FILE"
+# 启动 ROS2 Launch
+print_step "启动 ROS2 系统"
+ros2 launch business_logic_py NGbuffer_system.launch.py "$@" &
+ROS_PID=$!
+
+print_info "ROS2 PID: $ROS_PID"
+wait $ROS_PID
+
+# ----------------------------------------------------------------------------
+# 结束
+# ----------------------------------------------------------------------------
+echo "========================================"
+echo "结束时间: $(date)"
+echo "日志: $LOG_FILE"
+echo "========================================"
