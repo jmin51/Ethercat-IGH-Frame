@@ -1,4 +1,6 @@
 #include "ethercat_node.hpp"
+#include "io_interface.hpp"
+#include "lights_controller.hpp"  // 灯光控制器
 #include <pthread.h>
 #include <sched.h>
 #include <modbus/modbus.h>
@@ -115,9 +117,21 @@ void safe_shutdown(bool is_pause = false) {
     
     if (is_pause) {
         printf("\n开始安全暂停流程...\n");
+        // 暂停时复位关键DO信号（M810-M813）
+        printf("[暂停] 复位关键DO信号 M810-M813...\n");
+        write_single_do_signal(810, false);  // 顶升气缸下降
+        write_single_do_signal(811, false);  // 齿轮对接气缸伸出
+        write_single_do_signal(812, false);  // 皮带正转启动
+        write_single_do_signal(813, false);  // 皮带反转启动
+        printf("[暂停] DO信号复位完成\n");
     } else {
         printf("\n开始安全关闭流程...\n");
         g_should_exit.store(true, std::memory_order_release);
+        // 退出时复位所有 DO 信号（M800-M813）
+        printf("[关闭] 复位所有 DO 信号 M800-M813...\n");
+        for (int addr = 800; addr <= 813; addr++) {
+            write_single_do_signal(addr, false);
+        }
         //     g_should_exit.store(true);
     }
     
@@ -404,6 +418,9 @@ int main(int argc, char **argv) {
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(global_node);
     
+    // 初始化灯光控制器
+    init_lights_controller();
+    
     printf("=== EtherCAT控制系统启动完成 ===\n");
     printf("系统状态:\n");
     printf("  - EtherCAT主站: 已激活\n");
@@ -417,6 +434,11 @@ int main(int argc, char **argv) {
     // 使用非阻塞的spin方式，添加启动/暂停检测
     while (rclcpp::ok() && !g_should_exit) {
         executor.spin_some(std::chrono::milliseconds(100));
+        
+        // 灯光控制（按钮灯 + 三色灯）
+        DI_Interface di = read_all_di_signals();
+        update_button_lights(di.start_button, di.reset_button, di.pause_button);
+        update_tricolor_lights();
         
         // 检查启动按钮
         if (g_start_button_pressed.load() && !g_system_running.load()) {

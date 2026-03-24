@@ -43,9 +43,10 @@ set(SOURCES
   src/leisai_servo_axis.cpp
   src/huichuan_servo_axis.cpp
   src/servo_axis_factory.cpp
-  src/io_modules/io_interface.cpp  # 新增IO模块
-  src/business/LayerCommandProcessor.cpp  # 新增层指令处理模块
-  src/fault_manager/fault_management_system.cpp  # 故障管理系统（独立实现）
+  src/io_modules/io_interface.cpp  # IO模块
+  src/io_modules/lights_controller.cpp  # 灯光控制器
+  src/business/LayerCommandProcessor.cpp  # 层指令处理模块
+  src/fault_manager/fault_management_system.cpp  # 故障管理系统
 )
 
 # 创建可执行文件

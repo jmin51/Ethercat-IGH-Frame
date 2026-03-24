@@ -503,13 +503,13 @@ class BusinessLogicProcessor(Node):
             if conveyor_in_then_out and not self.conveyor_in_then_out_delay_started:
                 self.conveyor_in_then_out_delay_started = True
                 self.conveyor_in_then_out_delay_counter = 0
-                self.get_logger().info('检测到条件二（conveyor_in变化），开始1秒延迟')
+                self.get_logger().info('检测到条件二（conveyor_in变化），开始0.2秒延迟')
             
             # 处理条件二的延迟
             if self.conveyor_in_then_out_delay_started:
                 self.conveyor_in_then_out_delay_counter += 1
                 
-                # 0.2秒延迟（4个周期，每周期100ms）
+                # 0.2秒延迟（2个周期，每周期100ms）
                 if self.conveyor_in_then_out_delay_counter >= 2:
                     board_in_position = True
                     self.conveyor_in_then_out_delay_started = False

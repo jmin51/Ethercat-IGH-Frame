@@ -31,4 +31,7 @@ extern pthread_t modbus_thread;
 extern volatile int modbus_running;
 extern std::atomic<int> di13_state;
 
+// 复位灯控制标志（AL states 0x08且全部轴自动模式时熄灭）
+extern std::atomic<bool> g_should_clear_reset_light;
+
 #endif

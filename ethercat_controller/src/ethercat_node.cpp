@@ -1,4 +1,5 @@
 #include "ethercat_node.hpp"
+#include "io_modules/lights_controller.hpp"  // 灯光控制器
 #include <thread>
 #include <chrono>
 #include <signal.h>
@@ -738,31 +739,12 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
 
-    // 删除原有的BusinessLogicProcessor处理逻辑
-    // 业务逻辑现在由Python节点处理
-    // 启动按钮处理（上升沿触发）
-    static bool last_start_button = false;
-    if (di.start_button && !last_start_button) {
-        g_start_button_pressed.store(true);
-        RCLCPP_INFO(this->get_logger(), "启动按钮按下，开始启动系统");
+    // 此处仅检测按钮状态并设置全局标志，不直接控制DO
+    // AL states 0x08 (SAFE-OP) 且全部进入自动模式 - 通知灯光控制器熄灭复位灯，切换为绿灯闪烁
+    if (master_state.al_states == 0x08 && are_all_axes_in_auto_mode()) {
+        notify_system_ready();
+        // RCLCPP_INFO(this->get_logger(), "AL states=0x08 且全部轴进入自动模式，系统就绪");
     }
-    last_start_button = di.start_button;
-
-    // 暂停按钮处理（上升沿触发）
-    static bool last_pause_button = false;
-    if (di.pause_button && !last_pause_button) {
-        g_pause_button_pressed.store(true);
-        RCLCPP_INFO(this->get_logger(), "暂停按钮按下，开始安全关闭");
-    }
-    last_pause_button = di.pause_button;
-
-    // +++ 新增：复位按钮处理（上升沿触发） +++
-    static bool last_reset_button = false;
-    if (di.reset_button && !last_reset_button) {
-        g_reset_button_pressed.store(true);
-        RCLCPP_INFO(this->get_logger(), "复位按钮按下，准备回原流程");
-    }
-    last_reset_button = di.reset_button;
 
     // 新增：IO控制模式切换（仅在宏开关启用时生效）
 #if CONTROL_SOURCE_IO
@@ -1068,6 +1050,13 @@ void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg)
     
     // 执行DO控制
     int do_address = std::stoi(do_cmd.do_address);
+    
+    // 禁止通过外部命令修改按钮灯状态(800-802)，由handle_io_signals独占控制
+    if (do_address >= 800 && do_address <= 802) {
+        RCLCPP_WARN(this->get_logger(), "拒绝外部修改按钮灯DO%d，按钮灯由IO模块独占控制", do_address);
+        return;
+    }
+    
     int result = write_single_do_signal(do_address, do_cmd.state);
     
     if (result == 1) {

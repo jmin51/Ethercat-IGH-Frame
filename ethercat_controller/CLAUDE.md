@@ -14,7 +14,9 @@ ethercat_controller/
 │   ├── business/
 │   │   └── LayerCommandProcessor.cpp     # 层指令处理器
 │   ├── io_modules/
-│   │   └── io_interface.cpp              # IO 模块接口
+│   │   ├── io_interface.cpp              # IO 模块接口
+│   │   ├── lights_controller.cpp         # 灯光控制器（按钮灯+三色灯）
+│   │   └── lights_controller.hpp         # 灯光控制器头文件
 │   └── fault_manager/
 │       ├── fault_management_system.cpp   # 故障管理系统（独立实现）
 │       ├── fault_management_system.hpp
@@ -109,6 +111,59 @@ std::string json_status = fault_manager_->get_fault_status_json();
 - 故障管理系统提供与先前版本兼容的 API，现有集成代码无需修改
 - 遗留故障码范围 (0x8xxx, 0x9xxx, 0x91xx) 继续支持
 - `is_error_code()` 函数同时支持新旧故障码分类
+
+## 灯光控制系统架构
+
+### 设计哲学
+- **职责分离**：灯光控制独立于主流程，避免main.cpp臃肿
+- **状态机驱动**：三色灯通过状态机管理（OFF → YELLOW_BLINK → GREEN_BLINK）
+- **边沿触发**：按钮灯通过边沿检测触发，避免抖动
+- **变化检测**：DO写入仅在状态变化时执行，减少Modbus通信
+
+### 核心组件
+
+#### 1. 灯光控制器 (lights_controller)
+- **独立模块**：封装按钮灯和三色灯所有逻辑
+- **线程安全**：通过互斥锁保护Modbus访问（与io_interface配合）
+- **自动闪烁**：500ms周期自动切换黄灯/绿灯闪烁状态
+
+#### 2. 状态定义
+```cpp
+enum TricolorLightState {
+    LIGHT_OFF,          // 全部熄灭
+    LIGHT_YELLOW_BLINK, // 黄灯闪烁（复位中）
+    LIGHT_GREEN_BLINK,  // 绿灯闪烁（就绪）
+    LIGHT_GREEN_ON      // 绿灯常亮（运行中）
+};
+```
+
+#### 3. 控制流程
+| 触发条件 | 按钮灯行为 | 三色灯行为 | 蜂鸣器 |
+|----------|-----------|-----------|--------|
+| 启动按钮 | 启动灯亮 | 绿灯常亮 | 停 |
+| 复位按钮（按住3秒确认） | 复位灯亮 | 黄灯闪烁 | 响 |
+| 暂停按钮 | 暂停灯亮 | 全部熄灭 | 停 |
+| AL states 0x08 + 全部自动 | 复位灯灭 | 黄灯停闪，绿灯闪烁 | 停 |
+
+### 关键接口
+
+```cpp
+// 初始化
+void init_lights_controller();
+
+// 主循环调用（每100ms）
+void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn);
+void update_tricolor_lights();
+
+// 系统就绪通知（由ethercat_node调用）
+void notify_system_ready();
+```
+
+### 集成点
+
+1. **main.cpp**：初始化后调用 `init_lights_controller()`，主循环中调用更新函数
+2. **ethercat_node.cpp**：检测到 AL states 0x08 且全部轴自动时调用 `notify_system_ready()`
+3. **io_interface.cpp**：通过互斥锁保护Modbus并发访问
 
 ---
 

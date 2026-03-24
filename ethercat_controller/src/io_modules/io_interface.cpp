@@ -4,12 +4,17 @@
 #include <modbus/modbus.h>
 #include <cstring>  // 添加这行，用于 memcmp 函数
 #include <time.h>
+#include <mutex>  // 添加互斥锁支持
 
 static modbus_t *ctx_di = NULL;  // DI设备连接
 #if ENABLE_DO_MODULE  // 条件编译
 static modbus_t *ctx_do = NULL;  // DO设备连接
 #endif
 static DO_Interface current_do_state = {0};
+
+// Modbus访问互斥锁（防止多线程同时访问）
+static std::mutex modbus_di_mutex;
+static std::mutex modbus_do_mutex;
 
 // 函数前置声明
 #if ENABLE_DO_MODULE
@@ -19,6 +24,7 @@ static void refresh_do_state_from_device(void);
 // 从设备刷新DO状态（内部函数）
 #if ENABLE_DO_MODULE
 static void refresh_do_state_from_device() {
+    std::lock_guard<std::mutex> lock(modbus_do_mutex);
     if (!ctx_do) return;
     
     uint8_t do_values[16];
@@ -34,7 +40,7 @@ static void refresh_do_state_from_device() {
         current_do_state.gear_cylinder_extend = do_values[11];
         current_do_state.belt_forward = do_values[12];
         current_do_state.belt_backward = do_values[13];  // 新增皮带反转状态读取
-        printf("DO状态已从设备刷新\n");
+        // printf("DO状态已从设备刷新\n");  // 调试时启用，正式运行关闭
     } else {
         fprintf(stderr, "刷新DO状态失败: %s\n", modbus_strerror(errno));
     }
@@ -132,6 +138,8 @@ void cleanup_modbus_interface() {
 DI_Interface read_all_di_signals() {
     DI_Interface di = {0};
     
+    std::lock_guard<std::mutex> lock(modbus_di_mutex);
+    
     if (!ctx_di) {
         fprintf(stderr, "DI Modbus 未初始化\n");
         return di;
@@ -141,8 +149,17 @@ DI_Interface read_all_di_signals() {
     int rc = modbus_read_input_bits(ctx_di, 0, 48, di_values);
     
     if (rc == -1) {
-        fprintf(stderr, "读取DI失败: %s\n", modbus_strerror(errno));
+        // 减少日志刷屏：仅在非连续错误时打印
+        static int error_count = 0;
+        if (error_count++ % 100 == 0) {
+            fprintf(stderr, "读取DI失败: %s (已抑制%d次重复错误)\n", 
+                    modbus_strerror(errno), error_count);
+        }
         return di;
+    } else {
+        // 成功时重置错误计数
+        static int error_count = 0;
+        error_count = 0;
     }
     
     // 映射到结构体
@@ -174,6 +191,8 @@ DI_Interface read_all_di_signals() {
 }
 
 bool read_single_di_signal(int di_address) {
+    std::lock_guard<std::mutex> lock(modbus_di_mutex);
+    
     if (!ctx_di) return false;
     
     // 地址有效性检查
@@ -204,6 +223,8 @@ bool read_single_di_signal(int di_address) {
 // DO 信号写入接口
 #if ENABLE_DO_MODULE
 int write_do_signals(DO_Interface do_signals) {
+    std::lock_guard<std::mutex> lock(modbus_do_mutex);
+    
     if (!ctx_do) return -1;
     
     // 先读取当前所有DO状态，避免清除其他位
@@ -238,6 +259,8 @@ int write_do_signals(DO_Interface do_signals) {
 }
 
 int write_single_do_signal(int do_address, bool state) {
+    std::lock_guard<std::mutex> lock(modbus_do_mutex);
+    
     if (!ctx_do) return -1;
     
     // 地址有效性检查
@@ -249,9 +272,22 @@ int write_single_do_signal(int do_address, bool state) {
     // 写入单个信号到设备
     int result = modbus_write_bit(ctx_do, do_address - 800, state);
     
-    // 写入成功后，从设备刷新整个DO状态以确保一致性
+    // 写入成功后，刷新DO状态缓存（注意：这里不调用refresh_do_state_from_device避免死锁）
     if (result == 1) {
-        refresh_do_state_from_device();
+        uint8_t do_values[16];
+        if (modbus_read_bits(ctx_do, 0, 16, do_values) == 16) {
+            current_do_state.start_button_light = do_values[0];
+            current_do_state.reset_button_light = do_values[1];
+            current_do_state.pause_button_light = do_values[2];
+            current_do_state.buzzer = do_values[3];
+            current_do_state.red_light = do_values[4];
+            current_do_state.yellow_light = do_values[5];
+            current_do_state.green_light = do_values[6];
+            current_do_state.lift_cylinder_down = do_values[10];
+            current_do_state.gear_cylinder_extend = do_values[11];
+            current_do_state.belt_forward = do_values[12];
+            current_do_state.belt_backward = do_values[13];
+        }
     }
     
     return result;
