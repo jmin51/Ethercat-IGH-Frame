@@ -69,6 +69,9 @@ public:
     void print_warning(const std::string& message);
     void print_error(const std::string& message);
 
+    // 故障上报接口（供轴状态机调用）
+    void report_axis_fault(const std::string& axis_name, uint16_t fault_code, const std::string& description);
+
 private:
     void initialize_node();
     void handle_displacement_command(const std_msgs::msg::String::SharedPtr msg);
@@ -85,6 +88,7 @@ private:
     // 添加与Python节点通信的方法
     void handle_py_control_command(const std_msgs::msg::String::SharedPtr msg);
     void publish_py_io_status(const DI_Interface& di);
+    void publish_axis_states();  // 发布所有轴的状态机状态
 
     // 添加点动指令处理函数
     void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
@@ -131,6 +135,7 @@ private:
     // 故障管理相关：在现有成员变量中添加
     std::unique_ptr<fault_management::FaultManagementSystem> fault_manager_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr axis_state_pub_;  // 轴状态机状态发布器
 
     // IO模块相关
     pthread_t io_thread_;
@@ -142,6 +147,7 @@ private:
     // 状态变化检测（避免日志洪泛）
     bool last_all_axes_ready_ = false;  // 上次所有轴就绪状态
     bool last_manual_auto_state_ = false;  // 上次手自动状态
+    bool auto_mode_init_published_ = false;  // 自动模式初始化完成状态是否已发布
     
     // 命令去重防抖（防止重复命令洪泛）
     std::string last_command_;              // 上次执行的命令
@@ -155,7 +161,7 @@ private:
 
     // 删除initialize_business_logic方法
     void initialize_layer_processor();
-    void monitor_di_changes(const DI_Interface& current_di);
+
     void handle_do_control(const std_msgs::msg::String::SharedPtr msg);
     // 添加入库处理函数
     void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg);
@@ -220,6 +226,28 @@ private:
     
     // +++ 新增：根据实际位置校正板宽 +++
     void calibrate_board_width_from_position();
+
+public:
+    /* ============================================
+     * 暂停状态记录相关接口 (public - 供main.cpp调用)
+     * ============================================ */
+    // 发布暂停状态记录请求
+    void publish_pause_state_record_request();
+    // 发布暂停状态恢复请求（携带记录的状态）
+    void publish_pause_state_resume_request();
+    // 获取暂停状态记录发布器
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr get_pause_state_pub() { return pause_state_pub_; }
+    // 处理Python端的状态报告
+    void handle_pause_state_report(const std_msgs::msg::String::SharedPtr msg);
+    
+    // 重置自动模式初始化发布标志（用于暂停后恢复）
+    void reset_auto_mode_init_published() { auto_mode_init_published_ = false; }
+
+private:
+    // 暂停状态话题发布器
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pause_state_pub_;
+    // 订阅Python端的状态报告
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr pause_state_report_sub_;
 };
 
 // 全局变量声明

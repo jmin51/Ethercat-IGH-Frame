@@ -722,7 +722,6 @@ class ByteMultiArrayParser(Node):
         try:
             # 关键修复：确保所有数据都是整数类型
             self.get_logger().info(f'=== 收到消息 ===')
-            self.get_logger().info(f'数据长度: {len(msg.data)} 字节')
             data_list = []
             for item in msg.data:
                 data_list.append(self.ensure_int(item))

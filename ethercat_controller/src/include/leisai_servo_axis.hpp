@@ -49,6 +49,9 @@ private:
     void handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos);
     void handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t error_code);
 
+    // 重写故障清除 - 雷赛轴特有处理（区分通讯错误与其他故障）
+    void handle_fault_clear(uint8_t* domain1_pd) override;
+
     int leisai_specific_param_;
     uint32_t product_code_;  // 存储实际使用的产品号
 };

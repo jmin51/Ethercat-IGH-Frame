@@ -57,7 +57,8 @@ class BusinessLogicProcessor(Node):
             'buffer_in_position': False,
             'buffer_out_position': False,
             'conveyor_in_position': False,
-            'conveyor_out_position': False
+            'conveyor_out_position': False,
+            'buffer_sensor_2': False
         }
         # 添加状态变化计数器（避免频繁打印）
         self.state_change_counter = 0
@@ -71,6 +72,18 @@ class BusinessLogicProcessor(Node):
         self.outbound_process_requested = False
         self.outbound_process_stop_requested = False
         
+        # +++ 新增：暂停状态记录相关 +++
+        self.pause_state_reported = False  # 是否已报告暂停状态
+        self.resuming_from_pause = False   # 是否正在从暂停恢复
+        self.saved_warehouse_state = None  # 保存的入库状态
+        self.saved_outbound_state = None   # 保存的出库状态
+        self.saved_target_layer = 1        # 保存的目标层
+        self.saved_source_layer = 1        # 保存的源层
+        
+        # +++ 新增：自动模式初始化等待相关 +++
+        self.auto_mode_initialized = False  # 自动模式位置初始化是否完成
+        self.pending_resume_state = None    # 待执行的恢复状态（等待轴就绪后执行）
+        
         # 自动模式状态
         self.auto_mode_enabled = False
         self.enabled = True
@@ -81,6 +94,7 @@ class BusinessLogicProcessor(Node):
         self.delay_counter = 0
         self.delay_condition_triggered = False
         self.conveyor_in_detected = False
+        self.buffer_sensor_2_detected = False  # 新增：缓存架对射2检测状态
         
         # 出库延迟控制
         self.outbound_delay_started = False
@@ -117,7 +131,8 @@ class BusinessLogicProcessor(Node):
             'buffer_in_position': False,
             'buffer_out_position': False,
             'conveyor_in_position': False,
-            'conveyor_out_position': False
+            'conveyor_out_position': False,
+            'buffer_sensor_2': False
         }
         
         # 新增：DO控制状态跟踪，避免重复发送
@@ -205,10 +220,22 @@ class BusinessLogicProcessor(Node):
             10
         )
         
+        # +++ 新增：创建暂停状态命令订阅器 +++
+        self.pause_state_sub = self.create_subscription(
+            String,
+            '/pause_state_command',
+            self.pause_state_command_callback,
+            10
+        )
+        # +++ 新增：创建暂停状态报告发布器 +++
+        self.pause_state_report_pub = self.create_publisher(
+            String, '/pause_state_report', 10
+        )
+        
         # 定时器 - 处理业务逻辑
         self.timer = self.create_timer(0.1, self.process_logic)  # 100ms周期
         
-        self.get_logger().info('Python业务逻辑处理器已启动 - DO控制优化版')
+        self.get_logger().info('Python业务逻辑处理器已启动 - 支持暂停状态记录与恢复')
 
     def system_status_callback(self, msg):
         """处理系统状态消息，检测自动模式"""
@@ -226,6 +253,20 @@ class BusinessLogicProcessor(Node):
                 self.auto_mode_enabled = False
                 self.reset_business_logic()
                 self.get_logger().info('检测到停止命令，业务逻辑处理器退出自动模式')
+        
+        # +++ 新增：检测自动模式初始化完成（恢复时等待轴就绪）+++
+        elif '自动模式初始化完成' in status_text:
+            if not self.auto_mode_initialized:
+                self.auto_mode_initialized = True
+                self.get_logger().info('检测到自动模式初始化完成，轴已就绪')
+                # 如果有待执行的恢复状态，立即执行
+                if self.pending_resume_state is not None:
+                    self.execute_pending_resume()
+            
+            # +++ 关键修复：IO控制模式下，通过自动模式初始化完成信号启用业务逻辑自动模式 +++
+            if not self.auto_mode_enabled:
+                self.auto_mode_enabled = True
+                self.get_logger().info('IO控制模式下，检测到轴自动模式就绪，业务逻辑处理器进入自动模式')
 
     def io_status_callback(self, msg):
         """处理IO状态更新"""
@@ -257,12 +298,23 @@ class BusinessLogicProcessor(Node):
         return io_signals
 
     def map_signal_name(self, di_number: int) -> str:
-        """映射DI编号到标准信号名称"""
+        """映射DI编号到标准信号名称
+        
+        DI编号与M寄存器对应关系：
+        DI00-DI08: M512-M520 (按钮、急停、气源、安全门、入料检测)
+        DI09: M521 buffer_sensor_1 (缓存架对射1)
+        DI10: M522 buffer_sensor_2 (缓存架对射2)
+        DI11: M523 buffer_in_position (缓存架入料到位)
+        DI12: M524 buffer_out_position (缓存架出料到位)
+        DI13: M525 conveyor_in_position (接驳台入料到位)
+        DI14: M526 conveyor_out_position (接驳台出料到位)
+        """
         mapping = {
-            12: 'buffer_in_position',
-            13: 'buffer_out_position', 
-            14: 'conveyor_in_position',
-            15: 'conveyor_out_position'
+            10: 'buffer_sensor_2',      # M522 缓存架对射2
+            11: 'buffer_in_position',   # M523 缓存架入料产品到位检测
+            12: 'buffer_out_position',  # M524 缓存架出料产品到位检测
+            13: 'conveyor_in_position', # M525 接驳台入料产品到位检测
+            14: 'conveyor_out_position' # M526 接驳台出料产品到位检测
         }
         return mapping.get(di_number, '')
 
@@ -375,6 +427,235 @@ class BusinessLogicProcessor(Node):
         except Exception as e:
             self.get_logger().error(f'层移动完成回调处理错误: {e}')
 
+    # +++ 新增：暂停状态命令回调处理 +++
+    def pause_state_command_callback(self, msg):
+        """处理暂停状态命令"""
+        command = msg.data
+        self.get_logger().info(f'收到暂停状态命令: {command}')
+        
+        if command == "RECORD_STATE":
+            # 记录当前业务状态并报告
+            self.report_current_pause_state()
+        elif command.startswith("RESUME:"):
+            # 解析恢复命令并执行恢复
+            self.handle_resume_command(command)
+    
+    def report_current_pause_state(self):
+        """报告当前业务状态供C++端记录"""
+        # 记录当前状态
+        self.saved_warehouse_state = self.warehouse_state
+        self.saved_outbound_state = self.outbound_state
+        self.saved_target_layer = self.target_layer
+        self.saved_source_layer = self.source_layer
+        
+        # 构建状态报告字符串
+        # 格式: warehouse_active=1,warehouse_state=X,warehouse_layer=Y,outbound_active=0,...
+        warehouse_active = 1 if self.warehouse_state != WarehouseState.IDLE else 0
+        outbound_active = 1 if self.outbound_state != OutboundState.IDLE else 0
+        
+        report = (f"warehouse_active={warehouse_active},"
+                  f"warehouse_state={self.warehouse_state.value},"
+                  f"warehouse_layer={self.target_layer},"
+                  f"outbound_active={outbound_active},"
+                  f"outbound_state={self.outbound_state.value},"
+                  f"outbound_layer={self.source_layer}")
+        
+        # 发布状态报告
+        msg = String()
+        msg.data = report
+        self.pause_state_report_pub.publish(msg)
+        
+        self.pause_state_reported = True
+        self.get_logger().info(f'已报告暂停状态: {report}')
+    
+    def handle_resume_command(self, command):
+        """处理恢复命令，重走之前记录的状态"""
+        self.get_logger().info(f'处理恢复命令: {command}')
+        
+        # 解析恢复命令
+        # 格式: RESUME:warehouse_active=1,warehouse_state=X,warehouse_layer=Y,outbound_active=0,...
+        try:
+            params = {}
+            parts = command.replace("RESUME:", "").split(",")
+            for part in parts:
+                key, value = part.split("=")
+                params[key] = int(value)
+            
+            # 设置恢复标志
+            self.resuming_from_pause = True
+            
+            # 根据记录的状态恢复业务逻辑
+            warehouse_active = params.get('warehouse_active', 0)
+            outbound_active = params.get('outbound_active', 0)
+            
+            if warehouse_active:
+                # 恢复入库流程
+                saved_state = params.get('warehouse_state', 1)
+                saved_layer = params.get('warehouse_layer', 1)
+                self.restore_warehouse_state(saved_state, saved_layer)
+            
+            if outbound_active:
+                # 恢复出库流程
+                saved_state = params.get('outbound_state', 1)
+                saved_layer = params.get('outbound_layer', 1)
+                self.restore_outbound_state(saved_state, saved_layer)
+            
+            self.get_logger().info('业务逻辑状态恢复完成，继续执行')
+            
+        except Exception as e:
+            self.get_logger().error(f'处理恢复命令失败: {e}')
+    
+    def restore_warehouse_state(self, state_value, target_layer):
+        """恢复入库流程到指定状态"""
+        self.get_logger().info(f'恢复入库流程: 状态={state_value}, 目标层={target_layer}')
+        
+        # 重置层指令发送状态，确保恢复时可以重新发送层指令
+        self.layer_command_sent = False
+        self.last_layer_command = None
+        
+        # 设置目标层
+        self.target_layer = target_layer
+        
+        # 根据状态值恢复
+        if state_value == WarehouseState.IDLE.value:
+            self.warehouse_state = WarehouseState.IDLE
+        elif state_value == WarehouseState.WAIT_FOR_ENTRY.value:
+            self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
+            self.warehouse_process_requested = True
+        elif state_value == WarehouseState.CONVEYOR_MOVING.value:
+            # 从输送带运行状态恢复 - 重新检测条件
+            self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
+            self.warehouse_process_requested = True
+            self.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件')
+        elif state_value == WarehouseState.LIFT_MOVING.value:
+            # 从提升机运行状态恢复 - 保持在LIFT_MOVING并重新发送层指令
+            # 因为conveyor_in信号可能已不满足，不能直接回退到CONVEYOR_MOVING
+            self.warehouse_state = WarehouseState.LIFT_MOVING
+            self.warehouse_process_requested = True
+            # 重置层移动状态（关键：必须同时重置previous_layer_completion_state）
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+            # +++ 修改：等待自动模式初始化完成后再发送层指令 +++
+            if self.auto_mode_initialized:
+                # 轴已就绪，立即发送层指令
+                self.send_layer_command(self.target_layer)
+                self.get_logger().info(f'从LIFT_MOVING恢复，重新发送层指令到目标层 {self.target_layer}')
+            else:
+                # 轴未就绪，保存状态等待初始化完成
+                self.pending_resume_state = {
+                    'type': 'warehouse',
+                    'state': WarehouseState.LIFT_MOVING,
+                    'layer': self.target_layer
+                }
+                self.get_logger().info(f'从LIFT_MOVING恢复，等待轴自动模式初始化完成后发送层指令到目标层 {self.target_layer}')
+        elif state_value == WarehouseState.POST_LIFT_PROCESSING.value:
+            # 从层移动后处理恢复
+            self.warehouse_state = WarehouseState.LIFT_MOVING
+            self.warehouse_process_requested = True
+            self.layer_motion_completed = True  # 假设层移动已完成
+            self.post_lift_delay_start = None
+            self.get_logger().info('从POST_LIFT_PROCESSING恢复，将重新执行后续操作')
+        elif state_value == WarehouseState.DELAY_PROCESSING.value:
+            # 从延迟处理恢复
+            self.warehouse_state = WarehouseState.POST_LIFT_PROCESSING
+            self.warehouse_process_requested = True
+            self.layer_motion_completed = True
+            self.post_lift_delay_start = None
+            self.delay_started = False
+            self.delay_condition_triggered = False
+            self.buffer_sensor_2_detected = False  # 重置缓存架对射2检测状态
+            # 重置DO发送状态，确保812和811能重新发送
+            self.reset_do_command_state("811")
+            self.reset_do_command_state("812")
+            self.get_logger().info('从DELAY_PROCESSING恢复，将重新执行延迟处理')
+        elif state_value == WarehouseState.COMPLETED.value:
+            self.warehouse_state = WarehouseState.COMPLETED
+            self.warehouse_process_requested = True
+        
+        self.resuming_from_pause = False
+    
+    def restore_outbound_state(self, state_value, source_layer):
+        """恢复出库流程到指定状态"""
+        self.get_logger().info(f'恢复出库流程: 状态={state_value}, 源层={source_layer}')
+        
+        # 重置层指令发送状态，确保恢复时可以重新发送层指令
+        self.layer_command_sent = False
+        self.last_layer_command = None
+        
+        # 设置源层
+        self.source_layer = source_layer
+        
+        # 根据状态值恢复
+        if state_value == OutboundState.IDLE.value:
+            self.outbound_state = OutboundState.IDLE
+        elif state_value == OutboundState.WAIT_FOR_EXIT.value:
+            self.outbound_state = OutboundState.WAIT_FOR_EXIT
+            self.outbound_process_requested = True
+        elif state_value == OutboundState.LIFT_MOVING.value:
+            # 从提升机运行状态恢复 - 保持在LIFT_MOVING并重新发送层指令
+            self.outbound_state = OutboundState.LIFT_MOVING
+            self.outbound_process_requested = True
+            # 重置层移动状态（关键：必须同时重置previous_layer_completion_state）
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+            # +++ 修改：等待自动模式初始化完成后再发送层指令 +++
+            if self.auto_mode_initialized:
+                # 轴已就绪，立即发送层指令
+                self.send_layer_command(self.source_layer)
+                self.get_logger().info(f'从LIFT_MOVING恢复，重新发送层指令到源层 {self.source_layer}')
+            else:
+                # 轴未就绪，保存状态等待初始化完成
+                self.pending_resume_state = {
+                    'type': 'outbound',
+                    'state': OutboundState.LIFT_MOVING,
+                    'layer': self.source_layer
+                }
+                self.get_logger().info(f'从LIFT_MOVING恢复，等待轴自动模式初始化完成后发送层指令到源层 {self.source_layer}')
+        elif state_value == OutboundState.POST_LIFT_PROCESSING.value:
+            # 从层移动后处理恢复
+            self.outbound_process_requested = True
+            # 重置DO发送状态，确保811能重新发送
+            self.reset_do_command_state("811")
+            # 等待自动模式初始化完成后再进入POST_LIFT_PROCESSING（避免JOG命令在轴STOPPED状态丢失）
+            if not self.auto_mode_initialized:
+                # 暂时保持LIFT_MOVING，等待轴就绪
+                self.outbound_state = OutboundState.LIFT_MOVING
+                self.pending_resume_state = {
+                    'type': 'outbound_post_lift',
+                    'source_layer': source_layer
+                }
+                self.get_logger().info('从POST_LIFT_PROCESSING恢复，等待轴自动模式初始化完成后执行')
+            else:
+                self.outbound_state = OutboundState.LIFT_MOVING
+                self.layer_motion_completed = True  # 轴已就绪，立即进入POST_LIFT_PROCESSING
+                self.get_logger().info('从POST_LIFT_PROCESSING恢复，轴已就绪，将重新执行后续操作')
+        elif state_value == OutboundState.CONVEYOR_MOVING.value:
+            # 从输送带运行状态恢复 - 需要重新发送层指令到第1层
+            self.outbound_state = OutboundState.CONVEYOR_MOVING
+            self.outbound_process_requested = True
+            # 重置层移动状态（关键：必须同时重置previous_layer_completion_state）
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+            # 等待自动模式初始化完成后发送层指令
+            if self.auto_mode_initialized:
+                self.send_layer_command(1)
+                self.get_logger().info('从CONVEYOR_MOVING恢复，立即发送层指令到第1层')
+            else:
+                self.pending_resume_state = {
+                    'type': 'outbound_conveyor',
+                    'state': OutboundState.CONVEYOR_MOVING,
+                    'layer': 1
+                }
+                self.get_logger().info('从CONVEYOR_MOVING恢复，等待轴自动模式初始化完成后发送层指令到第1层')
+        elif state_value == OutboundState.COMPLETED.value:
+            self.outbound_state = OutboundState.COMPLETED
+            self.outbound_process_requested = True
+        
+        self.resuming_from_pause = False
+
     def process_logic(self):
         """主处理逻辑 - 定时器回调"""
         if not self.auto_mode_enabled or not self.enabled:
@@ -410,7 +691,8 @@ class BusinessLogicProcessor(Node):
                     f'IO信号状态变化: buffer_in={self.current_io_signals["buffer_in_position"]}, '
                     f'buffer_out={self.current_io_signals["buffer_out_position"]}, '
                     f'conveyor_in={self.current_io_signals["conveyor_in_position"]}, '
-                    f'conveyor_out={self.current_io_signals["conveyor_out_position"]}'
+                    f'conveyor_out={self.current_io_signals["conveyor_out_position"]}, '
+                    f'buffer_sensor_2={self.current_io_signals["buffer_sensor_2"]}'
                 )
         
         # 更新前一个状态
@@ -423,6 +705,7 @@ class BusinessLogicProcessor(Node):
         buffer_out = di['buffer_out_position']
         conveyor_in = di['conveyor_in_position']
         conveyor_out = di['conveyor_out_position']
+        buffer_sensor_2 = di['buffer_sensor_2']  # 缓存架对射2信号 (M522)
 
         # 检查状态是否变化
         state_changed = (self.warehouse_state != self.previous_warehouse_state)
@@ -520,10 +803,6 @@ class BusinessLogicProcessor(Node):
                 # 条件一立即触发
                 board_in_position = conveyor_out_detected
             
-            # 记录检测状态用于调试
-            if conveyor_in_then_out and not conveyor_out_detected:
-                self.get_logger().info(f'检测到conveyor_in变化条件: conveyor_in_detected={self.conveyor_in_detected}, conveyor_in={conveyor_in}')
-
             # 继续输送直到检测到板子到位
             if board_in_position:
                 self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
@@ -615,17 +894,21 @@ class BusinessLogicProcessor(Node):
 
         elif self.warehouse_state == WarehouseState.DELAY_PROCESSING:
                 # 检测信号变化
+                # 修改逻辑：进入检测用buffer_sensor_2=1，离开检测用conveyor_in=0且buffer_sensor_2=0
                 if not self.delay_started and not self.delay_condition_triggered:
-                    if conveyor_in:
-                        if not self.conveyor_in_detected:
-                            self.conveyor_in_detected = True
-                            self.get_logger().info('检测到货物进入接驳台(conveyor_in=1)')
-                    elif self.conveyor_in_detected:
+                    if buffer_sensor_2:
+                        # 检测到货物进入（缓存架对射2被触发）
+                        if not self.buffer_sensor_2_detected:
+                            self.buffer_sensor_2_detected = True
+                            self.get_logger().info('检测到货物进入缓存架(buffer_sensor_2=1)')
+                    elif self.buffer_sensor_2_detected and not conveyor_in and not buffer_sensor_2:
+                        # 货物离开条件：buffer_sensor_2曾经触发过，且当前conveyor_in=0且buffer_sensor_2=0
                         self.delay_condition_triggered = True
                         self.delay_started = True
                         self.delay_counter = 0
+                        self.buffer_sensor_2_detected = False
                         self.conveyor_in_detected = False
-                        self.get_logger().info(f'检测到货物离开接驳台(conveyor_in=0)，开始{self.DELAY_BEFORE_STOP_MS//1000}秒延迟')
+                        self.get_logger().info(f'检测到货物离开接驳台(conveyor_in=0,buffer_sensor_2=0)，开始{self.DELAY_BEFORE_STOP_MS//1000}秒延迟')
                 
                 # 处理延迟逻辑
                 if self.delay_started:
@@ -636,6 +919,7 @@ class BusinessLogicProcessor(Node):
                         self.warehouse_state = WarehouseState.COMPLETED
                         self.delay_started = False
                         self.delay_condition_triggered = False
+                        self.buffer_sensor_2_detected = False  # 重置缓存架对射2检测状态
                         
                         # 停止轴2
                         self.add_command(ControlAction(
@@ -706,9 +990,9 @@ class BusinessLogicProcessor(Node):
 
         if self.outbound_state == OutboundState.IDLE:
 
-            # 等待启动信号
-            if (self.outbound_process_requested and 
-                self.check_outbound_condition()):
+            # 等待启动信号 - 出库流程只需要收到请求即可启动，不检查IO条件
+            # （货物在缓存架上是正常情况，不需要等待所有IO为False）
+            if self.outbound_process_requested:
                 self._reset_key_do_signals()
                 self.outbound_state = OutboundState.WAIT_FOR_EXIT
                 self.outbound_process_requested = False
@@ -794,10 +1078,6 @@ class BusinessLogicProcessor(Node):
                 # 条件一立即触发
                 board_in_position = conveyor_out_detected
             
-            # 记录检测状态用于调试
-            if conveyor_in_then_out and not conveyor_out_detected:
-                self.get_logger().info(f'检测到出库conveyor_in变化条件: outbound_conveyor_in_detected={self.outbound_conveyor_in_detected}, conveyor_in={conveyor_in}')
-
             if board_in_position: # 检测板子到位条件
                 self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
                 
@@ -857,6 +1137,7 @@ class BusinessLogicProcessor(Node):
                     self.send_do_control_once("813", False)
                     self.outbound_delay_started = False
                     self.outbound_state = OutboundState.IDLE
+                    self.outbound_process_requested = False  # 关键：重置启动请求标志
                     # 发布出库完成消息（只在状态变化时发布一次）
                     if not self.outbound_completion_published:
                         completion_msg = Bool()
@@ -910,7 +1191,7 @@ class BusinessLogicProcessor(Node):
         msg = String()
         msg.data = command
         self.jog_pub.publish(msg)
-        self.get_logger().info(f'已发送点动命令: {command}')
+        # self.get_logger().info(f'已发送点动命令: {command}')
 
     def send_layer_command(self, layer: int):
         """发送层指令 - 优化版本，确保只发送一次"""
@@ -994,6 +1275,7 @@ class BusinessLogicProcessor(Node):
         
         # 重置信号检测状态
         self.conveyor_in_detected = False
+        self.buffer_sensor_2_detected = False  # 重置缓存架对射2检测状态
         self.outbound_conveyor_in_detected = False
         self.outbound_delay_started = False
         self.outbound_delay_condition_triggered = False
@@ -1005,9 +1287,18 @@ class BusinessLogicProcessor(Node):
         self.outbound_conveyor_in_then_out_delay_started = False
         self.outbound_conveyor_in_then_out_delay_counter = 0
 
+        # 重置自动模式初始化标志（停止后下次恢复需要重新等待）
+        self.auto_mode_initialized = False
+        self.pending_resume_state = None
+
         # 重置层指令发送状态，允许重新发送
         self.layer_command_sent = False
         self.last_layer_command = None
+
+        # 重置层移动完成状态（关键：防止状态残留影响下次流程）
+        self.layer_motion_completed = False
+        self.previous_layer_completion_state = False
+        self.layer_completion_received_time = None
 
         # 重置DO命令发送状态，允许重新发送
         self.reset_do_command_state()
@@ -1020,6 +1311,32 @@ class BusinessLogicProcessor(Node):
         self.pending_commands.clear()
         
         self.get_logger().info('业务逻辑处理器状态已重置')
+
+    def execute_pending_resume(self):
+        """执行待处理的恢复状态（轴就绪后调用）"""
+        if self.pending_resume_state is None:
+            return
+        
+        state_info = self.pending_resume_state
+        self.pending_resume_state = None  # 清除待处理状态
+        
+        if state_info['type'] == 'warehouse':
+            # 执行入库恢复
+            self.send_layer_command(state_info['layer'])
+            self.get_logger().info(f'轴就绪后执行入库恢复：发送层指令到目标层 {state_info["layer"]}')
+        elif state_info['type'] == 'outbound':
+            # 执行出库恢复
+            self.send_layer_command(state_info['layer'])
+            self.get_logger().info(f'轴就绪后执行出库恢复：发送层指令到源层 {state_info["layer"]}')
+        elif state_info['type'] == 'outbound_conveyor':
+            # 执行出库CONVEYOR_MOVING状态恢复（发送层指令到第1层）
+            self.send_layer_command(state_info['layer'])
+            self.get_logger().info(f'轴就绪后执行出库恢复：发送层指令到第{state_info["layer"]}层')
+        elif state_info['type'] == 'outbound_post_lift':
+            # 执行出库POST_LIFT_PROCESSING恢复
+            self.outbound_state = OutboundState.LIFT_MOVING
+            self.layer_motion_completed = True  # 标记层移动完成，让流程进入POST_LIFT_PROCESSING
+            self.get_logger().info('轴就绪后执行出库POST_LIFT恢复：将进入POST_LIFT_PROCESSING状态执行JOG命令')
 
 def main(args=None):
     rclpy.init(args=args)

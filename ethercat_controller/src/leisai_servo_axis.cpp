@@ -194,21 +194,21 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 current_state_ = AxisState::READY;
                 printf("轴 %s 进入就绪状态\n", axis_name_.c_str());
             } 
-            // else if (read_status_word == 0x0638) {
-            //     // 读取错误代码并打印详细故障信息
-            //     uint16_t leisai_error_code = EC_READ_U16(domain1_pd + off_error_code_);
-                
-            //     // 特殊处理：0x821b错误代码完全忽略，继续初始化
-            //     if (leisai_error_code == 0x821b || leisai_error_code == 0x0000) {
-            //         printf("轴 %s -----", axis_name_.c_str());
-            //         // 不改变current_state_，继续执行初始化序列
-            //     } else {
-            //         // 其他错误代码正常进入故障模式
-            //         current_state_ = AxisState::FAULT;
-            //         printf("轴 %s 检测到故障状态字0x0638,错误代码: 0x%04X\n",
-            //             axis_name_.c_str(), leisai_error_code);
-            //     }
-            // }
+            else if (read_status_word & 0x0008) {  // bit3(Fault)置位
+                // 读取错误代码并打印详细故障信息
+                uint16_t leisai_error_code = EC_READ_U16(domain1_pd + off_error_code_);
+
+                // 特殊处理：0x821b错误代码完全忽略，继续初始化
+                if (leisai_error_code == 0x821b || leisai_error_code == 0x0000) {
+                    printf("轴 %s -----", axis_name_.c_str());
+                    // 不改变current_state_，继续执行初始化序列
+                } else {
+                    // 其他错误代码正常进入故障模式
+                    current_state_ = AxisState::FAULT;
+                    printf("轴 %s 检测到故障状态字0x%04X,错误代码: 0x%04X\n",
+                        axis_name_.c_str(), read_status_word, leisai_error_code);
+                }
+            }
             break;
             
         case AxisState::READY:
@@ -235,34 +235,39 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             else {
                 // 保持在READY状态，保持当前位置
                 // EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-                // EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                // EC_WRITE_U16(domain1_pd + control_word_, 0x001F);
                 
-                // 新增：检测故障状态字
-                if (read_status_word == 0x0638) {
-                    printf("轴 %s 检测到故障状态字0x1638，进入故障模式\n", 
-                        axis_name_.c_str());
+                // 新增：检测故障状态字 (bit3 Fault位置位)
+                if (read_status_word & 0x0008) {
+                    printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                        axis_name_.c_str(), read_status_word);
                     current_state_ = AxisState::FAULT;
-                    // 记录故障信息
+                    // 上报故障到故障管理系统
+                    if (global_node) {
+                        global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字Fault位置位");
+                    }
                     break; // 立即跳出，不再执行后续逻辑
                 }
 
                 // 如果有启动请求但状态字不满足，检查是否状态异常
                 if (start_manual_requested_ || start_auto_requested_) {
                     static int warning_counter = 0;
-                    if (warning_counter++ % 100 == 0) {
+                    if (warning_counter++ % 1000 == 0) {
                         printf("轴 %s 等待状态字0x1637才能进入模式切换，当前状态字: 0x%04x\n", 
                             axis_name_.c_str(), read_status_word);
                     }
                     
-                    // 新增：如果状态字异常（非0x1637），自动跳转回初始化
-                    if (!(read_status_word == 0x1637 || read_status_word == 0x1237)) {
-                        printf("轴 %s 检测到异常状态字0x%04x，自动跳转回初始化状态\n", 
+                    // 新增：如果状态字表示故障或严重错误，才跳转回初始化
+                    // bit3(Fault) = 故障状态, 0x0000 = 未初始化/通信中断
+                    // 注意：0x0633(Switch on disabled)和0x0637(Switched on)是正常中间状态，不视为异常
+                    if ((read_status_word & 0x0008) || read_status_word == 0x0000) {
+                        printf("轴 %s 检测到故障/异常状态字0x%04x，自动跳转回初始化状态\n",
                             axis_name_.c_str(), read_status_word);
                         current_state_ = AxisState::INITIALIZING;
-                        
-                        // 可选：清除启动请求标志，避免重复触发
-                        // start_manual_requested_ = false;
-                        // start_auto_requested_ = false;
+
+                        // 清除启动请求标志，避免重复触发
+                        start_manual_requested_ = false;
+                        start_auto_requested_ = false;
                     }
                 }
             }
@@ -270,11 +275,23 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::MANUAL_MODE:
             // 手动模式处理
+            // === 检测故障状态字 (bit3 Fault位置位) ===
+            if (read_status_word & 0x0008) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字Fault位置位");
+                }
+                break;
+            }
+            
             // === 处理停止请求（结束作业）===
             if (stop_requested_) {
                 // 发送停止指令：保持当前位置
                 EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
                 
                 // 检查轴是否已停止（速度为0或状态字变化）
                 // 这里简单处理：直接跳转，实际可根据需求添加停止确认
@@ -294,11 +311,23 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::AUTO_MODE:
             // 自动模式处理
+            // === 检测故障状态字 (bit3 Fault位置位) ===
+            if (read_status_word & 0x0008) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字Fault位置位");
+                }
+                break;
+            }
+            
             // === 处理停止请求（结束作业）===
             if (stop_requested_) {
                 // 发送停止指令：保持当前位置
                 EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-                EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
                 
                 stop_requested_ = false;
                 current_state_ = AxisState::STOPPED;
@@ -316,13 +345,36 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::STOPPED:
             // 停止状态：保持当前位置，等待回到INITIALIZING
+            // === 检测故障状态字 (bit3 Fault位置位) ===
+            if (read_status_word & 0x0008) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字Fault位置位");
+                }
+                break;
+            }
+            
             EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-            EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+            
+            // +++ 关键修复：在STOPPED状态持续清理运动状态，确保不会继续执行原指令 +++
+            displacement_updated_ = false;
+            target_pulses_ = current_pos;
+            jog_forward_requested_ = false;
+            jog_reverse_requested_ = false;
 
             // 检查是否可以回到READY状态
             // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
             if (read_status_word == 0x1637 ) {
                 current_state_ = AxisState::INITIALIZING;
+                // +++ 关键修复：状态转换前再次确认运动状态已清理 +++
+                displacement_updated_ = false;
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                position_initialized_ = false;  // 重新进入时需要重新初始化位置
                 printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
             }
             break;
@@ -358,11 +410,12 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                     current_state_ = AxisState::INITIALIZING;
                     fault_clear_step_ = 0;  // 重置步骤
                     fault_clear_counter_ = 0;
+                    current_error_code_ = 0; // 清除错误码，防止重新触发
                     printf("轴 %s 故障清除完成，回到初始化状态\n", axis_name_.c_str());
                 }
             } 
-            // 检查是否需要启动清除流程
-            else if (error_code == 0x821b || clear_fault_requested_) {
+            // 检查是否需要启动清除流程（仅当错误码存在或收到清除请求）
+            else if ((current_error_code_ == 0x821b && error_code == 0x821b) || clear_fault_requested_) {
                 fault_clearing_in_progress_ = true;
                 fault_clear_step_ = 0;
                 fault_clear_counter_ = 0;
@@ -543,6 +596,76 @@ void LeisaiServoAxis::handle_leisai_fault_state(uint8_t* domain1_pd, uint16_t er
     // 实现故障状态处理逻辑
     if (fault_clearing_in_progress_) {
         handle_fault_clear(domain1_pd);
+    }
+}
+
+void LeisaiServoAxis::handle_fault_clear(uint8_t* domain1_pd) {
+    fault_clear_counter_++;
+    uint16_t current_status = EC_READ_U16(domain1_pd + status_word_);
+
+    switch (fault_clear_step_) {
+        case 0:
+            // 步骤0：非通讯错误时，等待外部SDO写入0x2057完成
+            // 通讯错误(0x821b)自动清除，无需额外操作
+            if (current_error_code_ != 0x821b) {
+                // 标记需要外部SDO处理，然后继续标准清除流程
+                // 实际0x2057写入需在外部非实时线程中执行
+                printf("轴 %s 非通讯错误(0x%04X)，需先写入0x2057=1再清除\n",
+                       axis_name_.c_str(), current_error_code_);
+            }
+            // 短暂延迟确保外部SDO写入完成（如已触发）
+            if (fault_clear_counter_ > 5) {
+                fault_clear_step_ = 1;
+                fault_clear_counter_ = 0;
+            }
+            break;
+
+        case 1:
+            // 步骤1：发送故障复位命令0x0080
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0080);
+            printf("轴 %s 故障清除步骤1: 发送0x0080\n", axis_name_.c_str());
+            if (fault_clear_counter_ > 10) {
+                fault_clear_step_ = 2;
+                fault_clear_counter_ = 0;
+            }
+            break;
+
+        case 2:
+            // 步骤2：写0x0000准备使能
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0000);
+            printf("轴 %s 故障清除步骤2: 发送0x0000\n", axis_name_.c_str());
+            if (fault_clear_counter_ > 5) {
+                fault_clear_step_ = 3;
+                fault_clear_counter_ = 0;
+            }
+            break;
+
+        case 3:
+            // 步骤3：写0x0006切换到准备开关ON
+            EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+            printf("轴 %s 故障清除步骤3: 发送0x0006\n", axis_name_.c_str());
+            if (fault_clear_counter_ > 5) {
+                fault_clear_step_ = 4;
+                fault_clear_counter_ = 0;
+            }
+            break;
+
+        case 4:
+            // 步骤4：检查状态字，确认故障已清除
+            if ((current_status & 0x0008) == 0) {
+                fault_clearing_in_progress_ = false;
+                int32_t current_pos = EC_READ_S32(domain1_pd + off_actual_position_);
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                initial_position_ = current_pos;
+                printf("轴 %s 故障清除完成，状态字: 0x%04x\n",
+                       axis_name_.c_str(), current_status);
+            } else if (fault_clear_counter_ > 100) {
+                fault_clearing_in_progress_ = false;
+                printf("轴 %s 故障清除超时，当前状态字: 0x%04x\n",
+                       axis_name_.c_str(), current_status);
+            }
+            break;
     }
 }
 

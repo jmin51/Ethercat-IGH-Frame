@@ -47,6 +47,15 @@ public:
     void set_layer_completion_publisher(rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub) {
         layer_completion_pub_ = pub;
     }
+    
+    // 新增：重置运动状态（用于stop命令后清理状态）
+    void reset_motion_state();
+
+    // 新增：检查是否有待执行的命令
+    bool has_pending_command() const { return has_pending_command_.load(); }
+    
+    // 新增：执行待处理的位移命令（在自动模式初始化完成后调用）
+    void execute_pending_command();
 
 private:
     rclcpp::Node* node_;
@@ -62,6 +71,11 @@ private:
     // 运动参数
     double motion_speed_;          // 运动速度(mm/s)
     double motion_acceleration_;   // 加速度(mm/s²)
+
+    // 待处理命令（用于延迟到自动模式初始化完成后执行）
+    std::atomic<bool> has_pending_command_{false};  // 是否有待处理的命令
+    double pending_target_height_{0.0};             // 待发送的目标高度
+    std::atomic<bool> start_msg_published_{false};  // 开始消息是否已发布
 
     // 初始化默认层高配置
     void initialize_default_layer_heights();

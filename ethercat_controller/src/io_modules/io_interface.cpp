@@ -16,6 +16,32 @@ static DO_Interface current_do_state = {0};
 static std::mutex modbus_di_mutex;
 static std::mutex modbus_do_mutex;
 
+/* ============================================================
+ * 断线重连机制 - 连接配置与状态管理
+ * ============================================================ */
+
+// 连接配置存储
+static struct {
+    char ip[32];
+    int port;
+    int slave_id;
+} di_config = {0}, do_config = {0};
+
+// 连接状态与重连控制
+static struct {
+    time_t last_reconnect_time;  // 上次重连时间
+    bool is_connected;           // 连接状态标记
+} di_status = {0, false}, do_status = {0, false};
+
+#define RECONNECT_INTERVAL_SECONDS  5   // 重连间隔(秒)
+#define RECONNECT_MAX_RETRY         3   // 单次最大重试次数
+
+// 前置声明
+static bool try_reconnect_di(void);
+static bool try_reconnect_do(void);
+static void close_di_connection(void);
+static void close_do_connection(void);
+
 // 函数前置声明
 #if ENABLE_DO_MODULE
 static void refresh_do_state_from_device(void);
@@ -25,7 +51,13 @@ static void refresh_do_state_from_device(void);
 #if ENABLE_DO_MODULE
 static void refresh_do_state_from_device() {
     std::lock_guard<std::mutex> lock(modbus_do_mutex);
-    if (!ctx_do) return;
+    
+    // 连接断开时尝试重连
+    if (!ctx_do || !do_status.is_connected) {
+        // 注意：此处不能调用try_reconnect_do，因为已持有锁会导致死锁
+        // 重连逻辑由调用方处理或在写入时触发
+        return;
+    }
     
     uint8_t do_values[16];
     if (modbus_read_bits(ctx_do, 0, 16, do_values) == 16) {
@@ -42,7 +74,13 @@ static void refresh_do_state_from_device() {
         current_do_state.belt_backward = do_values[13];  // 新增皮带反转状态读取
         // printf("DO状态已从设备刷新\n");  // 调试时启用，正式运行关闭
     } else {
-        fprintf(stderr, "刷新DO状态失败: %s\n", modbus_strerror(errno));
+        // 读取失败，关闭连接触发重连
+        close_do_connection();
+        static int err_cnt = 0;
+        if (err_cnt++ % 100 == 0) {
+            fprintf(stderr, "刷新DO状态失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
+        }
     }
 }
 #endif
@@ -53,12 +91,29 @@ int init_modbus_interface(const char* di_ip, int di_port, int di_slave_id,
     
     int result = 0;
     
+    // 保存DI配置用于重连
+    if (di_ip != NULL) {
+        strncpy(di_config.ip, di_ip, sizeof(di_config.ip) - 1);
+        di_config.ip[sizeof(di_config.ip) - 1] = '\0';
+        di_config.port = di_port;
+        di_config.slave_id = di_slave_id;
+    }
+    
+    // 保存DO配置用于重连
+    if (do_ip != NULL) {
+        strncpy(do_config.ip, do_ip, sizeof(do_config.ip) - 1);
+        do_config.ip[sizeof(do_config.ip) - 1] = '\0';
+        do_config.port = do_port;
+        do_config.slave_id = do_slave_id;
+    }
+    
     // 初始化DI连接（如果启用）
 #if ENABLE_DI_MODULE
     if (di_ip != NULL) {
         ctx_di = modbus_new_tcp(di_ip, di_port);
         if (ctx_di == NULL) {
             fprintf(stderr, "无法创建 DI Modbus 上下文\n");
+            di_status.is_connected = false;
             result = -1;
         } else {
             modbus_set_response_timeout(ctx_di, 1, 0);
@@ -68,9 +123,12 @@ int init_modbus_interface(const char* di_ip, int di_port, int di_slave_id,
                 fprintf(stderr, "DI连接失败: %s\n", modbus_strerror(errno));
                 modbus_free(ctx_di);
                 ctx_di = NULL;
+                di_status.is_connected = false;
                 result = -1;
             } else {
                 printf("DI设备连接成功: %s:%d (从站ID: %d)\n", di_ip, di_port, di_slave_id);
+                di_status.is_connected = true;
+                di_status.last_reconnect_time = time(NULL);
             }
         }
     }
@@ -84,6 +142,7 @@ int init_modbus_interface(const char* di_ip, int di_port, int di_slave_id,
         ctx_do = modbus_new_tcp(do_ip, do_port);
         if (ctx_do == NULL) {
             fprintf(stderr, "无法创建 DO Modbus 上下文\n");
+            do_status.is_connected = false;
             result = -1;
         } else {
             modbus_set_response_timeout(ctx_do, 1, 0);
@@ -93,9 +152,12 @@ int init_modbus_interface(const char* di_ip, int di_port, int di_slave_id,
                 fprintf(stderr, "DO连接失败: %s\n", modbus_strerror(errno));
                 modbus_free(ctx_do);
                 ctx_do = NULL;
+                do_status.is_connected = false;
                 result = -1;
             } else {
                 printf("DO设备连接成功: %s:%d (从站ID: %d)\n", do_ip, do_port, do_slave_id);
+                do_status.is_connected = true;
+                do_status.last_reconnect_time = time(NULL);
                 
                 // 初始化时读取当前DO状态
                 refresh_do_state_from_device();
@@ -119,6 +181,7 @@ void cleanup_modbus_interface() {
         modbus_close(ctx_di);
         modbus_free(ctx_di);
         ctx_di = NULL;
+        di_status.is_connected = false;
         printf("DI连接已关闭\n");
     }
 #endif
@@ -128,9 +191,118 @@ void cleanup_modbus_interface() {
         modbus_close(ctx_do);
         modbus_free(ctx_do);
         ctx_do = NULL;
+        do_status.is_connected = false;
         printf("DO连接已关闭\n");
     }
 #endif
+}
+
+/* ============================================================
+ * 断线重连实现
+ * ============================================================ */
+
+// 关闭DI连接并清理状态
+static void close_di_connection(void) {
+    if (ctx_di) {
+        modbus_close(ctx_di);
+        modbus_free(ctx_di);
+        ctx_di = NULL;
+    }
+    di_status.is_connected = false;
+}
+
+// 关闭DO连接并清理状态
+static void close_do_connection(void) {
+    if (ctx_do) {
+        modbus_close(ctx_do);
+        modbus_free(ctx_do);
+        ctx_do = NULL;
+    }
+    do_status.is_connected = false;
+}
+
+// 尝试重连DI设备
+static bool try_reconnect_di(void) {
+    // 检查重连间隔
+    time_t current_time = time(NULL);
+    if (current_time - di_status.last_reconnect_time < RECONNECT_INTERVAL_SECONDS) {
+        return false;  // 冷却期内，不重连
+    }
+    
+    di_status.last_reconnect_time = current_time;
+    
+    // 先关闭旧连接
+    close_di_connection();
+    
+    // 创建新连接
+    ctx_di = modbus_new_tcp(di_config.ip, di_config.port);
+    if (ctx_di == NULL) {
+        static int err_cnt = 0;
+        if (err_cnt++ % 10 == 0) {
+            fprintf(stderr, "DI重连: 无法创建Modbus上下文 (已抑制%d次)\n", err_cnt);
+        }
+        return false;
+    }
+    
+    modbus_set_response_timeout(ctx_di, 1, 0);
+    modbus_set_slave(ctx_di, di_config.slave_id);
+    
+    if (modbus_connect(ctx_di) == -1) {
+        static int err_cnt = 0;
+        if (err_cnt++ % 10 == 0) {
+            fprintf(stderr, "DI重连失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
+        }
+        modbus_free(ctx_di);
+        ctx_di = NULL;
+        return false;
+    }
+    
+    printf("DI设备重连成功: %s:%d\n", di_config.ip, di_config.port);
+    di_status.is_connected = true;
+    return true;
+}
+
+// 尝试重连DO设备
+static bool try_reconnect_do(void) {
+    // 检查重连间隔
+    time_t current_time = time(NULL);
+    if (current_time - do_status.last_reconnect_time < RECONNECT_INTERVAL_SECONDS) {
+        return false;  // 冷却期内，不重连
+    }
+    
+    do_status.last_reconnect_time = current_time;
+    
+    // 先关闭旧连接
+    close_do_connection();
+    
+    // 创建新连接
+    ctx_do = modbus_new_tcp(do_config.ip, do_config.port);
+    if (ctx_do == NULL) {
+        static int err_cnt = 0;
+        if (err_cnt++ % 10 == 0) {
+            fprintf(stderr, "DO重连: 无法创建Modbus上下文 (已抑制%d次)\n", err_cnt);
+        }
+        return false;
+    }
+    
+    modbus_set_response_timeout(ctx_do, 1, 0);
+    modbus_set_slave(ctx_do, do_config.slave_id);
+    
+    if (modbus_connect(ctx_do) == -1) {
+        static int err_cnt = 0;
+        if (err_cnt++ % 10 == 0) {
+            fprintf(stderr, "DO重连失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
+        }
+        modbus_free(ctx_do);
+        ctx_do = NULL;
+        return false;
+    }
+    
+    printf("DO设备重连成功: %s:%d\n", do_config.ip, do_config.port);
+    do_status.is_connected = true;
+    return true;
 }
 
 // DI 信号读取接口
@@ -140,15 +312,26 @@ DI_Interface read_all_di_signals() {
     
     std::lock_guard<std::mutex> lock(modbus_di_mutex);
     
-    if (!ctx_di) {
-        fprintf(stderr, "DI Modbus 未初始化\n");
-        return di;
+    // 连接断开时尝试重连
+    if (!ctx_di || !di_status.is_connected) {
+        try_reconnect_di();
+        // 重连后仍无效，返回空数据
+        if (!ctx_di) {
+            // static int init_error_count = 0;
+            // if (init_error_count++ % 1000 == 0) {
+            //     fprintf(stderr, "DI Modbus 未连接，重连失败 (已抑制%d次)\n", init_error_count);
+            // }
+            return di;
+        }
     }
     
     uint8_t di_values[48];
     int rc = modbus_read_input_bits(ctx_di, 0, 48, di_values);
     
     if (rc == -1) {
+        // 读取失败：关闭连接触发下次重连
+        close_di_connection();
+        
         // 减少日志刷屏：仅在非连续错误时打印
         static int error_count = 0;
         if (error_count++ % 100 == 0) {
@@ -193,7 +376,17 @@ DI_Interface read_all_di_signals() {
 bool read_single_di_signal(int di_address) {
     std::lock_guard<std::mutex> lock(modbus_di_mutex);
     
-    if (!ctx_di) return false;
+    // 连接断开时尝试重连
+    if (!ctx_di || !di_status.is_connected) {
+        try_reconnect_di();
+        if (!ctx_di) {
+            static int err_cnt = 0;
+            if (err_cnt++ % 100 == 0) {
+                fprintf(stderr, "DI未连接，重连失败，无法读取单信号 (已抑制%d次)\n", err_cnt);
+            }
+            return false;
+        }
+    }
     
     // 地址有效性检查
     if (di_address < 512 || di_address > 534) {
@@ -204,7 +397,18 @@ bool read_single_di_signal(int di_address) {
     uint8_t value;
     int rc = modbus_read_input_bits(ctx_di, di_address - 512, 1, &value);
     
-    return (rc == 1) ? value : false;
+    if (rc != 1) {
+        // 读取失败，关闭连接触发重连
+        close_di_connection();
+        static int err_cnt = 0;
+        if (err_cnt++ % 100 == 0) {
+            fprintf(stderr, "读取单DI信号失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
+        }
+        return false;
+    }
+    
+    return value;
 }
 #else
 // DI模块禁用时的空实现
@@ -225,12 +429,26 @@ bool read_single_di_signal(int di_address) {
 int write_do_signals(DO_Interface do_signals) {
     std::lock_guard<std::mutex> lock(modbus_do_mutex);
     
-    if (!ctx_do) return -1;
+    // 连接断开时尝试重连
+    if (!ctx_do || !do_status.is_connected) {
+        try_reconnect_do();
+        if (!ctx_do) {
+            static int err_cnt = 0;
+            if (err_cnt++ % 100 == 0) {
+                fprintf(stderr, "DO未连接，重连失败，无法写入 (已抑制%d次)\n", err_cnt);
+            }
+            return -1;
+        }
+    }
     
     // 先读取当前所有DO状态，避免清除其他位
     uint8_t do_values[16];
     if (modbus_read_bits(ctx_do, 0, 16, do_values) != 16) {
-        fprintf(stderr, "读取当前DO状态失败\n");
+        close_do_connection();  // 读取失败，关闭连接触发重连
+        static int err_cnt = 0;
+        if (err_cnt++ % 100 == 0) {
+            fprintf(stderr, "读取当前DO状态失败 (已抑制%d次)\n", err_cnt);
+        }
         return -1;
     }
     
@@ -250,9 +468,17 @@ int write_do_signals(DO_Interface do_signals) {
     // 写入设备
     int result = modbus_write_bits(ctx_do, 0, 16, do_values);
     
-    // 无论写入是否成功，都从设备刷新状态以确保一致性
     if (result == 16) {
+        // 写入成功，刷新状态
         refresh_do_state_from_device();
+    } else {
+        // 写入失败，关闭连接触发重连
+        close_do_connection();
+        static int err_cnt = 0;
+        if (err_cnt++ % 100 == 0) {
+            fprintf(stderr, "写入DO失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
+        }
     }
     
     return result;
@@ -261,7 +487,17 @@ int write_do_signals(DO_Interface do_signals) {
 int write_single_do_signal(int do_address, bool state) {
     std::lock_guard<std::mutex> lock(modbus_do_mutex);
     
-    if (!ctx_do) return -1;
+    // 连接断开时尝试重连
+    if (!ctx_do || !do_status.is_connected) {
+        try_reconnect_do();
+        if (!ctx_do) {
+            static int err_cnt = 0;
+            if (err_cnt++ % 100 == 0) {
+                fprintf(stderr, "DO未连接，重连失败，无法写入单信号 (已抑制%d次)\n", err_cnt);
+            }
+            return -1;
+        }
+    }
     
     // 地址有效性检查
     if (do_address < 800 || do_address > 813) {
@@ -272,8 +508,8 @@ int write_single_do_signal(int do_address, bool state) {
     // 写入单个信号到设备
     int result = modbus_write_bit(ctx_do, do_address - 800, state);
     
-    // 写入成功后，刷新DO状态缓存（注意：这里不调用refresh_do_state_from_device避免死锁）
     if (result == 1) {
+        // 写入成功后，刷新DO状态缓存（注意：这里不调用refresh_do_state_from_device避免死锁）
         uint8_t do_values[16];
         if (modbus_read_bits(ctx_do, 0, 16, do_values) == 16) {
             current_do_state.start_button_light = do_values[0];
@@ -287,6 +523,14 @@ int write_single_do_signal(int do_address, bool state) {
             current_do_state.gear_cylinder_extend = do_values[11];
             current_do_state.belt_forward = do_values[12];
             current_do_state.belt_backward = do_values[13];
+        }
+    } else {
+        // 写入失败，关闭连接触发重连
+        close_do_connection();
+        static int err_cnt = 0;
+        if (err_cnt++ % 100 == 0) {
+            fprintf(stderr, "写入单DO信号失败: %s (已抑制%d次)\n", 
+                    modbus_strerror(errno), err_cnt);
         }
     }
     
@@ -331,6 +575,23 @@ bool is_di_module_enabled() {
 bool is_do_module_enabled() {
 #if ENABLE_DO_MODULE
     return true;
+#else
+    return false;
+#endif
+}
+
+// 连接状态检查
+bool is_di_connected() {
+#if ENABLE_DI_MODULE
+    return di_status.is_connected && ctx_di != NULL;
+#else
+    return false;
+#endif
+}
+
+bool is_do_connected() {
+#if ENABLE_DO_MODULE
+    return do_status.is_connected && ctx_do != NULL;
 #else
     return false;
 #endif

@@ -3,7 +3,6 @@
 #include "lights_controller.hpp"  // 灯光控制器
 #include <pthread.h>
 #include <sched.h>
-#include <modbus/modbus.h>
 #include "globals.h"
 #include <sys/mman.h> 
 #include <string.h>  
@@ -25,57 +24,6 @@ struct timespec timespec_add(struct timespec time1, struct timespec time2) {
 }
 
 #define TIMESPEC2NS(T) ((uint64_t)(T).tv_sec * NSEC_PER_SEC + (T).tv_nsec)
-
-// Modbus线程函数
-void* modbus_read_thread(void *arg) {
-    mb_ctx = modbus_new_tcp("192.168.3.12", 502);
-    if (mb_ctx == nullptr) {
-        fprintf(stderr, "无法创建Modbus上下文\n");
-        return nullptr;
-    }
-
-    modbus_set_slave(mb_ctx, 1);
-
-    if (modbus_connect(mb_ctx) == -1) {
-        fprintf(stderr, "Modbus连接失败: %s\n", modbus_strerror(errno));
-        modbus_free(mb_ctx);
-        mb_ctx = nullptr;
-        return nullptr;
-    }
-
-    printf("Modbus连接成功，开始监测DI13状态...\n");
-
-    while (modbus_running) {      
-        uint8_t di_value;
-        int rc = modbus_read_input_bits(mb_ctx, 12, 1, &di_value);
-        
-        if (rc == -1) {
-            fprintf(stderr, "读取DI13失败: %s\n", modbus_strerror(errno));
-            usleep(100000);
-            continue;
-        }
-        
-        di13_state.store(di_value ? 1 : 0);
-        
-        static int last_state = -1;
-        int current_state = di13_state.load();
-        if (current_state != last_state) {
-            printf("DI13状态: %s\n", current_state ? "ON" : "OFF");
-            last_state = current_state;
-        }
-        
-        usleep(50000);
-    }
-    
-    modbus_close(mb_ctx);
-    modbus_free(mb_ctx);
-    mb_ctx = nullptr;
-    return nullptr;
-}
-
-int init_modbus_monitor() {
-    return pthread_create(&modbus_thread, nullptr, modbus_read_thread, nullptr);
-}
 
 // 主站状态检查
 void check_master_state(void) {
@@ -106,6 +54,128 @@ void signal_handler(int signum) {
     safe_shutdown(false);  // false表示完全关闭模式
 }
 
+// 仅停止电机和皮带（短按暂停）
+void pause_motors_only() {
+    printf("\n[短按暂停] ========================================\n");
+    printf("[短按暂停] 停止电机和皮带，保持EtherCAT运行...\n");
+    
+    // 0. 首先记录当前业务状态（在停止前获取）
+    if (global_node) {
+        printf("[短按暂停] 请求记录当前业务逻辑状态...\n");
+        global_node->publish_pause_state_record_request();
+        // 等待一小段时间让Python端处理并返回状态报告
+        usleep(200000);  // 200ms
+    }
+    
+    // 1. 复位关键DO信号（M810-M813）- 停止皮带和气缸
+    printf("[短按暂停] 复位关键DO信号 M810-M813...\n");
+    write_single_do_signal(810, false);  // 顶升气缸下降
+    write_single_do_signal(811, false);  // 齿轮对接气缸伸出
+    write_single_do_signal(812, false);  // 皮带正转启动
+    write_single_do_signal(813, false);  // 皮带反转启动
+    printf("[短按暂停] DO信号复位完成\n");
+    
+    // 2. 停止所有轴的运动
+    if (global_node) {
+        printf("[短按暂停] 停止所有伺服轴...\n");
+        auto& axes = global_node->get_servo_axes();
+        for (auto& axis : axes) {
+            // 2.1 调用stop()完全停止轴（包括清除目标位置、点动请求等）
+            axis->stop();
+            // 2.2 清除目标到达标志（读取并清除一次性标志）
+            axis->check_target_reached_flag();
+        }
+        printf("[短按暂停] 所有伺服轴已停止\n");
+    }
+    
+    // 3. 设置短按暂停状态
+    g_short_pause_active.store(true);
+    g_short_pause_requested.store(false);
+    g_system_running.store(false);  // 设置系统停止状态
+    
+    // 4. 重置自动模式初始化标志（确保下次恢复时重新等待轴就绪）
+    g_auto_mode_initialized.store(false);
+    if (global_node) {
+        global_node->reset_auto_mode_init_published();
+    }
+    
+    // 4. 打印记录的状态信息
+    if (g_pause_state_record.has_recorded_state) {
+        printf("[短按暂停] 业务状态已记录:\n");
+        printf("[短按暂停]   - 入库流程: %s (状态=%d, 目标层=%d)\n",
+               g_pause_state_record.warehouse_was_active ? "进行中" : "未激活",
+               g_pause_state_record.warehouse_state_value,
+               g_pause_state_record.warehouse_target_layer);
+        printf("[短按暂停]   - 出库流程: %s (状态=%d, 源层=%d)\n",
+               g_pause_state_record.outbound_was_active ? "进行中" : "未激活",
+               g_pause_state_record.outbound_state_value,
+               g_pause_state_record.outbound_source_layer);
+    }
+    
+    printf("[短按暂停] 电机和皮带已停止，系统处于暂停状态，按启动按钮恢复\n");
+    printf("[短按暂停] ========================================\n");
+}
+
+// 恢复系统运行（短按暂停后的启动）
+void resume_from_short_pause() {
+    printf("\n[恢复运行] ========================================\n");
+    printf("[恢复运行] 从短按暂停状态恢复...\n");
+    
+    // 立即清除短按暂停状态，确保后续层指令能被正常接收
+    g_short_pause_active.store(false);
+    
+    if (global_node) {
+        auto& axes = global_node->get_servo_axes();
+        printf("[恢复运行] 重置 %zu 个轴到未初始化状态，准备重新初始化...\n", axes.size());
+        for (auto& axis : axes) {
+            axis->reset_axis();  // 强制回到 UNINITIALIZED
+        }
+        
+        // 不等待所有轴就绪，直接让IO控制逻辑处理
+        // IO控制逻辑会在主循环中检测READY状态的轴并自动切换模式
+        printf("[恢复运行] 轴已重置，由IO控制逻辑自动处理模式切换\n");
+    }
+#if CONTROL_SOURCE_IO
+    // ============================================================
+    // IO控制模式：通过手自动按钮状态决定进入手动还是自动模式
+    // ============================================================
+    DI_Interface di = read_all_di_signals();
+    bool is_auto_mode = di.manual_auto_button;  // 手自动按钮状态
+    
+    printf("[恢复运行] IO控制模式 - 手自动按钮状态: %s\n", 
+           is_auto_mode ? "自动" : "手动");
+    
+    // 设置恢复后模式切换标志，等待轴就绪后再执行模式切换
+    // 避免轴从UNINITIALIZED复位后未就绪时无法切换模式的问题
+    g_resume_auto_mode.store(is_auto_mode);
+    g_resume_mode_switch_pending.store(true);
+    printf("[恢复运行] 已设置模式切换标志(%s)，等待轴就绪后自动切换...\n", 
+           is_auto_mode ? "自动" : "手动");
+#else
+    // ============================================================
+    // 话题控制模式：不直接启动轴，等待外部话题命令
+    // 只发送恢复请求，由外部控制逻辑决定是否启动
+    // ============================================================
+    printf("[恢复运行] 话题控制模式 - 等待外部话题命令启动...\n");
+    // 不调用 start_auto_mode() 或 start_manual_mode()
+    // 等待 handle_py_control_command() 接收话题命令后再启动
+#endif
+    
+    // 2. 发送恢复请求，携带记录的状态信息
+    if (global_node && g_pause_state_record.has_recorded_state) {
+        printf("[恢复运行] 发送业务状态恢复请求...\n");
+        global_node->publish_pause_state_resume_request();
+        // 等待一小段时间让Python端处理
+        usleep(100000);  // 100ms
+    }
+    
+    // 清除启动按钮状态
+    g_start_button_pressed.store(false);
+    
+    printf("[恢复运行] 系统已恢复运行，业务逻辑将重走之前记录的状态\n");
+    printf("[恢复运行] ========================================\n");
+}
+
 // 安全关闭
 void safe_shutdown(bool is_pause = false) {
     static std::atomic<bool> shutdown_in_progress{false};
@@ -114,6 +184,9 @@ void safe_shutdown(bool is_pause = false) {
         printf("关闭流程已在执行中...\n");
         return;
     }
+    
+    // 清除短按暂停状态（如果是长按暂停，需要清除短按状态）
+    g_short_pause_active.store(false);
     
     if (is_pause) {
         printf("\n开始安全暂停流程...\n");
@@ -184,19 +257,7 @@ void safe_shutdown(bool is_pause = false) {
         printf("[DEBUG] 实时线程句柄为空\n");
     }
     
-    // 3. 暂停模式下不停止Modbus线程和IO监控
-    if (!is_pause) {
-        printf("[DEBUG] 步骤4: 处理Modbus线程\n");
-        modbus_running = 0;
-        if (modbus_thread) {
-            printf("等待Modbus线程退出...\n");
-            pthread_join(modbus_thread, nullptr);
-            modbus_thread = 0;
-            printf("Modbus线程已退出\n");
-        }
-    } else {
-        printf("[DEBUG] 暂停模式：保持Modbus线程运行\n");
-    }
+    // 3. 暂停模式下不停止Modbus线程和IO监控（删除）
     
     // 4. 禁用驱动器
     if (master && global_node && domain1_pd) {
@@ -283,8 +344,9 @@ void* rt_task_wrapper(void* arg) {
             break;
         }
         
-        // 检查系统运行状态
-        if (!g_system_running.load()) {
+        // 检查系统是否完全停止（长按暂停/关闭）
+        // 短按暂停时保持EtherCAT通信运行
+        if (!g_system_running.load() && !g_short_pause_active.load()) {
             usleep(50000); // 50ms等待
             continue;
         }
@@ -295,7 +357,7 @@ void* rt_task_wrapper(void* arg) {
         // 设置应用时间
         ecrt_master_application_time(master, TIMESPEC2NS(wakeup_time));
         
-        // EtherCAT通信处理
+        // EtherCAT通信处理（短按暂停时保持运行）
         ecrt_master_receive(master);
         ecrt_domain_process(domain1);
         
@@ -309,7 +371,7 @@ void* rt_task_wrapper(void* arg) {
             counter--;
         }
         
-        // 处理轴状态机
+        // 处理轴状态机（始终保持运行以维持使能）
         if (global_node && domain1_pd) {
             global_node->handle_axes_state_machines(domain1_pd);
         }
@@ -359,10 +421,6 @@ int main(int argc, char **argv) {
         return 1;
     }
       
-    // 初始化Modbus监控
-    if (init_modbus_monitor() != 0) {
-        fprintf(stderr, "创建Modbus监测线程失败\n");
-    }
     // 启动IO监控
     printf("启动IO监控模块...\n");
     global_node->start_io_monitoring();
@@ -437,14 +495,88 @@ int main(int argc, char **argv) {
         
         // 灯光控制（按钮灯 + 三色灯）
         DI_Interface di = read_all_di_signals();
-        update_button_lights(di.start_button, di.reset_button, di.pause_button);
+        // 急停按钮：M516（emergency_stop）和 M517（air_supply/气源输入）短按启动3秒计时，满3秒触发暂停
+        update_button_lights(di.start_button, di.reset_button, di.pause_button, di.emergency_stop, di.air_supply);
         update_tricolor_lights();
         
-        // 检查启动按钮
+        // 检查短按暂停请求
+        if (g_short_pause_requested.load() && g_system_running.load()) {
+            printf("检测到短按暂停请求...\n");
+            pause_motors_only();
+            printf("系统已短按暂停，等待启动按钮恢复...\n");
+        }
+        
+        // 检查长按暂停请求（急停或长按暂停按钮触发）
+        if (g_long_pause_requested.load()) {
+            printf("检测到长按暂停/急停请求...\n");
+            g_system_running.store(false);
+            g_start_button_pressed.store(false);
+            g_reset_button_pressed.store(false);
+            g_long_pause_requested.store(false);
+            safe_shutdown(true);  // true表示暂停模式
+            printf("系统已完全暂停，等待启动按钮...\n");
+        }
+        
+        // 检查恢复后的模式切换请求（轴就绪后再执行模式切换）
+        if (g_resume_mode_switch_pending.load() && g_system_running.load() && global_node) {
+            auto& axes = global_node->get_servo_axes();
+            bool all_axes_ready = true;
+            for (auto& axis : axes) {
+                if (!axis->is_ready()) {
+                    all_axes_ready = false;
+                    break;
+                }
+            }
+            
+            if (all_axes_ready) {
+                bool is_auto = g_resume_auto_mode.load();
+                printf("[恢复运行] 所有轴已就绪，执行%s模式切换...\n", 
+                       is_auto ? "自动" : "手动");
+                for (auto& axis : axes) {
+                    if (is_auto) {
+                        axis->start_auto_mode();
+                    } else {
+                        axis->start_manual_mode();
+                    }
+                }
+                g_resume_mode_switch_pending.store(false);
+                printf("[恢复运行] 模式切换完成\n");
+            }
+        }
+        
+        // 检查自动模式位置初始化完成状态（用于恢复时通知业务逻辑）
+        if (g_system_running.load() && global_node && !g_auto_mode_initialized.load()) {
+            auto& axes = global_node->get_servo_axes();
+            bool all_axes_auto_initialized = true;
+            for (auto& axis : axes) {
+                if (!axis->is_auto_mode_initialized()) {
+                    all_axes_auto_initialized = false;
+                    break;
+                }
+            }
+            
+            if (all_axes_auto_initialized) {
+                g_auto_mode_initialized.store(true);
+                printf("[恢复运行] 所有轴自动模式位置初始化完成\n");
+            }
+        }
+        
+        // 检查启动按钮 - 区分是恢复还是重新启动
         if (g_start_button_pressed.load() && !g_system_running.load()) {
+            // 检查是否是短按暂停后的恢复
+            if (g_short_pause_active.load()) {
+                printf("从短按暂停状态恢复...\n");
+                g_system_running.store(true);
+                resume_from_short_pause();
+                printf("系统已恢复运行\n");
+                continue;
+            }
+
             printf("开始重新启动系统...\n");
             g_system_running.store(true);
             g_start_button_pressed.store(false);
+            // 清除暂停标志，防止实时线程立即退出
+            g_pause_button_pressed.store(false);
             
             // 重新初始化EtherCAT资源
             if (!master) {
@@ -564,33 +696,6 @@ int main(int argc, char **argv) {
             printf("系统重新启动完成\n");    
         }
 
-        // 检查暂停按钮
-        if (g_pause_button_pressed.load() && g_system_running.load()) {
-            printf("开始安全暂停系统...\n");
-            g_system_running.store(false);
-            g_start_button_pressed.store(false);
-            g_reset_button_pressed.store(false);
-            g_pause_button_pressed.store(false);
-            // // 安全暂停操作 to do后续可简化方向
-            // if (thread) {
-            //     printf("等待实时线程退出...\n");
-            //     pthread_join(thread, nullptr);
-            //     thread = 0;
-            //     printf("实时线程已退出\n");
-            // }
-            
-            // // 禁用EtherCAT主站
-            // if (master) {
-            //     printf("禁用EtherCAT主站...\n");
-            //     ecrt_master_deactivate(master);
-            //     ecrt_release_master(master);
-            //     master = nullptr;
-            // }
-            safe_shutdown(true);  // true表示暂停模式
-            
-            printf("系统已暂停，等待启动按钮...\n");
-        }
-        
         // 定期检查退出标志
         if (g_should_exit) {
             break;

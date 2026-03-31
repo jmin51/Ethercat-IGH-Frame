@@ -1,3 +1,4 @@
+#include "globals.h"  // 首先包含全局变量定义（包含PauseStateRecord类型和控制源宏）
 #include "ethercat_node.hpp"
 #include "io_modules/lights_controller.hpp"  // 灯光控制器
 #include <thread>
@@ -8,7 +9,6 @@
 #include <string>
 #include <sstream>
 
-#define CONTROL_SOURCE_IO 0  // 1:使用IO控制手自动模式, 0:使用话题控制
 // 全局变量定义
 std::shared_ptr<EthercatNode> global_node = nullptr;
 ec_master_t *master = nullptr;
@@ -21,6 +21,19 @@ std::atomic<bool> g_system_running(false);
 std::atomic<bool> g_start_button_pressed(false);
 std::atomic<bool> g_pause_button_pressed(false);
 std::atomic<bool> g_reset_button_pressed(false);  // 复位按钮状态
+std::atomic<bool> g_short_pause_requested(false); // 短按暂停请求
+std::atomic<bool> g_long_pause_requested(false);  // 长按暂停请求
+std::atomic<bool> g_short_pause_active(false);    // 短按暂停状态激活
+
+// 恢复后模式切换相关标志定义
+std::atomic<bool> g_resume_mode_switch_pending(false);  // 有待处理的恢复模式切换
+std::atomic<bool> g_resume_auto_mode(false);            // true=自动模式, false=手动模式
+
+// 自动模式初始化完成标志（用于业务逻辑恢复时等待轴就绪）
+std::atomic<bool> g_auto_mode_initialized(false);       // 所有轴自动模式位置初始化完成
+
+// 暂停状态记录全局变量定义
+PauseStateRecord g_pause_state_record;
 
 // 添加缺失的常量定义
 // const int HOMING_TOLERANCE = 100;
@@ -33,14 +46,9 @@ ec_domain_state_t domain1_state = {};
 unsigned int counter = 0;
 unsigned int blink = 0;
 unsigned int sync_ref_counter = 0;
-const struct timespec cycletime = {0, PERIOD_NS};
+// cycletime 在 main.cpp 中定义
 pthread_t thread = 0;
 
-// Modbus相关变量
-modbus_t *mb_ctx = nullptr;
-pthread_t modbus_thread;
-volatile int modbus_running = 1;
-std::atomic<int> di13_state{0};
 std::atomic<bool> homing_completed{false};
 
 EthercatNode::EthercatNode(std::string name) : Node(name) {
@@ -124,6 +132,8 @@ void EthercatNode::initialize_node() {
         });
     // 添加故障码发布器初始化
     fault_code_pub_ = this->create_publisher<std_msgs::msg::String>("/fault_code", 10);
+    // 添加轴状态发布器初始化
+    axis_state_pub_ = this->create_publisher<std_msgs::msg::String>("/axis_states", 10);
     // 初始化故障管理器（升级为故障管理系统）
     fault_manager_ = std::make_unique<fault_management::FaultManagementSystem>(this);
     fault_manager_->set_fault_publisher(fault_code_pub_);
@@ -166,7 +176,19 @@ void EthercatNode::initialize_node() {
     axis3_width_status_pub_ = this->create_publisher<std_msgs::msg::String>(
         "/axis3_width_status", rclcpp::QoS(10).reliable()); // 新话题名
 
+    // +++ 新增：创建暂停状态记录发布器 +++
+    pause_state_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "/pause_state_command", rclcpp::QoS(10).reliable());
+    
+    // +++ 新增：订阅Python端的状态报告 +++
+    pause_state_report_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/pause_state_report", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            this->handle_pause_state_report(msg);
+        });
+    
     RCLCPP_INFO(this->get_logger(), "板宽控制模块初始化完成");
+    RCLCPP_INFO(this->get_logger(), "暂停状态记录模块初始化完成");
 }
 
 // +++ 新增：定时器回调函数实现 +++
@@ -186,8 +208,26 @@ void EthercatNode::periodic_timer_callback() {
     if (fault_manager_) {
         fault_manager_->publish_fault_status();
     }
+
+    // 4. 发布轴状态机状态
+    publish_axis_states();
     
-    // 4. 启动后校正板宽（所有轴进入自动模式后只执行一次）
+    // 5. 检查并发布自动模式初始化完成状态（用于业务逻辑恢复时同步）
+    if (!auto_mode_init_published_ && g_auto_mode_initialized.load()) {
+        // 先执行待处理的层命令（如果有），确保位移指令在自动模式就绪后发送
+        if (layer_processor_ && layer_processor_->has_pending_command()) {
+            RCLCPP_INFO(this->get_logger(), "自动模式初始化完成，执行待处理的层命令...");
+            layer_processor_->execute_pending_command();
+        }
+        
+        auto status_msg = std_msgs::msg::String();
+        status_msg.data = "自动模式初始化完成";
+        system_status_pub_->publish(status_msg);
+        RCLCPP_INFO(this->get_logger(), "发布自动模式初始化完成状态，业务逻辑可以恢复执行");
+        auto_mode_init_published_ = true;
+    }
+    
+    // 6. 启动后校正板宽（所有轴进入自动模式后只执行一次）
     if (!board_width_calibrated_ && are_all_axes_in_auto_mode()) {
         calibrate_board_width_from_position();
     }
@@ -231,10 +271,17 @@ void EthercatNode::publish_py_io_status(const DI_Interface& di) {
     auto msg = std_msgs::msg::String();
     std::stringstream ss;
     
-    ss << "DI12:" << di.buffer_in_position
-       << ",DI13:" << di.buffer_out_position
-       << ",DI14:" << di.conveyor_in_position
-       << ",DI15:" << di.conveyor_out_position;
+    // 修正DI编号映射，与io_interface.hpp中的定义保持一致
+    // DI10: buffer_sensor_2 (M522)
+    // DI11: buffer_in_position (M523)
+    // DI12: buffer_out_position (M524)
+    // DI13: conveyor_in_position (M525)
+    // DI14: conveyor_out_position (M526)
+    ss << "DI10:" << di.buffer_sensor_2
+       << ",DI11:" << di.buffer_in_position
+       << ",DI12:" << di.buffer_out_position
+       << ",DI13:" << di.conveyor_in_position
+       << ",DI14:" << di.conveyor_out_position;
     
     msg.data = ss.str();
     py_io_status_pub_->publish(msg);
@@ -479,6 +526,23 @@ void EthercatNode::handle_control_command(const std::string& command) {
             axis->stop();
         }
         RCLCPP_INFO(this->get_logger(), "所有轴接收到停止命令");
+        
+        // +++ 关键修复：重置板宽和层移动业务逻辑状态，防止stop后继续执行 +++
+        // 重置板宽调整状态
+        if (board_width_moving_) {
+            board_width_moving_ = false;
+            RCLCPP_INFO(this->get_logger(), "板宽调整(axis4)已停止");
+        }
+        if (axis3_width_moving_) {
+            axis3_width_moving_ = false;
+            RCLCPP_INFO(this->get_logger(), "板宽调整(axis3)已停止");
+        }
+        // 重置层移动处理器状态
+        if (layer_processor_) {
+            layer_processor_->reset_motion_state();
+            RCLCPP_INFO(this->get_logger(), "层移动状态已重置");
+        }
+        
         // 清除所有系统故障和告警
         if (fault_manager_) {
             fault_manager_->clear_all_faults();
@@ -519,6 +583,12 @@ void EthercatNode::handle_control_command_msg(const std_msgs::msg::String::Share
 void EthercatNode::handle_displacement_command(const std_msgs::msg::String::SharedPtr msg) {  
     if (servo_axes_.empty()) {
         RCLCPP_DEBUG(this->get_logger(), "等待伺服轴初始化...");
+        return;
+    }
+
+    // 短按暂停时拒绝位移指令
+    if (g_short_pause_active.load()) {
+        RCLCPP_WARN(this->get_logger(), "系统处于短按暂停状态，拒绝位移指令");
         return;
     }
 
@@ -734,7 +804,6 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
     // 发布IO状态到Python节点
     publish_py_io_status(di);
     
-    monitor_di_changes(di);
     pthread_mutex_lock(&io_mutex_);
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
@@ -760,8 +829,8 @@ void EthercatNode::handle_io_signals(DI_Interface di) {
         }
     }
     
-    // 如果所有轴都处于READY状态，尝试模式切换
-    if (all_axes_ready) {
+    // 如果所有轴都处于READY状态，且不在短按暂停状态，尝试模式切换
+    if (all_axes_ready && !g_short_pause_active.load()) {
         // 仅在状态变化时打印日志（边沿检测）
         if (!last_all_axes_ready_ || last_manual_auto_state_ != current_manual_auto_state) {
             RCLCPP_INFO(this->get_logger(), "所有轴已就绪，准备模式切换。手自动按钮状态: %s", 
@@ -861,6 +930,43 @@ void EthercatNode::publish_io_status() {
     
     msg.data = ss.str();
     io_status_pub_->publish(msg);
+}
+
+// 发布所有轴的状态机状态
+void EthercatNode::publish_axis_states() {
+    if (node_shutting_down_.load() || !rclcpp::ok() || !axis_state_pub_) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    ss << "{";
+    bool first = true;
+    
+    for (auto& axis : servo_axes_) {
+        if (!first) ss << ", ";
+        first = false;
+        
+        std::string state_str;
+        AxisState state = axis->get_current_state();
+        switch (state) {
+            case AxisState::UNINITIALIZED:  state_str = "UNINITIALIZED"; break;
+            case AxisState::INITIALIZING:   state_str = "INITIALIZING"; break;
+            case AxisState::READY:          state_str = "READY"; break;
+            case AxisState::MANUAL_MODE:    state_str = "MANUAL_MODE"; break;
+            case AxisState::AUTO_MODE:      state_str = "AUTO_MODE"; break;
+            case AxisState::STOPPED:        state_str = "STOPPED"; break;
+            case AxisState::FAULT:          state_str = "FAULT"; break;
+            default:                        state_str = "UNKNOWN"; break;
+        }
+        
+        ss << "\"" << axis->get_name() << "\": \"" << state_str << "\"";
+    }
+    
+    ss << "}";
+    msg.data = ss.str();
+    axis_state_pub_->publish(msg);
 }
 
 // IO监控线程函数
@@ -968,6 +1074,12 @@ void EthercatNode::handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg
         return;
     }
     
+    // 短按暂停时拒绝层指令
+    if (g_short_pause_active.load()) {
+        RCLCPP_WARN(this->get_logger(), "系统处于短按暂停状态，拒绝层指令");
+        return;
+    }
+    
     int8_t layer = msg->data;
     RCLCPP_INFO(this->get_logger(), "收到层指令: 第%d层", layer);
     
@@ -975,12 +1087,6 @@ void EthercatNode::handle_layer_command(const std_msgs::msg::Int8::SharedPtr msg
         layer_processor_->process_layer_command(layer);
     } else {
         print_error("层指令处理器未初始化");
-    }
-
-    // 调试信息（todo删）：打印当前所有轴的状态
-    RCLCPP_INFO(this->get_logger(), "当前轴数量: %zu", servo_axes_.size());
-    for (size_t i = 0; i < servo_axes_.size(); ++i) {
-        RCLCPP_INFO(this->get_logger(), "轴[%zu]: %s", i, servo_axes_[i]->get_name().c_str());
     }
 }
 
@@ -1003,43 +1109,12 @@ void EthercatNode::check_layer_motion_completion() {
     }
 }
 
-void EthercatNode::monitor_di_changes(const DI_Interface& current_di) {
-    static DI_Interface previous_di = {0};
-    
-    // 检查每个DI信号的变化
-    std::vector<std::pair<std::string, bool>> changes;
-    
-    if (current_di.buffer_in_position != previous_di.buffer_in_position) {
-        changes.push_back({"DI12", current_di.buffer_in_position});
-    }
-    if (current_di.buffer_out_position != previous_di.buffer_out_position) {
-        changes.push_back({"DI13", current_di.buffer_out_position});
-    }
-    if (current_di.conveyor_in_position != previous_di.conveyor_in_position) {
-        changes.push_back({"DI14", current_di.conveyor_in_position});
-    }
-    if (current_di.conveyor_out_position != previous_di.conveyor_out_position) {
-        changes.push_back({"DI15", current_di.conveyor_out_position});
-    }
-    
-    // 打印变化
-    for (const auto& change : changes) {
-        RCLCPP_INFO(this->get_logger(), "%s 状态变化: %s", 
-                   change.first.c_str(), 
-                   change.second ? "HIGH" : "LOW");
-    }
-    
-    // 更新前一次状态
-    previous_di = current_di;
-}
-
 void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg) {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
         return;
     }
     
     std::string command = msg->data;
-    RCLCPP_INFO(this->get_logger(), "收到DO控制命令: %s", command.c_str());
     
     // 解析命令
     DOControlCommand do_cmd;
@@ -1222,6 +1297,12 @@ void EthercatNode::handle_axis3_width_command(const std_msgs::msg::Float64::Shar
         return;
     }
     
+    // 短按暂停时拒绝板宽调整
+    if (g_short_pause_active.load()) {
+        RCLCPP_WARN(this->get_logger(), "系统处于短按暂停状态，拒绝axis3板宽调整命令");
+        return;
+    }
+    
     // === 非自动模式下无视板宽设定命令 ===
     if (!are_all_axes_in_auto_mode()) {
         RCLCPP_WARN(this->get_logger(), "非自动模式，axis3忽略板宽设定命令");
@@ -1342,6 +1423,12 @@ void EthercatNode::publish_axis3_width_status(double current_width, double targe
 
 void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::SharedPtr msg) {
     if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    // 短按暂停时拒绝板宽调整
+    if (g_short_pause_active.load()) {
+        RCLCPP_WARN(this->get_logger(), "系统处于短按暂停状态，拒绝板宽调整命令");
         return;
     }
     
@@ -1677,4 +1764,108 @@ void EthercatNode::print_error(const std::string& message) {
     if (fault_manager_) {
         fault_manager_->add_system_error(message);
     }
+}
+
+// 故障上报接口实现
+void EthercatNode::report_axis_fault(const std::string& axis_name, uint16_t fault_code, const std::string& description) {
+    if (fault_manager_) {
+        fault_manager_->add_axis_fault(axis_name, fault_code, description);
+        RCLCPP_ERROR(this->get_logger(), "轴 %s 故障: 0x%04X - %s", 
+                     axis_name.c_str(), fault_code, description.c_str());
+    }
+}
+
+/* ============================================
+ * 暂停状态记录相关实现
+ * ============================================ */
+
+// 发布暂停状态记录请求 - 请求Python端报告当前业务状态
+void EthercatNode::publish_pause_state_record_request() {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    msg.data = "RECORD_STATE";
+    pause_state_pub_->publish(msg);
+    
+    RCLCPP_INFO(this->get_logger(), "已发送暂停状态记录请求");
+}
+
+// 发布暂停状态恢复请求 - 携带记录的状态信息
+void EthercatNode::publish_pause_state_resume_request() {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    if (!g_pause_state_record.has_recorded_state) {
+        RCLCPP_WARN(this->get_logger(), "没有记录的状态，跳过恢复请求");
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    std::stringstream ss;
+    
+    // 构建恢复命令字符串
+    // 格式: RESUME:warehouse_active=1,warehouse_state=X,warehouse_layer=Y,outbound_active=0,...
+    ss << "RESUME:";
+    ss << "warehouse_active=" << (g_pause_state_record.warehouse_was_active ? "1" : "0") << ",";
+    ss << "warehouse_state=" << g_pause_state_record.warehouse_state_value << ",";
+    ss << "warehouse_layer=" << g_pause_state_record.warehouse_target_layer << ",";
+    ss << "outbound_active=" << (g_pause_state_record.outbound_was_active ? "1" : "0") << ",";
+    ss << "outbound_state=" << g_pause_state_record.outbound_state_value << ",";
+    ss << "outbound_layer=" << g_pause_state_record.outbound_source_layer;
+    
+    msg.data = ss.str();
+    pause_state_pub_->publish(msg);
+    
+    RCLCPP_INFO(this->get_logger(), 
+                "已发送暂停状态恢复请求: 入库=%s(状态%d,层%d), 出库=%s(状态%d,层%d)",
+                g_pause_state_record.warehouse_was_active ? "是" : "否",
+                g_pause_state_record.warehouse_state_value,
+                g_pause_state_record.warehouse_target_layer,
+                g_pause_state_record.outbound_was_active ? "是" : "否",
+                g_pause_state_record.outbound_state_value,
+                g_pause_state_record.outbound_source_layer);
+}
+
+// 处理Python端的状态报告
+void EthercatNode::handle_pause_state_report(const std_msgs::msg::String::SharedPtr msg) {
+    std::string data = msg->data;
+    RCLCPP_INFO(this->get_logger(), "收到暂停状态报告: %s", data.c_str());
+    
+    // 解析状态报告
+    // 格式: warehouse_active=1,warehouse_state=X,warehouse_layer=Y,outbound_active=0,...
+    auto parse_value = [&data](const std::string& key) -> int {
+        size_t pos = data.find(key + "=");
+        if (pos != std::string::npos) {
+            size_t end = data.find(",", pos);
+            if (end == std::string::npos) end = data.length();
+            std::string val = data.substr(pos + key.length() + 1, end - pos - key.length() - 1);
+            try {
+                return std::stoi(val);
+            } catch (...) {
+                return 0;
+            }
+        }
+        return 0;
+    };
+    
+    // 解析并记录状态
+    g_pause_state_record.warehouse_was_active = parse_value("warehouse_active") != 0;
+    g_pause_state_record.warehouse_state_value = parse_value("warehouse_state");
+    g_pause_state_record.warehouse_target_layer = parse_value("warehouse_layer");
+    g_pause_state_record.outbound_was_active = parse_value("outbound_active") != 0;
+    g_pause_state_record.outbound_state_value = parse_value("outbound_state");
+    g_pause_state_record.outbound_source_layer = parse_value("outbound_layer");
+    g_pause_state_record.has_recorded_state = true;
+    
+    RCLCPP_INFO(this->get_logger(), 
+                "已记录业务状态: 入库=%s(状态%d,层%d), 出库=%s(状态%d,层%d)",
+                g_pause_state_record.warehouse_was_active ? "是" : "否",
+                g_pause_state_record.warehouse_state_value,
+                g_pause_state_record.warehouse_target_layer,
+                g_pause_state_record.outbound_was_active ? "是" : "否",
+                g_pause_state_record.outbound_state_value,
+                g_pause_state_record.outbound_source_layer);
 }

@@ -97,6 +97,8 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
     if (reset_requested_) {
         reset_requested_ = false;
         current_state_ = AxisState::UNINITIALIZED;
+        // 重置运动状态，避免恢复时误判目标到达
+        reset_motion_state();
         printf("轴 %s 执行重置，回到未初始化状态\n", axis_name_.c_str());
     }
 
@@ -135,7 +137,7 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 
                 // 特殊处理：0x0E08错误代码完全忽略，继续初始化
                 if (huichuang_error_code == 0x0E08 || huichuang_error_code == 0x0000) {
-                    printf("轴 %s -----", axis_name_.c_str());
+                    printf(" %s --", axis_name_.c_str());
                     // 不改变current_state_，继续执行初始化序列
                 } else {
                     // 其他错误代码正常进入故障模式
@@ -173,12 +175,23 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
                 
                 // 新增：检测故障状态字
-                if (read_status_word == 0x1638) {
-                    printf("轴 %s 检测到故障状态字0x1638，进入故障模式\n", 
-                        axis_name_.c_str());
-                    current_state_ = AxisState::FAULT;
-                    // 记录故障信息
-                    break; // 立即跳出，不再执行后续逻辑
+                if (read_status_word == 0x1638 || read_status_word == 0x0638) {
+                    uint16_t huichuang_error_code = EC_READ_U16(domain1_pd + off_error_code_);
+                    
+                    // 汇川 0x0E08 通讯错误不上报，自动修复
+                    if (huichuang_error_code == 0x0E08) {
+                        printf("轴 %s 0x0E08通讯故障，自动跳转初始化\n", axis_name_.c_str());
+                        current_state_ = AxisState::INITIALIZING;
+                    } else {
+                        printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                            axis_name_.c_str(), read_status_word);
+                        current_state_ = AxisState::FAULT;
+                        // 上报故障到故障管理系统
+                        if (global_node) {
+                            global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字0x1638/0x0638");
+                        }
+                    }
+                    break;
                 }
 
                 // 如果有启动请求但状态字不满足，检查是否状态异常
@@ -205,6 +218,18 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::MANUAL_MODE:
             // 手动模式处理
+            // === 检测故障状态字 ===
+            if (read_status_word == 0x1638 || read_status_word == 0x0638) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字0x1638/0x0638");
+                }
+                break;
+            }
+            
             // === 处理停止请求（结束作业）===
             if (stop_requested_) {
                 // 发送停止指令：保持当前位置
@@ -227,6 +252,18 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::AUTO_MODE:
             // 自动模式处理
+            // === 检测故障状态字 ===
+            if (read_status_word == 0x1638 || read_status_word == 0x0638) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字0x1638/0x0638");
+                }
+                break;
+            }
+            
             // === 处理停止请求（结束作业）===
             if (stop_requested_) {
                 // 发送停止指令：保持当前位置
@@ -249,23 +286,54 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             
         case AxisState::STOPPED:
             // 停止状态：保持当前位置，等待回到INITIALIZING
+            // === 检测故障状态字 ===
+            if (read_status_word == 0x1638 || read_status_word == 0x0638) {
+                printf("轴 %s 检测到故障状态字0x%04X，进入故障模式\n",
+                    axis_name_.c_str(), read_status_word);
+                current_state_ = AxisState::FAULT;
+                // 上报故障到故障管理系统
+                if (global_node) {
+                    global_node->report_axis_fault(axis_name_, error_code, "驱动器故障状态字0x1638/0x0638");
+                }
+                break;
+            }
+            
             EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
             EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
+            
+            // +++ 关键修复：在STOPPED状态持续清理运动状态，确保不会继续执行原指令 +++
+            displacement_updated_ = false;
+            target_pulses_ = current_pos;
+            jog_forward_requested_ = false;
+            jog_reverse_requested_ = false;
             
             // 检查是否可以回到READY状态
             // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
             if (read_status_word == 0x1637 ) {
                 current_state_ = AxisState::INITIALIZING;
+                // +++ 关键修复：状态转换前再次确认运动状态已清理 +++
+                displacement_updated_ = false;
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                position_initialized_ = false;  // 重新进入时需要重新初始化位置
                 printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
             }
             break;
             
         case AxisState::FAULT:
             // 故障状态处理
-            if (fault_clearing_in_progress_) {
-                handle_fault_clear(domain1_pd);
-            } else {
-                EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+            {
+                uint16_t huichuang_error_code = EC_READ_U16(domain1_pd + off_error_code_);
+                
+                // 汇川 0x0E08 通讯错误自动修复，不上报故障
+                if (huichuang_error_code == 0x0E08) {
+                    printf("轴 %s 0x0E08通讯故障自动修复，跳转回初始化\n", axis_name_.c_str());
+                    current_state_ = AxisState::INITIALIZING;
+                } else if (fault_clearing_in_progress_) {
+                    handle_fault_clear(domain1_pd);
+                } else {
+                    EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
+                }
             }
             break;
     }

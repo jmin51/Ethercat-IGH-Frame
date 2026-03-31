@@ -167,6 +167,110 @@ void notify_system_ready();
 
 ---
 
+## 暂停状态记录与恢复系统架构
+
+### 设计哲学
+- **状态冻结**：暂停时记录业务逻辑状态，如同冻结时间切片
+- **状态回放**：恢复时重走之前记录的状态，如同重放时间流
+- **跨语言协作**：C++端记录硬件状态，Python端记录业务状态
+- **最小侵入**：不影响正常业务流程，仅在暂停/恢复时介入
+
+### 核心组件
+
+#### 1. 状态记录结构 (globals.h)
+```cpp
+struct PauseStateRecord {
+    bool warehouse_was_active;      // 入库是否在进行中
+    int warehouse_state_value;      // 入库状态机值
+    int warehouse_target_layer;     // 入库目标层
+    bool outbound_was_active;       // 出库是否在进行中
+    int outbound_state_value;       // 出库状态机值
+    int outbound_source_layer;      // 出库源层
+    bool has_recorded_state;        // 是否已记录状态
+};
+```
+
+#### 2. C++ 端实现 (main.cpp / ethercat_node.cpp)
+- **暂停时记录**：`pause_motors_only()` → 请求Python端报告状态 → 保存到 `g_pause_state_record`
+- **恢复时回放**：`resume_from_short_pause()` → 发送恢复命令 → 携带记录的状态信息
+- **话题通信**：
+  - `/pause_state_command` (C++ → Python)：发送记录/恢复命令
+  - `/pause_state_report` (Python → C++)：报告当前业务状态
+
+#### 3. Python 端实现 (business_logic_processor.py)
+- **状态报告**：`report_current_pause_state()` → 将 `warehouse_state`/`outbound_state` 序列化为字符串
+- **状态恢复**：`handle_resume_command()` → 解析命令 → `restore_warehouse_state()` / `restore_outbound_state()`
+- **状态映射**：根据状态值恢复到对应步骤，确保业务逻辑继续执行
+
+### 状态恢复映射表
+
+#### 入库流程恢复
+| 原状态 | 恢复后状态 | 说明 |
+|--------|-----------|------|
+| IDLE | IDLE | 未启动，无需恢复 |
+| WAIT_FOR_ENTRY | WAIT_FOR_ENTRY | 重新等待入库信号 |
+| CONVEYOR_MOVING | WAIT_FOR_ENTRY | 重新检测入库条件 |
+| LIFT_MOVING | CONVEYOR_MOVING | 重新触发层移动 |
+| POST_LIFT_PROCESSING | LIFT_MOVING | 重新执行层移动后操作 |
+| DELAY_PROCESSING | POST_LIFT_PROCESSING | 重新执行延迟处理 |
+| COMPLETED | COMPLETED | 已完成，回到IDLE |
+
+#### 出库流程恢复
+| 原状态 | 恢复后状态 | 说明 |
+|--------|-----------|------|
+| IDLE | IDLE | 未启动，无需恢复 |
+| WAIT_FOR_EXIT | WAIT_FOR_EXIT | 重新等待出库信号 |
+| LIFT_MOVING | WAIT_FOR_EXIT | 重新触发层移动 |
+| POST_LIFT_PROCESSING | LIFT_MOVING | 重新执行层移动后操作 |
+| CONVEYOR_MOVING | POST_LIFT_PROCESSING | 重新执行出库操作 |
+| COMPLETED | COMPLETED | 已完成，回到IDLE |
+
+### 关键工作流程
+
+#### 暂停流程
+```
+用户短按暂停按钮 → lights_controller检测到短按 → 设置 g_short_pause_requested
+→ main.cpp 检测到请求 → pause_motors_only() 
+→ 发送 RECORD_STATE 到 Python → Python 报告当前状态 → C++ 保存到 g_pause_state_record
+→ 停止所有轴和DO信号 → 设置 g_short_pause_active = true
+```
+
+#### 恢复流程
+```
+用户按下启动按钮 → main.cpp 检测到 g_start_button_pressed + g_short_pause_active
+→ resume_from_short_pause() 
+  → 立即清除 g_short_pause_active（确保层指令能被正常接收）
+  → 重置所有轴到 UNINITIALIZED 状态
+  → 发送 RESUME 命令（携带记录的状态）到 Python
+→ Python 解析命令 → restore_warehouse_state() / restore_outbound_state()
+→ Python 重新发送层指令到目标层
+→ handle_layer_command() 接收层指令（此时 g_short_pause_active 已清除）
+→ 发布位移指令 → 轴开始移动 → 真正到达后触发层移动完成
+```
+
+### 使用示例
+
+```cpp
+// C++ 端：请求记录状态
+global_node->publish_pause_state_record_request();
+
+// C++ 端：发送恢复请求
+global_node->publish_pause_state_resume_request();
+```
+
+```python
+# Python 端：自动处理，无需手动调用
+# 通过 /pause_state_command 话题自动触发
+```
+
+### 集成点
+
+1. **main.cpp**：`pause_motors_only()` 和 `resume_from_short_pause()` 函数
+2. **ethercat_node.cpp**：发布器和订阅器的创建，以及命令处理
+3. **business_logic_processor.py**：`pause_state_command_callback()` 和相关恢复函数
+
+---
+
 ## 设计决策记录
 
 1. **为何选择日志回调而非宏替换**：
@@ -179,6 +283,11 @@ void notify_system_ready();
    - 与现有工业标准兼容
    - 便于十六进制阅读和调试
 
+3. **为何采用状态回退策略而非精确恢复**：
+   - 业务逻辑涉及IO信号、轴运动等复杂交互，精确恢复难度大
+   - 回退到前一个稳定状态更安全，避免中间状态的不一致性
+   - 简化实现，降低维护复杂度
+
 3. **为何保留字符串发布格式**：
    - 保持与现有监控系统兼容
    - 简化调试和日志分析
@@ -188,6 +297,48 @@ void notify_system_ready();
    - 适应不同应用场景的日志模式
    - 支持运行时动态更新映射规则
    - 便于测试和模拟特定故障场景
+
+5. **故障清除逻辑的设计演进** (2026-03-26)：
+   - **问题**：原逻辑使用固定状态字列表判断是否清除成功，无法覆盖所有驱动器状态
+   - **改进**：改为检查状态字 bit3（故障位），只要 bit3=0 即认为清除成功
+   - **优势**：
+     - 不依赖特定驱动器的状态字实现细节
+     - 符合 EtherCAT CiA402 标准的状态机定义
+     - 支持雷赛驱动器 0x8402 等新型故障码的自动清除
+   - **回退策略**：超时后输出故障码，提示可能需要人工排查或断电重启
+
+6. **雷赛驱动器专用故障清除** (2026-03-26)：
+   - **需求**：雷赛驱动器需要通过 SDO 0x2057:00 写入 1 来清除特定故障
+   - **实现**：`LeisaiServoAxis::handle_leisai_fault_clear()` 方法
+   - **流程**：
+     - 步骤0：SDO 写入 0x2057:00 = 1（雷赛专用故障复位，仅手动触发时执行）
+     - 步骤1：PDO 写 0x0080（标准故障复位）
+     - 步骤2-4：标准 CiA402 状态机恢复流程
+   - **自动 vs 手动清除**：
+     - `0x821b` 通讯错误：**自动清除**，跳过 SDO 步骤（直接从步骤1开始）
+     - `0x8402` 及其他故障：**手动清除**，需调用 `clear_fault()` 触发，执行完整流程（含SDO）
+   - **注意**：SDO 操作使用 `ecrt_master_sdo_download`，需要保存 master 指针
+
+7. **STOP命令状态清理机制** (2026-03-26)：
+   - **问题**：axis3/axis4（板宽调整）、axis5（层移动）在stop后回到AUTO_MODE时继续执行原指令
+   - **根因**：`stop()`仅设置标志使轴进入STOPPED状态，未清理`displacement_updated_`等业务逻辑状态
+   - **修复策略**：
+     - **ServoAxisBase::stop()**：重置`displacement_updated_`、将`target_pulses_`设为当前位置、清理点动标志
+     - **STOPPED状态处理**：在状态机中持续清理运动状态，状态转换前再次确认
+     - **业务逻辑层**：`LayerCommandProcessor::reset_motion_state()`清理层移动状态；EthercatNode重置板宽调整标志
+   - **设计原则**：
+     - 分层清理：基类清理轴状态，业务层清理业务状态
+     - 防御式编程：STOPPED状态持续清理，状态转换前二次确认
+     - 幂等性：多次stop调用不会产生副作用
+
+8. **暂停恢复流程时序修复** (2026-03-30)：
+   - **问题**：短按暂停后恢复，业务逻辑重新发送层指令但被 `handle_layer_command()` 拒绝
+   - **根因**：`g_short_pause_active` 在 `resume_from_short_pause()` 末尾才清除，业务逻辑收到恢复请求后立即发送层指令时状态仍为true
+   - **修复策略**：将 `g_short_pause_active.store(false)` 从函数末尾移到函数开始处
+   - **时序对比**：
+     - **修复前**：重置轴 → 发送恢复请求 → Python立即发送层指令 → 被拒绝 → 清除`g_short_pause_active`
+     - **修复后**：清除`g_short_pause_active` → 重置轴 → 发送恢复请求 → Python发送层指令 → 正常处理
+   - **关键洞察**：状态清除必须在任何可能触发外部响应的操作之前完成
 
 ---
 
@@ -201,5 +352,5 @@ void notify_system_ready();
 
 ---
 
-*文档最后更新：2026-03-14*
-*对应架构版本：v2.0（故障管理系统集成）*
+*文档最后更新：2026-03-30*
+*对应架构版本：v2.4（暂停恢复流程时序修复）*

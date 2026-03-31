@@ -27,7 +27,9 @@ void init_lights_controller();
 
 // 更新按钮灯（在main循环中调用）
 // 复位按钮需要按住3秒才触发
-void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn);
+// 急停按钮（M516/M517）短按启动3秒计时，满3秒触发暂停
+void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn, 
+                          bool emergency_stop1 = false, bool emergency_stop2 = false);
 
 // 更新三色灯和蜂鸣器（在main循环中调用）
 void update_tricolor_lights();

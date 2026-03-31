@@ -64,14 +64,39 @@ void ServoAxisBase::set_target_displacement(double displacement) {
 
 void ServoAxisBase::set_displacement_updated(bool updated) {
     displacement_updated_ = updated;
+    
+    // +++ 关键修复：设置新位移时立即清除完成标志，防止竞态条件导致误报 +++
+    if (updated) {
+        std::lock_guard<std::mutex> lock(flag_mutex_);
+        target_reached_flag_ = false;
+        target_reached_ = false;
+    }
 }
 
 void ServoAxisBase::stop() {
     // 结束作业：先发送停止请求，状态机中处理减速后再跳转
     if (current_state_ == AxisState::MANUAL_MODE || current_state_ == AxisState::AUTO_MODE) {
         stop_requested_ = true;
-        std::cout << "轴 " << axis_name_ << " 停止请求已设置" << std::endl;
+        // std::cout << "轴 " << axis_name_ << " 停止请求已设置" << std::endl;
     }
+    
+    // 重置目标位置为当前位置（立即停止运动）
+    target_pulses_ = joint_position_;
+    
+    // 清除点动请求标志
+    jog_forward_requested_ = false;
+    jog_reverse_requested_ = false;
+    jog_stop_requested_ = false;
+    
+    // 重置目标到达标志
+    target_reached_ = false;
+    {
+        std::lock_guard<std::mutex> lock(flag_mutex_);
+        target_reached_flag_ = false;
+    }
+    
+    std::cout << "轴 " << axis_name_ << " 运动状态已重置: displacement_updated=false, target_pulses=" 
+              << target_pulses_ << std::endl;
 }
 
 void ServoAxisBase::start_manual_mode() {
@@ -97,7 +122,32 @@ void ServoAxisBase::clear_fault() {
 
 void ServoAxisBase::reset_axis() {
     reset_requested_ = true;
-    std::cout << "轴 " << axis_name_ << " 重置请求已设置" << std::endl;
+    // 如果当前在故障状态，同时触发故障清除流程
+    // 避免reset只是重置软件状态，而硬件故障未被清除
+    if (current_state_ == AxisState::FAULT) {
+        clear_fault_requested_ = true;
+        std::cout << "轴 " << axis_name_ << " 重置请求已设置（同时触发故障清除）" << std::endl;
+    } else {
+        std::cout << "轴 " << axis_name_ << " 重置请求已设置" << std::endl;
+    }
+}
+
+void ServoAxisBase::reset_motion_state() {
+    // 重置运动状态，避免恢复时误判目标到达
+    // 将目标位置设为当前位置，确保恢复后需要新的位移指令才会移动
+    target_pulses_ = joint_position_;
+    target_displacement_ = 0.0;
+    displacement_updated_ = false;
+    target_reached_ = false;
+    {
+        std::lock_guard<std::mutex> lock(flag_mutex_);
+        target_reached_flag_ = false;
+    }
+    // 重置逐步逼近相关变量
+    target_offset_ = 0;
+    direction_flag_ = 0;
+    new_target_ = 0;
+    std::cout << "轴 " << axis_name_ << " 运动状态已重置，目标位置设为当前位置 " << joint_position_ << std::endl;
 }
 
 // 获取函数实现
@@ -110,6 +160,11 @@ bool ServoAxisBase::is_running() const {
 }
 bool ServoAxisBase::is_homing_completed() const { return homing_completed_; }
 bool ServoAxisBase::is_homing_in_progress() const { return homing_in_progress_; }
+
+bool ServoAxisBase::is_auto_mode_initialized() const { 
+    // 检查轴是否在自动模式且位置已初始化
+    return (current_state_ == AxisState::AUTO_MODE && position_initialized_);
+}
 ec_slave_config_t* ServoAxisBase::get_slave_config() { return sc_; }
 unsigned int ServoAxisBase::get_control_word_offset() const { return control_word_; }
 int32_t ServoAxisBase::get_actual_position() const { return joint_position_; }
@@ -185,8 +240,9 @@ void ServoAxisBase::handle_fault_clear(uint8_t* domain1_pd) {
             
         case 3:
             // 第四步：检查状态字，确认故障已清除
-            if (current_status == 0x0631 || current_status == 0x0633 || current_status == 0x0670 ||
-                current_status == 0x0250 || current_status == 0x0650) {
+            // 故障清除成功的标志：bit3(故障位)为0
+            if ((current_status & 0x0008) == 0) {
+                // 故障位已清除，说明故障清除成功
                 fault_clearing_in_progress_ = false;
                 
                 // 重置位置信息

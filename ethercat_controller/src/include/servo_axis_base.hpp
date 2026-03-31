@@ -4,6 +4,7 @@
 #include <ecrt.h>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
 
 // 状态机状态定义
@@ -52,6 +53,7 @@ public:
     virtual void start_auto_mode();
     virtual void clear_fault();
     virtual void reset_axis();
+    virtual void reset_motion_state();  // 重置运动状态
 
     // 获取函数
     virtual std::string get_name() const;
@@ -65,6 +67,8 @@ public:
     virtual bool is_running() const;
     virtual bool is_homing_completed() const;
     virtual bool is_homing_in_progress() const;
+    // 检查自动模式位置是否已初始化（用于恢复时等待轴就绪）
+    virtual bool is_auto_mode_initialized() const;
     virtual ec_slave_config_t* get_slave_config();
     virtual unsigned int get_control_word_offset() const;
     virtual int32_t get_actual_position() const;

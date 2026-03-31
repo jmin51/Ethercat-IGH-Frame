@@ -1,5 +1,6 @@
 // LayerCommandProcessor.cpp
 #include "LayerCommandProcessor.hpp"
+#include "globals.h"  // 引入全局变量以检查自动模式状态
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -49,26 +50,50 @@ void LayerCommandProcessor::process_layer_command(int8_t layer) {
     target_layer_ = layer;
     double target_height = calculate_layer_height(layer);
     
-    // RCLCPP_INFO(node_->get_logger(), 
-    //            "执行层指令: %d -> %d, 目标高度: %.2fmm", 
-    //            current_layer_, target_layer_, target_height);
-    
     is_moving_ = true;
     
-    // 新增：发布层移动开始消息
-    if (layer_completion_pub_) {
+    // 保存目标高度和状态
+    pending_target_height_ = target_height;
+    start_msg_published_.store(false);
+    
+    // 检查自动模式是否已初始化：如果是则立即执行，否则等待
+    if (g_auto_mode_initialized.load()) {
+        // 自动模式已就绪，立即执行
+        RCLCPP_INFO(node_->get_logger(), 
+                    "层指令处理(立即执行): 第%d层 -> 第%d层, 目标高度: %.2fmm", 
+                    current_layer_, target_layer_, target_height);
+        has_pending_command_.store(true);
+        execute_pending_command();
+    } else {
+        // 自动模式未就绪，延迟到初始化完成后执行
+        has_pending_command_.store(true);
+        RCLCPP_INFO(node_->get_logger(), 
+                    "层指令已记录(延迟执行): 第%d层 -> 第%d层, 目标高度: %.2fmm, 等待自动模式初始化完成", 
+                    current_layer_, target_layer_, target_height);
+    }
+}
+
+void LayerCommandProcessor::execute_pending_command() {
+    if (!has_pending_command_.load()) {
+        return;  // 没有待处理的命令
+    }
+    
+    // 1. 发布层移动开始消息（如果还未发布）
+    if (!start_msg_published_.load() && layer_completion_pub_) {
         auto msg = std_msgs::msg::Bool();
         msg.data = false;  // false表示移动开始/进行中
         layer_completion_pub_->publish(msg);
         RCLCPP_INFO(node_->get_logger(), "发布层移动开始消息: 第%d层 -> 第%d层", 
                    current_layer_, target_layer_);
+        start_msg_published_.store(true);
     }
-    // 发布位移指令
-    publish_displacement_command(target_height);    // 位置要提前
     
-    // 注意：实际运动完成检测需要在状态机中处理
-    // 这里假设运动立即完成（实际需要等待轴到达目标位置）
-    // RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
+    // 2. 发布位移指令
+    publish_displacement_command(pending_target_height_);
+    RCLCPP_INFO(node_->get_logger(), "执行位移指令: axis5 -> %.2fmm", pending_target_height_);
+    
+    // 清除待处理标志（位移指令已发送，后续通过check_motion_completion检测完成）
+    has_pending_command_.store(false);
 }
 
 bool LayerCommandProcessor::validate_layer(int8_t layer) {
@@ -126,9 +151,35 @@ void LayerCommandProcessor::set_motion_parameters(double speed_mm_per_s, double 
                "更新运动参数: 速度=%.1fmm/s, 加速度=%.1fmm/s²", 
                motion_speed_, motion_acceleration_);
 }
+// 新增：重置运动状态（用于stop命令后清理状态）
+void LayerCommandProcessor::reset_motion_state() {
+    if (is_moving_.load() || has_pending_command_.load()) {
+        RCLCPP_INFO(node_->get_logger(), 
+                   "层移动状态重置: 第%d层 -> 第%d层运动已取消，恢复时将重新触发", 
+                   current_layer_, target_layer_);
+        is_moving_ = false;
+        has_pending_command_.store(false);
+        start_msg_published_.store(false);
+        
+        // 发布层移动取消消息（false表示未完成）
+        if (layer_completion_pub_) {
+            auto msg = std_msgs::msg::Bool();
+            msg.data = false;  // false表示移动未完成/被取消
+            layer_completion_pub_->publish(msg);
+        }
+    }
+    // 注意：不重置 target_layer_，保留目标层信息用于恢复时重新触发
+}
+
 // 修改 check_motion_completion 方法
 bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoAxisBase>& axis5) {
     if (!is_moving_) {
+        return false;
+    }
+    
+    // 关键修复：如果还有待处理的命令（等待自动模式初始化），不检查完成
+    // 防止自动模式初始化时的 target_reached_flag_ 被误判为层移动完成
+    if (has_pending_command_.load()) {
         return false;
     }
     

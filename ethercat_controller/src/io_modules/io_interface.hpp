@@ -83,6 +83,10 @@ void print_do_status(DO_Interface do_control);
 bool is_di_module_enabled();
 bool is_do_module_enabled();
 
+// 连接状态检查（断线重连）
+bool is_di_connected();
+bool is_do_connected();
+
 // 非阻塞延时检查
 int should_execute_sequence(time_t *last_time, int interval_seconds);
 // DO控制命令消息格式
