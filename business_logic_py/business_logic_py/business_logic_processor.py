@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Int8, Empty, Bool
+from std_msgs.msg import String, Int8, Empty, Bool, Float64
 import time
 from enum import Enum, auto
 from typing import Dict, List, Optional
@@ -42,6 +42,9 @@ class ControlAction:
 class BusinessLogicProcessor(Node):
     def __init__(self):
         super().__init__('business_logic_processor')
+        
+        # ========== 宏开关配置 ==========
+        self.ENABLE_SMEMA = False  # True:启用SMEMA协议通讯 False:禁用SMEMA协议
         
         # 初始化状态变量
         self.warehouse_state = WarehouseState.IDLE
@@ -118,7 +121,7 @@ class BusinessLogicProcessor(Node):
         self.product_arrival_phase = "idle"  # 当前阶段: idle/pre_warehouse/warehouse/post_warehouse
 
         # 常量定义
-        self.DELAY_BEFORE_STOP_MS = 800
+        self.DELAY_BEFORE_STOP_MS = 600
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
         self.OUTBOUND_DELAY_BEFORE_STOP_MS = 300
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
@@ -132,8 +135,19 @@ class BusinessLogicProcessor(Node):
             'buffer_out_position': False,
             'conveyor_in_position': False,
             'conveyor_out_position': False,
-            'buffer_sensor_2': False
+            'buffer_sensor_2': False,
+            # SMEMA信号
+            'smema_uba': False,   # 上游有板待发
+            'smema_ugb': False,   # 上游好板
+            'smema_ubb': False,   # 上游坏板
+            'smema_mr': False     # 机器就绪（输出信号状态反馈）
         }
+        
+        # +++ SMEMA协议相关状态 +++
+        self.smema_state = "IDLE"           # SMEMA状态: IDLE/READY/RECEIVING/ARRIVED
+        self.smema_business_ready = False   # 业务层就绪标志
+        self.smema_board_pending = False    # 有待接收的板子
+        self.smema_board_count = 0          # 接收板子计数
         
         # 新增：DO控制状态跟踪，避免重复发送
         self.last_do_commands = {}  # 存储每个DO地址的最后状态
@@ -148,6 +162,11 @@ class BusinessLogicProcessor(Node):
         self.warehouse_completed_pub = self.create_publisher(Bool, '/warehouse_completed', 10)
         self.outbound_completed_pub = self.create_publisher(Bool, '/outbound_completed', 10)
         self.product_arrival_pub = self.create_publisher(Bool, '/product_arrival', 10)
+        
+        # +++ SMEMA协议发布器 +++
+        if self.ENABLE_SMEMA:
+            self.smema_business_ready_pub = self.create_publisher(Bool, '/smema/business_ready', 10)
+            self.smema_board_received_pub = self.create_publisher(Bool, '/smema/board_received', 10)
         
         # 新增：订阅开始作业信号（用于启动产品到位发布周期）
         self.start_operation_sub = self.create_subscription(
@@ -211,12 +230,27 @@ class BusinessLogicProcessor(Node):
         self.outbound_completion_published = False
         self.last_warehouse_state = WarehouseState.IDLE
         self.last_outbound_state = OutboundState.IDLE
+        
+        # 新增：COMPLETED 状态复位指令发送标志（避免重复日志）
+        self.completed_reset_command_sent = False
+
+        # 新增：当前层号（从axis5实际位置计算，支持小数层）
+        self.current_layer_float = 1.0  # 浮点层号（如5.5层）
+        self.layer_tolerance = 0.1      # 层号容差（如目标5层，实际4.7-5.3都认为到位）
 
         # 创建层移动完成订阅器
         self.layer_completion_sub = self.create_subscription(
             Bool,
             '/layer_motion_completed',
             self.layer_completion_callback,
+            10
+        )
+
+        # 新增：订阅当前层号（从axis5实际位置计算）
+        self.current_layer_sub = self.create_subscription(
+            Float64,
+            '/axis5_current_layer',
+            self.current_layer_callback,
             10
         )
         
@@ -231,6 +265,15 @@ class BusinessLogicProcessor(Node):
         self.pause_state_report_pub = self.create_publisher(
             String, '/pause_state_report', 10
         )
+        
+        # +++ SMEMA状态订阅器 +++
+        if self.ENABLE_SMEMA:
+            self.smema_state_sub = self.create_subscription(
+                String,
+                '/smema/state',
+                self.smema_state_callback,
+                10
+            )
         
         # 定时器 - 处理业务逻辑
         self.timer = self.create_timer(0.1, self.process_logic)  # 100ms周期
@@ -308,13 +351,20 @@ class BusinessLogicProcessor(Node):
         DI12: M524 buffer_out_position (缓存架出料到位)
         DI13: M525 conveyor_in_position (接驳台入料到位)
         DI14: M526 conveyor_out_position (接驳台出料到位)
+        DI23: M535 smema_uba (SMEMA上游有板)
+        DI24: M536 smema_ugb (SMEMA上游好板)
+        DI25: M537 smema_ubb (SMEMA上游坏板)
         """
         mapping = {
             10: 'buffer_sensor_2',      # M522 缓存架对射2
             11: 'buffer_in_position',   # M523 缓存架入料产品到位检测
             12: 'buffer_out_position',  # M524 缓存架出料产品到位检测
             13: 'conveyor_in_position', # M525 接驳台入料产品到位检测
-            14: 'conveyor_out_position' # M526 接驳台出料产品到位检测
+            14: 'conveyor_out_position', # M526 接驳台出料产品到位检测
+            # SMEMA信号
+            23: 'smema_uba',            # M535 SMEMA上游有板待发
+            24: 'smema_ugb',            # M536 SMEMA上游好板
+            25: 'smema_ubb',            # M537 SMEMA上游坏板
         }
         return mapping.get(di_number, '')
 
@@ -324,7 +374,7 @@ class BusinessLogicProcessor(Node):
             self.get_logger().warn('自动模式未启用，忽略入库启动命令')
             return
             
-        if self.warehouse_state != WarehouseState.IDLE:
+        if self.warehouse_state not in [WarehouseState.IDLE, WarehouseState.COMPLETED]:
             self.get_logger().warn('入库流程已在运行中，无法重复启动')
             return
         
@@ -427,6 +477,24 @@ class BusinessLogicProcessor(Node):
         except Exception as e:
             self.get_logger().error(f'层移动完成回调处理错误: {e}')
 
+    def current_layer_callback(self, msg):
+        """当前层号回调（从axis5实际位置计算）"""
+        try:
+            new_layer = msg.data
+            # 只记录显著变化
+            if abs(new_layer - self.current_layer_float) > 0.01:
+                self.get_logger().debug(f'当前层号更新: {self.current_layer_float:.2f} -> {new_layer:.2f}')
+            self.current_layer_float = new_layer
+            # 同时更新整数层号（四舍五入）
+            self.current_layer = round(new_layer)
+        except Exception as e:
+            self.get_logger().error(f'当前层号回调处理错误: {e}')
+
+    def is_target_layer_reached(self, target_layer):
+        """检查目标层号是否已到达（考虑容差）"""
+        diff = abs(self.current_layer_float - target_layer)
+        return diff <= self.layer_tolerance
+
     # +++ 新增：暂停状态命令回调处理 +++
     def pause_state_command_callback(self, msg):
         """处理暂停状态命令"""
@@ -441,12 +509,27 @@ class BusinessLogicProcessor(Node):
             self.handle_resume_command(command)
     
     def report_current_pause_state(self):
-        """报告当前业务状态供C++端记录"""
+        """报告当前业务状态供C++端记录 - 修复：IDLE/COMPLETED状态使用实际层号"""
         # 记录当前状态
         self.saved_warehouse_state = self.warehouse_state
         self.saved_outbound_state = self.outbound_state
-        self.saved_target_layer = self.target_layer
-        self.saved_source_layer = self.source_layer
+        
+        # +++ 关键修复：IDLE或COMPLETED状态时，使用当前实际层号（从axis5位置计算）+++
+        # 而不是目标层号（可能残留上次的目标层，如-12层）
+        if self.warehouse_state in [WarehouseState.IDLE, WarehouseState.COMPLETED]:
+            # 使用从axis5位置计算的实际层号（四舍五入为整数，限制在1-28范围）
+            actual_layer = max(1, min(28, round(self.current_layer_float)))
+            self.saved_target_layer = actual_layer
+            self.get_logger().info(f'记录暂停状态：入库{self.warehouse_state.name}，使用实际层号={actual_layer} (浮点层={self.current_layer_float:.2f})')
+        else:
+            self.saved_target_layer = self.target_layer
+            
+        if self.outbound_state in [OutboundState.IDLE, OutboundState.COMPLETED]:
+            actual_layer = max(1, min(28, round(self.current_layer_float)))
+            self.saved_source_layer = actual_layer
+            self.get_logger().info(f'记录暂停状态：出库{self.outbound_state.name}，使用实际层号={actual_layer} (浮点层={self.current_layer_float:.2f})')
+        else:
+            self.saved_source_layer = self.source_layer
         
         # 构建状态报告字符串
         # 格式: warehouse_active=1,warehouse_state=X,warehouse_layer=Y,outbound_active=0,...
@@ -455,10 +538,10 @@ class BusinessLogicProcessor(Node):
         
         report = (f"warehouse_active={warehouse_active},"
                   f"warehouse_state={self.warehouse_state.value},"
-                  f"warehouse_layer={self.target_layer},"
+                  f"warehouse_layer={self.saved_target_layer},"
                   f"outbound_active={outbound_active},"
                   f"outbound_state={self.outbound_state.value},"
-                  f"outbound_layer={self.source_layer}")
+                  f"outbound_layer={self.saved_source_layer}")
         
         # 发布状态报告
         msg = String()
@@ -519,14 +602,32 @@ class BusinessLogicProcessor(Node):
         # 根据状态值恢复
         if state_value == WarehouseState.IDLE.value:
             self.warehouse_state = WarehouseState.IDLE
+            # +++ 新增：IDLE状态恢复时，如果不在第1层，发送回到第1层的指令 +++
+            if not self.is_target_layer_reached(1):
+                if self.auto_mode_initialized:
+                    self.send_layer_command(1)
+                    self.get_logger().info(f'从IDLE恢复，当前层={self.current_layer_float:.2f}，发送层指令回到第1层')
+                else:
+                    self.pending_resume_state = {
+                        'type': 'warehouse_idle',
+                        'layer': 1
+                    }
+                    self.get_logger().info(f'从IDLE恢复，等待轴自动模式初始化完成后发送层指令回到第1层')
+            else:
+                self.get_logger().info(f'从IDLE恢复，当前已在第1层({self.current_layer_float:.2f})，无需移动')
         elif state_value == WarehouseState.WAIT_FOR_ENTRY.value:
             self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
             self.warehouse_process_requested = True
+            # 重置完成发布标志，确保后续能正确回包102
+            self.warehouse_completion_published = False
+            self.get_logger().info('从WAIT_FOR_ENTRY恢复，重置完成发布标志')
         elif state_value == WarehouseState.CONVEYOR_MOVING.value:
             # 从输送带运行状态恢复 - 重新检测条件
             self.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
             self.warehouse_process_requested = True
-            self.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件')
+            # 重置完成发布标志，确保后续能正确回包102
+            self.warehouse_completion_published = False
+            self.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件，重置完成发布标志')
         elif state_value == WarehouseState.LIFT_MOVING.value:
             # 从提升机运行状态恢复 - 保持在LIFT_MOVING并重新发送层指令
             # 因为conveyor_in信号可能已不满足，不能直接回退到CONVEYOR_MOVING
@@ -536,6 +637,8 @@ class BusinessLogicProcessor(Node):
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
+            # 重置完成发布标志，确保后续能正确回包102
+            self.warehouse_completion_published = False
             # +++ 修改：等待自动模式初始化完成后再发送层指令 +++
             if self.auto_mode_initialized:
                 # 轴已就绪，立即发送层指令
@@ -555,7 +658,9 @@ class BusinessLogicProcessor(Node):
             self.warehouse_process_requested = True
             self.layer_motion_completed = True  # 假设层移动已完成
             self.post_lift_delay_start = None
-            self.get_logger().info('从POST_LIFT_PROCESSING恢复，将重新执行后续操作')
+            # 重置完成发布标志，确保后续能正确回包102
+            self.warehouse_completion_published = False
+            self.get_logger().info('从POST_LIFT_PROCESSING恢复，将重新执行后续操作，重置完成发布标志')
         elif state_value == WarehouseState.DELAY_PROCESSING.value:
             # 从延迟处理恢复
             self.warehouse_state = WarehouseState.POST_LIFT_PROCESSING
@@ -568,10 +673,32 @@ class BusinessLogicProcessor(Node):
             # 重置DO发送状态，确保812和811能重新发送
             self.reset_do_command_state("811")
             self.reset_do_command_state("812")
-            self.get_logger().info('从DELAY_PROCESSING恢复，将重新执行延迟处理')
+            # 重置完成发布标志，确保后续能正确回包102
+            self.warehouse_completion_published = False
+            self.get_logger().info('从DELAY_PROCESSING恢复，将重新执行延迟处理，重置完成发布标志')
         elif state_value == WarehouseState.COMPLETED.value:
             self.warehouse_state = WarehouseState.COMPLETED
             self.warehouse_process_requested = True
+            # 关键修复：重置完成发布标志，确保恢复后能正确发布完成消息
+            self.warehouse_completion_published = False
+            # 关键修复：重置层移动状态，确保能正确发送回第1层指令
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+
+            # +++ 新增：发送回到第1层的指令 +++
+            if self.auto_mode_initialized:
+                # 轴已就绪，立即发送回到第1层的指令
+                self.send_layer_command(1)
+                self.get_logger().info('从COMPLETED恢复，发送层指令回到第1层')
+            else:
+                # 轴未就绪，保存状态等待初始化完成
+                self.pending_resume_state = {
+                    'type': 'warehouse_completed',
+                    'layer': 1
+                }
+                self.get_logger().info('从COMPLETED恢复，等待轴自动模式初始化完成后发送层指令回到第1层')
+            self.get_logger().info('从COMPLETED恢复，重置完成发布标志和层移动状态，确保能正确回包102并回到第1层')
         
         self.resuming_from_pause = False
     
@@ -589,9 +716,25 @@ class BusinessLogicProcessor(Node):
         # 根据状态值恢复
         if state_value == OutboundState.IDLE.value:
             self.outbound_state = OutboundState.IDLE
+            # +++ 新增：IDLE状态恢复时，如果不在第1层，发送回到第1层的指令 +++
+            if not self.is_target_layer_reached(1):
+                if self.auto_mode_initialized:
+                    self.send_layer_command(1)
+                    self.get_logger().info(f'出库从IDLE恢复，当前层={self.current_layer_float:.2f}，发送层指令回到第1层')
+                else:
+                    self.pending_resume_state = {
+                        'type': 'outbound_idle',
+                        'layer': 1
+                    }
+                    self.get_logger().info(f'出库从IDLE恢复，等待轴自动模式初始化完成后发送层指令回到第1层')
+            else:
+                self.get_logger().info(f'出库从IDLE恢复，当前已在第1层({self.current_layer_float:.2f})，无需移动')
         elif state_value == OutboundState.WAIT_FOR_EXIT.value:
             self.outbound_state = OutboundState.WAIT_FOR_EXIT
             self.outbound_process_requested = True
+            # 重置完成发布标志，确保后续能正确回包104
+            self.outbound_completion_published = False
+            self.get_logger().info('从WAIT_FOR_EXIT恢复，重置完成发布标志')
         elif state_value == OutboundState.LIFT_MOVING.value:
             # 从提升机运行状态恢复 - 保持在LIFT_MOVING并重新发送层指令
             self.outbound_state = OutboundState.LIFT_MOVING
@@ -600,6 +743,8 @@ class BusinessLogicProcessor(Node):
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
+            # 重置完成发布标志，确保后续能正确回包104
+            self.outbound_completion_published = False
             # +++ 修改：等待自动模式初始化完成后再发送层指令 +++
             if self.auto_mode_initialized:
                 # 轴已就绪，立即发送层指令
@@ -618,6 +763,8 @@ class BusinessLogicProcessor(Node):
             self.outbound_process_requested = True
             # 重置DO发送状态，确保811能重新发送
             self.reset_do_command_state("811")
+            # 重置完成发布标志，确保后续能正确回包104
+            self.outbound_completion_published = False
             # 等待自动模式初始化完成后再进入POST_LIFT_PROCESSING（避免JOG命令在轴STOPPED状态丢失）
             if not self.auto_mode_initialized:
                 # 暂时保持LIFT_MOVING，等待轴就绪
@@ -639,6 +786,8 @@ class BusinessLogicProcessor(Node):
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
             self.layer_completion_received_time = None
+            # 重置完成发布标志，确保后续能正确回包104
+            self.outbound_completion_published = False
             # 等待自动模式初始化完成后发送层指令
             if self.auto_mode_initialized:
                 self.send_layer_command(1)
@@ -653,6 +802,13 @@ class BusinessLogicProcessor(Node):
         elif state_value == OutboundState.COMPLETED.value:
             self.outbound_state = OutboundState.COMPLETED
             self.outbound_process_requested = True
+            # 关键修复：重置完成发布标志，确保恢复后能正确发布完成消息
+            self.outbound_completion_published = False
+            # 关键修复：重置层移动状态，确保能正确发送回第1层指令
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+            self.get_logger().info('从COMPLETED恢复，重置完成发布标志和层移动状态，确保能正确回包104并回到第1层')
         
         self.resuming_from_pause = False
 
@@ -660,7 +816,11 @@ class BusinessLogicProcessor(Node):
         """主处理逻辑 - 定时器回调"""
         if not self.auto_mode_enabled or not self.enabled:
             return
-            
+        
+        # 处理SMEMA协议状态（仅在启用时）
+        if self.ENABLE_SMEMA:
+            self.process_smema_logic()
+        
         # 处理入库逻辑
         self.process_warehouse_logic()
         
@@ -714,7 +874,7 @@ class BusinessLogicProcessor(Node):
         if state_changed:
             self.get_logger().info(
                 f'入库流程状态变化: {self.previous_warehouse_state.name} -> {self.warehouse_state.name}, '
-                f'当前层: {self.current_layer}, 目标层: {self.target_layer}'
+                f'当前层: {self.current_layer_float:.2f}, 目标层: {self.target_layer}'
             )
             self.previous_warehouse_state = self.warehouse_state
         
@@ -747,8 +907,14 @@ class BusinessLogicProcessor(Node):
         elif self.warehouse_state == WarehouseState.WAIT_FOR_ENTRY:
             # 检测入库条件
             if buffer_in and not buffer_out:
+                # +++ 新增检查：确保当前层是第1层（使用从axis5位置计算的层号）+++
+                if not self.is_target_layer_reached(1):
+                    self.get_logger().warn(f'提升机不在第1层（当前层={self.current_layer_float:.2f}），等待回到第1层后再开始入库')
+                    # 发送回到第1层的指令
+                    self.send_layer_command(1)
+                    return
                 self.warehouse_state = WarehouseState.CONVEYOR_MOVING
-                self.get_logger().info('检测到入库条件，开始输送')
+                self.get_logger().info(f'检测到入库条件，当前层={self.current_layer_float:.2f}，开始输送')
                 
                 # 生成输送带启动命令
                 self.add_command(ControlAction(
@@ -777,7 +943,7 @@ class BusinessLogicProcessor(Node):
                 self.conveyor_in_detected = True
             
             # 修改：扩展板子到位检测条件
-            # 条件1：conveyor_out为True（直接检测到出料）
+            # 条件1：conveyor_out为True（直接检测到出料/接驳台入料位）
             # 条件2：conveyor_in曾经为True后又变为False（检测到货物进入后离开）
             conveyor_out_detected = conveyor_out
             conveyor_in_then_out = (self.conveyor_in_detected and not conveyor_in)
@@ -792,20 +958,26 @@ class BusinessLogicProcessor(Node):
             if self.conveyor_in_then_out_delay_started:
                 self.conveyor_in_then_out_delay_counter += 1
                 
-                # 0.2秒延迟（2个周期，每周期100ms）
-                if self.conveyor_in_then_out_delay_counter >= 2:
+                # 0.1秒延迟（1个周期，每周期100ms）
+                if self.conveyor_in_then_out_delay_counter >= 1:
                     board_in_position = True
                     self.conveyor_in_then_out_delay_started = False
                     self.get_logger().info('条件二延迟结束，认为板子到位')
                 else:
                     board_in_position = False
             else:
-                # 条件一立即触发
+                # 条件一(conveyor_out信号)立即触发
                 board_in_position = conveyor_out_detected
             
             # 继续输送直到检测到板子到位
             if board_in_position:
-                self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
+                # 记录是哪个条件触发的到位检测
+                trigger_condition = []
+                if conveyor_out_detected:
+                    trigger_condition.append('conveyor_out')
+                if conveyor_in_then_out:
+                    trigger_condition.append('conveyor_in变化')
+                self.get_logger().info(f'检测到板子到位: 触发条件={", ".join(trigger_condition)}')
                 
                 # 停止输送带
                 self.add_command(ControlAction(
@@ -833,12 +1005,12 @@ class BusinessLogicProcessor(Node):
             if not self.layer_motion_completed:
                 # === 边缘触发：只在进入等待状态时打印一次 ===
                 if not getattr(self, '_waiting_layer_motion_printed', False):
-                    self.get_logger().info('等待层移动完成...')
+                    self.get_logger().info(f'等待层移动完成... 目标层={self.target_layer}, 当前层={self.current_layer_float:.2f}')
                     self._waiting_layer_motion_printed = True
                 return  # 继续等待
             
             # 层移动完成后执行后续操作
-            self.get_logger().info('层移动完成，继续执行入库流程')
+            self.get_logger().info(f'层移动完成，当前层={self.current_layer_float:.2f}，继续执行入库流程')
             # 重置层移动相关状态
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
@@ -878,7 +1050,7 @@ class BusinessLogicProcessor(Node):
             
             # 步骤2：检查延迟是否到达1秒
             elapsed = time.time() - self.post_lift_delay_start
-            if elapsed < 1.0:
+            if elapsed < 0.5:
                 return  # 继续等待
             
             # 步骤3：延迟到达，执行后续操作
@@ -920,6 +1092,7 @@ class BusinessLogicProcessor(Node):
                         self.delay_started = False
                         self.delay_condition_triggered = False
                         self.buffer_sensor_2_detected = False  # 重置缓存架对射2检测状态
+                        self.state_change_counter = 0  # 重置计数器，用于COMPLETED状态等待层移动
                         
                         # 停止轴2
                         self.add_command(ControlAction(
@@ -940,26 +1113,46 @@ class BusinessLogicProcessor(Node):
                             self.get_logger().info(f'延迟剩余时间: {remaining_seconds}秒')
 
         elif self.warehouse_state == WarehouseState.COMPLETED:
-            # 回到第1层
+            # 1. 发送升降机复位指令（回到第1层）
+            # 注意：send_layer_command 内部会检查重复发送，相同指令不会重复发送
             self.send_layer_command(1)
             
-            if (not buffer_in and not buffer_out and 
-                not conveyor_in and not conveyor_out):
-                self.warehouse_state = WarehouseState.IDLE
-                # 发布入库完成消息（只在状态变化时发布一次）
-                if not self.warehouse_completion_published:
-                    completion_msg = Bool()
-                    completion_msg.data = True
-                    self.warehouse_completed_pub.publish(completion_msg)
-                    self.warehouse_completion_published = True
-                    self.get_logger().info('入库流程完成，发布完成消息')
-                self.get_logger().info('回到初始状态，等待下一次入库')
-                
-                # 入库流程完成后，重置产品到位发布状态，允许再次发布
-                if self.product_arrival_cycle_active:
-                    self.product_arrival_published_in_cycle = False
-                    self.product_arrival_phase = "post_warehouse"
-                    self.get_logger().info('入库流程完成，重置产品到位发布状态，等待下一轮产品到位')
+            # 修正日志：明确区分目标层和当前实际层
+            # current_layer_float 是异步更新的，可能还未反映最新的层移动
+            # 使用标志确保日志只打印一次
+            if not self.completed_reset_command_sent:
+                self.get_logger().info(f'流程完成，发送升降机复位指令至第1层 (目标层=1, 当前实际层={self.current_layer_float:.2f})')
+                self.completed_reset_command_sent = True
+
+            # 2. 发布入库完成消息 (会触发0x102回包)
+            if not self.warehouse_completion_published:
+                completion_msg = Bool()
+                completion_msg.data = True
+                self.warehouse_completed_pub.publish(completion_msg)
+                self.warehouse_completion_published = True
+                self.get_logger().info('入库流程完成，发布完成消息(0x102)')
+
+            # 3. 重置产品到位发布状态，确保能检测下一轮产品
+            if self.product_arrival_cycle_active:
+                self.product_arrival_published_in_cycle = False
+                self.product_arrival_phase = "post_warehouse"
+                self.get_logger().info('入库流程完成，重置产品到位发布状态，等待下一轮产品到位')
+
+            # +++ 关键修复：等待层移动完成（到达第1层）后再进入IDLE +++
+            if not self.is_target_layer_reached(1):
+                # 层移动未完成，继续等待
+                self.state_change_counter += 1
+                if self.state_change_counter >= 50:  # 每5秒打印一次
+                    self.state_change_counter = 0
+                    self.get_logger().info(f'等待升降机回到第1层... 当前层={self.current_layer_float:.2f}')
+                return  # 不进入IDLE，继续等待层移动完成
+
+            # 4. 层移动完成，重置流程状态，回到IDLE
+            self.warehouse_process_requested = False
+            self.warehouse_completion_published = False
+            self.completed_reset_command_sent = False  # 重置标志，为下次流程做准备
+            self.warehouse_state = WarehouseState.IDLE
+            self.get_logger().info(f'升降机已回到第1层(当前层={self.current_layer_float:.2f})，流程状态重置为IDLE')
 
     def process_outbound_logic(self):
         """处理出库业务流程"""
@@ -976,7 +1169,7 @@ class BusinessLogicProcessor(Node):
         if state_changed:
             self.get_logger().info(
                 f'出库流程状态变化: {self.previous_outbound_state.name} -> {self.outbound_state.name}, '
-                f'源层: {self.source_layer}'
+                f'当前层: {self.current_layer_float:.2f}, 源层: {self.source_layer}'
             )
             self.previous_outbound_state = self.outbound_state
         
@@ -1014,12 +1207,12 @@ class BusinessLogicProcessor(Node):
             if not self.layer_motion_completed:
                 # === 边缘触发：只在进入等待状态时打印一次 ===
                 if not getattr(self, '_outbound_waiting_layer_motion_printed', False):
-                    self.get_logger().info('等待层移动完成...')
+                    self.get_logger().info(f'等待层移动完成... 源层={self.source_layer}, 当前层={self.current_layer_float:.2f}')
                     self._outbound_waiting_layer_motion_printed = True
                 return  # 继续等待
             
             # 层移动完成后执行后续操作
-            self.get_logger().info('层移动完成，继续执行出库流程')
+            self.get_logger().info(f'层移动完成，当前层={self.current_layer_float:.2f}，继续执行出库流程')
             # 重置层移动相关状态
             self.layer_motion_completed = False
             self.previous_layer_completion_state = False
@@ -1068,7 +1261,7 @@ class BusinessLogicProcessor(Node):
                 self.outbound_conveyor_in_then_out_delay_counter += 1
                 
                 # 0.5秒延迟（5个周期，每周期100ms）
-                if self.outbound_conveyor_in_then_out_delay_counter >= 5:
+                if self.outbound_conveyor_in_then_out_delay_counter >= 1:
                     board_in_position = True
                     self.outbound_conveyor_in_then_out_delay_started = False
                     self.get_logger().info('出库条件二延迟结束，认为板子到位')
@@ -1079,7 +1272,13 @@ class BusinessLogicProcessor(Node):
                 board_in_position = conveyor_out_detected
             
             if board_in_position: # 检测板子到位条件
-                self.get_logger().info(f'检测到板子到位: conveyor_out={conveyor_out}, 进料变化={conveyor_in_then_out}')
+                # 记录是哪个条件触发的到位检测
+                trigger_condition = []
+                if conveyor_out_detected:
+                    trigger_condition.append('conveyor_out')
+                if conveyor_in_then_out:
+                    trigger_condition.append('conveyor_in变化')
+                self.get_logger().info(f'出库检测到板子到位: 触发条件={", ".join(trigger_condition)}')
                 
                 # 停止轴2
                 self.add_command(ControlAction(
@@ -1122,13 +1321,20 @@ class BusinessLogicProcessor(Node):
                 self.outbound_state = OutboundState.COMPLETED
 
         elif self.outbound_state == OutboundState.COMPLETED:
-            # 4. 检测货物完全送出
-            if conveyor_out and not self.outbound_delay_started:
-                self.outbound_delay_started = True
-                self.outbound_delay_counter = 0
-                self.get_logger().info(f'检测到货物到达出料位，开始{self.OUTBOUND_DELAY_BEFORE_STOP_MS//1000}秒延迟')
+            # 4. 检测货物完全送出（conveyor_out从True变为False后再延迟）
+            if conveyor_out:
+                # 货物还在出料位，记录检测状态
+                if not getattr(self, '_outbound_conveyor_out_was_true', False):
+                    self._outbound_conveyor_out_was_true = True
+                    self.get_logger().info('检测到货物到达出料位，等待货物离开...')
+            else:
+                # 货物曾经到达过出料位，现在又离开了
+                if getattr(self, '_outbound_conveyor_out_was_true', False) and not self.outbound_delay_started:
+                    self.outbound_delay_started = True
+                    self.outbound_delay_counter = 0
+                    self.get_logger().info(f'货物已离开出料位，开始{self.OUTBOUND_DELAY_BEFORE_STOP_MS//1000}秒延迟')
             
-            # 5. 延迟处理
+            # 5. 延迟处理（货物离开后延迟）
             if self.outbound_delay_started:
                 self.outbound_delay_counter += 1
                 
@@ -1136,6 +1342,7 @@ class BusinessLogicProcessor(Node):
                     # 停止输送带并完成流程
                     self.send_do_control_once("813", False)
                     self.outbound_delay_started = False
+                    self._outbound_conveyor_out_was_true = False  # 重置检测标志
                     self.outbound_state = OutboundState.IDLE
                     self.outbound_process_requested = False  # 关键：重置启动请求标志
                     # 发布出库完成消息（只在状态变化时发布一次）
@@ -1250,7 +1457,7 @@ class BusinessLogicProcessor(Node):
 
     def _reset_key_do_signals(self):
         """重置关键DO信号（M810-M813）为0"""
-        self.send_do_control_once("810", False)  # 顶升气缸下降
+        # self.send_do_control_once("810", False)  # 顶升气缸下降不用
         self.send_do_control_once("811", False)  # 齿轮对接气缸伸出
         self.send_do_control_once("812", False)  # 皮带正转启动
         self.send_do_control_once("813", False)  # 皮带反转启动
@@ -1286,6 +1493,13 @@ class BusinessLogicProcessor(Node):
         self.conveyor_in_then_out_delay_counter = 0
         self.outbound_conveyor_in_then_out_delay_started = False
         self.outbound_conveyor_in_then_out_delay_counter = 0
+        
+        # 重置SMEMA状态（如果启用）
+        if self.ENABLE_SMEMA:
+            self.smema_state = "IDLE"
+            self.smema_business_ready = False
+            self.smema_board_pending = False
+            self.smema_board_count = 0
 
         # 重置自动模式初始化标志（停止后下次恢复需要重新等待）
         self.auto_mode_initialized = False
@@ -1307,10 +1521,65 @@ class BusinessLogicProcessor(Node):
         self.warehouse_completion_published = False
         self.outbound_completion_published = False
         
+        # 重置 COMPLETED 状态标志
+        self.completed_reset_command_sent = False
+        
         # 清空待处理命令
         self.pending_commands.clear()
         
         self.get_logger().info('业务逻辑处理器状态已重置')
+
+    # +++ SMEMA协议处理方法 +++
+    def smema_state_callback(self, msg):
+        """SMEMA状态回调"""
+        if not self.ENABLE_SMEMA:
+            return
+        self.smema_state = msg.data
+        self.get_logger().debug(f'SMEMA状态更新: {self.smema_state}')
+    
+    def process_smema_logic(self):
+        """处理SMEMA协议逻辑 - 协调上下游板子传输"""
+        if not self.ENABLE_SMEMA:
+            return
+            
+        di = self.current_io_signals
+        
+        # 检查缓存区状态，决定是否可以接收新板子
+        buffer_clear = (
+            not di['buffer_in_position'] and 
+            not di['conveyor_in_position'] and
+            self.warehouse_state == WarehouseState.IDLE and
+            self.outbound_state == OutboundState.IDLE
+        )
+        
+        # 更新业务层就绪状态
+        business_ready = buffer_clear and self.auto_mode_enabled
+        if business_ready != self.smema_business_ready:
+            self.smema_business_ready = business_ready
+            # 发布就绪状态
+            if hasattr(self, 'smema_business_ready_pub'):
+                ready_msg = Bool()
+                ready_msg.data = business_ready
+                self.smema_business_ready_pub.publish(ready_msg)
+                self.get_logger().info(f'SMEMA业务层就绪: {business_ready}')
+        
+        # 检测板子到达（UBA从ON变为OFF）
+        if self.smema_state == "BOARD_ARRIVED" and not self.smema_board_pending:
+            self.smema_board_pending = True
+            self.smema_board_count += 1
+            self.get_logger().info(f'✅ SMEMA检测到板子到达 (#{self.smema_board_count})')
+            # 发布板子接收确认
+            if hasattr(self, 'smema_board_received_pub'):
+                received_msg = Bool()
+                received_msg.data = True
+                self.smema_board_received_pub.publish(received_msg)
+            self.smema_board_pending = False
+    
+    def is_smema_board_arrived(self) -> bool:
+        """检查是否有板子通过SMEMA到达"""
+        if not self.ENABLE_SMEMA:
+            return False
+        return self.smema_state == "BOARD_ARRIVED"
 
     def execute_pending_resume(self):
         """执行待处理的恢复状态（轴就绪后调用）"""
@@ -1321,22 +1590,60 @@ class BusinessLogicProcessor(Node):
         self.pending_resume_state = None  # 清除待处理状态
         
         if state_info['type'] == 'warehouse':
-            # 执行入库恢复
+            # 执行入库恢复：关键修复！必须同步恢复状态到LIFT_MOVING
+            self.warehouse_state = WarehouseState.LIFT_MOVING  # 恢复状态机状态
+            self.warehouse_process_requested = True  # 确保流程继续执行
+            self.layer_motion_completed = False  # 重置层移动完成标志
+            self.previous_layer_completion_state = False  # 重置前一个状态
+            self.layer_completion_received_time = None
             self.send_layer_command(state_info['layer'])
-            self.get_logger().info(f'轴就绪后执行入库恢复：发送层指令到目标层 {state_info["layer"]}')
+            self.get_logger().info(f'轴就绪后执行入库恢复：恢复状态到LIFT_MOVING，发送层指令到目标层 {state_info["layer"]}')
+        # +++ 新增：处理入库完成状态的恢复 +++
+        elif state_info['type'] == 'warehouse_completed':
+            # 执行入库完成恢复：发送回到第1层的指令
+            target_layer = state_info.get('layer', 1)  # 默认为第1层
+            self.warehouse_state = WarehouseState.IDLE  # 恢复为空闲状态
+            self.warehouse_process_requested = False
+            self.layer_motion_completed = False
+            self.previous_layer_completion_state = False
+            self.layer_completion_received_time = None
+            self.send_layer_command(target_layer)
+            self.get_logger().info(f'轴就绪后执行入库完成恢复：恢复状态到IDLE，发送层指令回到第{target_layer}层')    
         elif state_info['type'] == 'outbound':
-            # 执行出库恢复
+            # 执行出库恢复：同步恢复状态到LIFT_MOVING
+            self.outbound_state = OutboundState.LIFT_MOVING  # 恢复状态机状态
+            self.outbound_process_requested = True  # 确保流程继续执行
+            self.layer_motion_completed = False  # 重置层移动完成标志
+            self.previous_layer_completion_state = False  # 重置前一个状态
+            self.layer_completion_received_time = None
             self.send_layer_command(state_info['layer'])
-            self.get_logger().info(f'轴就绪后执行出库恢复：发送层指令到源层 {state_info["layer"]}')
+            self.get_logger().info(f'轴就绪后执行出库恢复：恢复状态到LIFT_MOVING，发送层指令到源层 {state_info["layer"]}')
         elif state_info['type'] == 'outbound_conveyor':
-            # 执行出库CONVEYOR_MOVING状态恢复（发送层指令到第1层）
+            # 执行出库CONVEYOR_MOVING状态恢复：同步恢复状态到CONVEYOR_MOVING
+            self.outbound_state = OutboundState.CONVEYOR_MOVING  # 恢复状态机状态
+            self.outbound_process_requested = True  # 确保流程继续执行
+            self.layer_motion_completed = False  # 重置层移动完成标志
+            self.previous_layer_completion_state = False  # 重置前一个状态
+            self.layer_completion_received_time = None
+            self.outbound_conveyor_started = False  # 重置输送带启动标志，让流程重新启动输送带
             self.send_layer_command(state_info['layer'])
-            self.get_logger().info(f'轴就绪后执行出库恢复：发送层指令到第{state_info["layer"]}层')
+            self.get_logger().info(f'轴就绪后执行出库恢复：恢复状态到CONVEYOR_MOVING，发送层指令到第{state_info["layer"]}层')
         elif state_info['type'] == 'outbound_post_lift':
             # 执行出库POST_LIFT_PROCESSING恢复
             self.outbound_state = OutboundState.LIFT_MOVING
             self.layer_motion_completed = True  # 标记层移动完成，让流程进入POST_LIFT_PROCESSING
             self.get_logger().info('轴就绪后执行出库POST_LIFT恢复：将进入POST_LIFT_PROCESSING状态执行JOG命令')
+        # +++ 新增：处理IDLE状态恢复时的回第1层 +++
+        elif state_info['type'] == 'warehouse_idle':
+            # 执行入库IDLE恢复：发送回到第1层的指令
+            target_layer = state_info.get('layer', 1)
+            self.send_layer_command(target_layer)
+            self.get_logger().info(f'轴就绪后执行入库IDLE恢复：发送层指令回到第{target_layer}层')
+        elif state_info['type'] == 'outbound_idle':
+            # 执行出库IDLE恢复：发送回到第1层的指令
+            target_layer = state_info.get('layer', 1)
+            self.send_layer_command(target_layer)
+            self.get_logger().info(f'轴就绪后执行出库IDLE恢复：发送层指令回到第{target_layer}层')
 
 def main(args=None):
     rclpy.init(args=args)

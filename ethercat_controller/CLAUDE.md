@@ -15,8 +15,11 @@ ethercat_controller/
 │   │   └── LayerCommandProcessor.cpp     # 层指令处理器
 │   ├── io_modules/
 │   │   ├── io_interface.cpp              # IO 模块接口
+│   │   ├── io_interface.hpp              # IO 模块头文件
 │   │   ├── lights_controller.cpp         # 灯光控制器（按钮灯+三色灯）
-│   │   └── lights_controller.hpp         # 灯光控制器头文件
+│   │   ├── lights_controller.hpp         # 灯光控制器头文件
+│   │   ├── smema_handler.cpp             # SMEMA协议处理器（下游设备）
+│   │   └── smema_handler.hpp             # SMEMA协议头文件
 │   └── fault_manager/
 │       ├── fault_management_system.cpp   # 故障管理系统（独立实现）
 │       ├── fault_management_system.hpp
@@ -352,5 +355,125 @@ global_node->publish_pause_state_resume_request();
 
 ---
 
-*文档最后更新：2026-03-30*
-*对应架构版本：v2.4（暂停恢复流程时序修复）*
+## SMEMA 协议通信架构
+
+### 设计哲学
+- **标准兼容**：遵循IPC-SMEMA-9851标准，确保与上游设备互联互通
+- **下游视角**：本机作为下游设备，接收上游板子，输出MR信号
+- **状态机驱动**：IDLE → READY → RECEIVING → BOARD_ARRIVED → IDLE
+- **业务解耦**：SMEMA层仅负责握手，业务层决定何时就绪
+- **宏开关控制**：通过宏开关控制是否启用SMEMA，方便灵活配置
+
+### 启用/禁用配置
+
+#### C++端 (`io_interface.hpp`)
+```cpp
+#define ENABLE_SMEMA  1  // 1:启用SMEMA协议通讯 0:禁用SMEMA协议
+```
+
+#### Python端 (`business_logic_processor.py`)
+```python
+self.ENABLE_SMEMA = True  # True:启用SMEMA协议通讯 False:禁用SMEMA协议
+```
+
+当禁用时：
+- C++端：SMEMA处理器函数为空实现，不创建发布器/订阅器
+- Python端：不处理SMEMA逻辑，不创建相关发布器/订阅器
+- 硬件：DO814(MR)信号不会被控制，可作为普通DO使用
+
+### 核心组件
+
+#### 1. SMEMA 处理器 (smema_handler)
+- **独立模块**：封装SMEMA握手协议所有逻辑
+- **信号防抖**：3周期防抖，避免误触发
+- **超时保护**：30秒超时，防止死锁
+- **状态发布**：实时发布SMEMA状态到 `/smema/state`
+
+#### 2. 信号定义
+| 信号 | 方向 | 寄存器 | 说明 |
+|------|------|--------|------|
+| UBA | 输入(DI) | M535 | 上游有板待发 |
+| UGB | 输入(DI) | M536 | 上游好板（可选） |
+| UBB | 输入(DI) | M537 | 上游坏板（可选） |
+| MR | 输出(DO) | M814 | 机器就绪 |
+
+#### 3. 状态机流程
+```
+IDLE: 等待业务层就绪（缓存区空闲）
+  ↓ 业务层就绪
+READY: 输出MR=ON，等待UBA
+  ↓ UBA=ON
+RECEIVING: 板子传输中，保持MR=ON
+  ↓ UBA=OFF（传输完成）
+BOARD_ARRIVED: 板子到达，等待业务层确认
+  ↓ 业务层确认接收
+IDLE: 输出MR=OFF，循环
+```
+
+#### 4. 跨层协作
+| 层级 | 职责 | 通信话题 |
+|------|------|----------|
+| C++ SMEMA处理器 | 信号握手、状态机、硬件控制 | `/smema/state` (发布) |
+| Python业务逻辑 | 业务决策、缓存管理、流程控制 | `/smema/business_ready` (订阅) |
+| Python业务逻辑 | 板子处理完成确认 | `/smema/board_received` (订阅) |
+
+### 关键工作流程
+
+#### 板子到达检测
+```
+上游设备输出UBA=ON → C++检测UBA上升沿 → 状态转到RECEIVING
+→ 上游传输板子 → 上游释放UBA=OFF → C++检测到UBA下降沿
+→ 状态转到BOARD_ARRIVED → 发布状态到Python → Python处理入库
+→ Python发布board_received → C++状态回到IDLE
+```
+
+#### 业务层就绪判定
+```
+Python检查：缓存区空闲(buffer_in=0, conveyor_in=0) 
+           && 入库流程空闲(warehouse_state=IDLE)
+           && 出库流程空闲(outbound_state=IDLE)
+→ 发布business_ready=True → C++设置MR=ON
+```
+
+### 使用示例
+
+```cpp
+// C++端：初始化SMEMA处理器
+init_smema_handler();
+
+// 主循环每100ms调用
+process_smema_cycle();
+
+// 发布SMEMA状态
+publish_smema_state();
+```
+
+```python
+# Python端：业务层就绪检测
+business_ready = (
+    not di['buffer_in_position'] and 
+    not di['conveyor_in_position'] and
+    self.warehouse_state == WarehouseState.IDLE and
+    self.outbound_state == OutboundState.IDLE
+)
+ready_msg = Bool()
+ready_msg.data = business_ready
+self.smema_business_ready_pub.publish(ready_msg)
+
+# 板子处理完成后确认
+received_msg = Bool()
+received_msg.data = True
+self.smema_board_received_pub.publish(received_msg)
+```
+
+### 集成点
+
+1. **io_interface.hpp/cpp**：添加SMEMA信号到DI/DO结构体
+2. **ethercat_node.cpp**：初始化SMEMA处理器，IO循环中调用process_smema_cycle()
+3. **business_logic_processor.py**：业务层就绪判断，板子接收确认
+4. **硬件接线**：DI模块M535接上游BA，DO模块M814接上游MR
+
+---
+
+*文档最后更新：2026-04-01*
+*对应架构版本：v2.5（SMEMA协议支持）*

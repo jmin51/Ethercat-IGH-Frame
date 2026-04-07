@@ -4,10 +4,11 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cmath>  // for std::round
 
 LayerCommandProcessor::LayerCommandProcessor(rclcpp::Node* node) 
     : node_(node), axis5_index_(0), current_layer_(1), target_layer_(1), 
-      is_moving_(false), motion_speed_(10.0), motion_acceleration_(50.0) {
+      is_moving_(false), current_layer_float_(1.0), motion_speed_(10.0), motion_acceleration_(50.0) {
     
     // 创建位移指令发布器，使用String类型
     displacement_pub_ = node_->create_publisher<std_msgs::msg::String>(
@@ -171,7 +172,7 @@ void LayerCommandProcessor::reset_motion_state() {
     // 注意：不重置 target_layer_，保留目标层信息用于恢复时重新触发
 }
 
-// 修改 check_motion_completion 方法
+// 优化后的 check_motion_completion 方法
 bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoAxisBase>& axis5) {
     if (!is_moving_) {
         return false;
@@ -184,7 +185,41 @@ bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoA
     }
     
     if (axis5 && axis5->check_target_reached_flag()) {
-        current_layer_ = target_layer_;
+        // +++ 优化：用 axis5 实际位置计算当前层号（更准确）+++
+        // 而不是简单地设为 target_layer，避免实际位置与目标层不匹配
+        double position_before = current_layer_float_;
+        
+        // 关键修复：重新读取当前脉冲，确保数据新鲜
+        // 注意：displacement_to_pulses 返回的是绝对脉冲位置，所以层号计算也用绝对位置
+        int32_t current_pulses = axis5->get_actual_position();
+        const double SCREW_LEAD = 10.0;
+        const int PULSES_PER_REV = 10000;
+        // 直接使用 current_pulses 计算绝对位置（与 displacement_to_pulses 一致）
+        double position_mm = static_cast<double>(current_pulses * SCREW_LEAD / PULSES_PER_REV);
+        double fresh_layer_float = calculate_layer_from_position(position_mm);
+        
+        // 使用 freshly 计算的层号
+        current_layer_float_ = fresh_layer_float;
+        
+        // 验证实际位置是否接近目标层（容差0.5层）
+        double target_layer_float = static_cast<double>(target_layer_);
+        double layer_diff = std::abs(current_layer_float_ - target_layer_float);
+        
+        if (layer_diff > 0.1) {
+            // 实际位置与目标层偏差较大，警告但继续完成
+            RCLCPP_WARN(node_->get_logger(), 
+                        "层移动完成警告: 目标层=%.1f, 实际层=%.2f, 偏差=%.2f层 (current=%d, mm=%.2f)",
+                        target_layer_float, current_layer_float_, layer_diff,
+                        current_pulses, position_mm);
+        }
+        
+        // 使用实际位置计算的层号作为当前层（四舍五入）
+        current_layer_ = static_cast<int8_t>(std::round(current_layer_float_));
+        
+        // 限制在有效范围
+        if (current_layer_ < 1) current_layer_ = 1;
+        if (current_layer_ > 28) current_layer_ = 28;
+        
         is_moving_ = false;
         
         // 新增：发布层移动完成消息
@@ -192,12 +227,79 @@ bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoA
             auto msg = std_msgs::msg::Bool();
             msg.data = true;
             layer_completion_pub_->publish(msg);
-            RCLCPP_INFO(node_->get_logger(), "发布层移动完成消息: 到达第%d层", current_layer_);
+            RCLCPP_INFO(node_->get_logger(), 
+                        "发布层移动完成消息: 目标第%d层 -> 实际第%.2f层", 
+                        target_layer_, current_layer_float_);
         }
         
-        RCLCPP_INFO(node_->get_logger(), "层指令执行完成: 到达第%d层", current_layer_);
+        RCLCPP_INFO(node_->get_logger(), 
+                    "层指令执行完成: 目标第%d层 -> 实际第%.2f层(整型第%d层)", 
+                    target_layer_, current_layer_float_, current_layer_);
         return true;
     }
     
     return false;
+}
+
+// 新增：从axis5实际位置计算当前层号（支持小数层）
+double LayerCommandProcessor::calculate_layer_from_position(double position_mm) {
+    // 层高公式: height = (layer - 1) * 25.0
+    // 反推: layer = height / 25.0 + 1
+    double layer = position_mm / 25.0 + 1.0;
+    return layer;
+}
+
+// 新增：更新当前层号（从axis5实际位置）
+void LayerCommandProcessor::update_current_layer_from_axis5(const std::shared_ptr<ServoAxisBase>& axis5) {
+    if (!axis5) {
+        return;
+    }
+    
+    // 获取axis5当前实际位置（脉冲）
+    int32_t current_pulses = axis5->get_actual_position();
+    
+    // 计算绝对位置（mm）- 与 servo_axis_base::displacement_to_pulses 使用相同的参考系
+    // displacement_to_pulses 返回的是绝对脉冲位置，所以这里也用绝对脉冲计算
+    const double SCREW_LEAD = 10.0;  // 丝杠导程10mm
+    const int PULSES_PER_REV = 10000;  // 每转脉冲数
+    double position_mm = static_cast<double>(current_pulses * SCREW_LEAD / PULSES_PER_REV);
+    
+    // 计算层号（支持小数）
+    double new_layer_float = calculate_layer_from_position(position_mm);
+    
+    // 调试日志：如果层号变化较大，打印详细信息
+    if (std::abs(new_layer_float - current_layer_float_) > 0.5) {
+        RCLCPP_INFO(node_->get_logger(), 
+                    "层号更新: %.2f -> %.2f (current=%d, mm=%.2f)",
+                    current_layer_float_, new_layer_float,
+                    current_pulses, position_mm);
+    }
+    
+    // 更新浮点层号
+    current_layer_float_ = new_layer_float;
+    
+    // 同时更新整数层号（四舍五入）
+    current_layer_ = static_cast<int8_t>(std::round(new_layer_float));
+    
+    // 限制在有效范围内
+    if (current_layer_ < 1) current_layer_ = 1;
+    if (current_layer_ > 28) current_layer_ = 28;
+}
+
+// 新增：校正层号（自动模式初始化完成后调用）
+void LayerCommandProcessor::calibrate_layer_from_position(const std::shared_ptr<ServoAxisBase>& axis5) {
+    if (!axis5) {
+        return;
+    }
+    
+    // 更新层号
+    update_current_layer_from_axis5(axis5);
+    
+    // 使用与位移指令相同的绝对位置计算
+    int32_t current_pulses = axis5->get_actual_position();
+    double position_mm = static_cast<double>(current_pulses * 10.0 / 10000.0);
+    
+    RCLCPP_INFO(node_->get_logger(), 
+                "层号校正完成: 位置=%.2fmm, 层号=%.2f(浮点), %d(整型)",
+                position_mm, current_layer_float_, current_layer_);
 }

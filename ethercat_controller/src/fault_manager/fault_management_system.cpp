@@ -59,6 +59,8 @@ uint16_t get_system_warning_code(const std::string& warning_msg) {
     
     // 板宽相关警告
     if (warning_msg.find("板宽") != std::string::npos && warning_msg.find("超出分辨率") != std::string::npos) return 0x9003;
+    if (warning_msg.find("非自动模式") != std::string::npos && warning_msg.find("axis3忽略板宽") != std::string::npos) return 0x9007;
+    if (warning_msg.find("非自动模式") != std::string::npos && warning_msg.find("axis4忽略板宽") != std::string::npos) return 0x9008;
     
     // 模式相关警告
     if (warning_msg.find("手动模式下收到自动指令") != std::string::npos) return 0x9004;

@@ -57,6 +57,18 @@ public:
     // 新增：执行待处理的位移命令（在自动模式初始化完成后调用）
     void execute_pending_command();
 
+    // 新增：从axis5实际位置计算当前层号（支持小数层）
+    double calculate_layer_from_position(double position_mm);
+    
+    // 新增：更新当前层号（从axis5实际位置）
+    void update_current_layer_from_axis5(const std::shared_ptr<ServoAxisBase>& axis5);
+    
+    // 新增：获取当前层号（支持小数）
+    double get_current_layer_float() const { return current_layer_float_; }
+    
+    // 新增：校正层号（自动模式初始化完成后调用）
+    void calibrate_layer_from_position(const std::shared_ptr<ServoAxisBase>& axis5);
+
 private:
     rclcpp::Node* node_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr displacement_pub_;
@@ -67,6 +79,7 @@ private:
     int8_t current_layer_;                     // 当前层数
     int8_t target_layer_;                      // 目标层数
     std::atomic<bool> is_moving_;               // 运动状态标志
+    double current_layer_float_;                // 当前层号（支持小数，如5.5层）
     
     // 运动参数
     double motion_speed_;          // 运动速度(mm/s)

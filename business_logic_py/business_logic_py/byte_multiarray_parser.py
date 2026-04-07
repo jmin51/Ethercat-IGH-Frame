@@ -6,6 +6,7 @@ import struct
 from enum import Enum
 import threading
 import time
+import json
 
 class CommandType(Enum):
     # 根据图片中的指令码定义
@@ -83,6 +84,14 @@ class ByteMultiArrayParser(Node):
             10
         )       
 
+        # +++ 新增：订阅轴状态话题，监听自动模式初始化完成（JSON格式）+++
+        self.axis_states_sub = self.create_subscription(
+            String,
+            '/axis_states',
+            self.axis_states_callback,
+            10
+        )
+
         # 创建原有的多个话题发布器
         self.control_pub = self.create_publisher(String, '/py_control_command', 10)  # 改为专用话题
         self.jog_pub = self.create_publisher(String, '/jog_command', 10)
@@ -124,7 +133,7 @@ class ByteMultiArrayParser(Node):
         self.axis3_width_completed = False
         self.pending_start_result = False  # 标记是否有待发布的0x0106响应
         self.start_result_wait_start_time = None  # 等待开始时间
-        self.START_RESULT_TIMEOUT = 100.0  # 超时时间100秒
+        self.START_RESULT_TIMEOUT = 50.0  # 超时时间100秒
         
         # 新增：创建定时器检查超时
         self.start_result_timer = self.create_timer(0.5, self.check_start_result_timeout)
@@ -149,6 +158,13 @@ class ByteMultiArrayParser(Node):
         # 新增：命令追踪（用于故障时回包）
         self.pending_command = None  # 当前待响应的命令: 0x0101/0x0103/0x0105
         self.pending_response_sent = False  # 标记是否已发送故障响应
+        
+        # +++ 新增：等待轴自动模式就绪后再下发板宽命令 +++
+        self.auto_mode_initializing = False  # 自动模式正在初始化
+        self.pending_board_width = None  # 缓存的板宽值
+        self.board_width_axes_ready = {'axis3': False, 'axis4': False}  # 轴就绪状态
+        self.AUTO_MODE_INIT_TIMEOUT = 5.0  # 自动模式初始化超时5秒
+        self.auto_mode_init_start_time = None  # 初始化开始时间
         
         self.get_logger().info('ByteMultiArray解析器已启动（支持统一IO状态发布和业务完成状态发布）')
 
@@ -234,6 +250,53 @@ class ByteMultiArrayParser(Node):
                 
         except Exception as e:
             self.get_logger().error(f'Axis3板宽状态解析错误: {e}')
+
+    def axis_states_callback(self, msg):
+        """处理轴状态回调，通过/axis_states话题监听轴自动模式状态（JSON格式）"""
+        try:
+            import json
+            axis_states = json.loads(msg.data)
+            
+            # 检测axis3和axis4的自动模式状态
+            axis3_auto = axis_states.get('axis3') == 'AUTO_MODE'
+            axis4_auto = axis_states.get('axis4') == 'AUTO_MODE'
+            
+            # 更新就绪状态（只记录状态变化）
+            if axis3_auto and not self.board_width_axes_ready.get('axis3', False):
+                self.board_width_axes_ready['axis3'] = True
+                self.get_logger().debug('Axis3已进入自动模式（通过/axis_states确认）')
+            if axis4_auto and not self.board_width_axes_ready.get('axis4', False):
+                self.board_width_axes_ready['axis4'] = True
+                self.get_logger().debug('Axis4已进入自动模式（通过/axis_states确认）')
+            
+            # 检查是否所有轴都已就绪，且有等待下发的板宽命令
+            if self.auto_mode_initializing and self.pending_board_width is not None:
+                if all(self.board_width_axes_ready.values()):
+                    # 所有轴就绪，下发板宽命令
+                    self.get_logger().info('Axis3和Axis4均已进入自动模式，下发缓存的板宽命令')
+                    self._publish_board_width_commands(self.pending_board_width)
+                    self.pending_board_width = None
+                    self.auto_mode_initializing = False
+                    self.auto_mode_init_start_time = None
+                    
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'轴状态JSON解析错误: {e}')
+        except Exception as e:
+            self.get_logger().error(f'轴状态处理错误: {e}')
+
+    def _publish_board_width_commands(self, width_cm):
+        """实际下发板宽命令到axis3和axis4"""
+        # 1. 下发 axis4 板宽控制话题
+        width_msg_axis4 = Float64()
+        width_msg_axis4.data = width_cm
+        self.board_width_pub.publish(width_msg_axis4)
+        self.get_logger().info(f'已下发axis4板宽命令: {width_cm}cm')
+
+        # 2. 下发 axis3 板宽控制话题
+        width_msg_axis3 = Float64()
+        width_msg_axis3.data = width_cm
+        self.axis3_width_pub.publish(width_msg_axis3)
+        self.get_logger().info(f'已下发axis3板宽命令: {width_cm}cm')
 
     def check_and_publish_start_result(self):
         """检查两个轴是否都完成，如果是则发布0x0106响应"""
@@ -804,31 +867,29 @@ class ByteMultiArrayParser(Node):
 
             self.get_logger().info(f'解析到宽度信息: 原始值={width_integer}, 实际值={actual_width_cm}cm')
 
-            # ========== 关键修复：先设置等待状态，再下发命令 ==========
-            # 避免竞态条件：ethercat_node处理太快，状态在设置标志前就发布了
+            # ========== 关键修复：等待轴自动模式就绪后再下发板宽命令 ==========
+            # 缓存板宽值，等待axis3和axis4都进入自动模式后再下发
             
-            # 1. 先重置板宽完成状态并标记等待（必须在publish之前！）
+            # 1. 先重置板宽完成状态并标记等待
             self.axis4_width_completed = False
             self.axis3_width_completed = False
             self.axis4_width_adjusting = False
             self.axis3_width_adjusting = False
             self.pending_start_result = True
             self.start_result_wait_start_time = time.time()
-            self.get_logger().info('准备下发板宽命令，已设置等待标志（竞态条件修复）')
-
-            # 2. 再下发 axis4 板宽控制话题
-            width_msg_axis4 = Float64()
-            width_msg_axis4.data = actual_width_cm
-            self.board_width_pub.publish(width_msg_axis4)
-            self.get_logger().info(f'已下发axis4板宽命令: {actual_width_cm}cm')
-
-            # 3. 再下发 axis3 板宽控制话题
-            width_msg_axis3 = Float64()
-            width_msg_axis3.data = actual_width_cm
-            self.axis3_width_pub.publish(width_msg_axis3)
-            self.get_logger().info(f'已下发axis3板宽命令: {actual_width_cm}cm')
             
-            self.get_logger().info('等待axis3和axis4调整完成后发布0x0106响应')
+            # 2. 缓存板宽值，等待轴就绪
+            self.pending_board_width = actual_width_cm
+            self.auto_mode_initializing = True
+            self.auto_mode_init_start_time = time.time()
+            self.board_width_axes_ready = {'axis3': False, 'axis4': False}
+            
+            self.get_logger().info(f'板宽命令已缓存({actual_width_cm}cm)，等待axis3和axis4进入自动模式后下发...')
+            
+            # 3. 板宽命令下发由axis_states_callback处理
+            # 当检测到axis3和axis4都进入AUTO_MODE状态时，自动触发板宽下发
+            # 注意：如果轴已经在AUTO_MODE，需要等待下一次axis_states消息（约10ms内）
+            
         else:
             self.get_logger().warn('开始作业命令负载长度不足，需要至少4字节，仅启动自动模式。')
             # 没有板宽调整，直接发布0x0106

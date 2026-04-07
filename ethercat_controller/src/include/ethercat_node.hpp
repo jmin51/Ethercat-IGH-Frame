@@ -6,6 +6,7 @@
 #include "io_interface.hpp"
 #include "LayerCommandProcessor.hpp" 
 #include "fault_management_system.hpp"
+#include "smema_handler.hpp"
 #include <std_msgs/msg/u_int8.hpp> 
 #include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/float64.hpp>
@@ -65,9 +66,20 @@ public:
     uint8_t get_current_layer() const { return layer_processor_->get_current_layer(); }
     // 新增：层运动完成检查函数
     void check_layer_motion_completion();
+    // 新增：发布当前层号（浮点，支持小数层）
+    void publish_current_layer();
+    // 新增：自动模式初始化完成后校正层号
+    void calibrate_layer_after_auto_init();
 
     void print_warning(const std::string& message);
     void print_error(const std::string& message);
+    
+    // +++ SMEMA协议方法 +++
+    void init_smema_handler();
+    void process_smema_cycle();
+    void publish_smema_state();
+    void handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg);
+    void handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg);
 
     // 故障上报接口（供轴状态机调用）
     void report_axis_fault(const std::string& axis_name, uint16_t fault_code, const std::string& description);
@@ -136,6 +148,7 @@ private:
     std::unique_ptr<fault_management::FaultManagementSystem> fault_manager_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr axis_state_pub_;  // 轴状态机状态发布器
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr axis5_layer_pub_;  // axis5当前层号发布器（浮点，支持小数层如5.5）
 
     // IO模块相关
     pthread_t io_thread_;
@@ -248,6 +261,12 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pause_state_pub_;
     // 订阅Python端的状态报告
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr pause_state_report_sub_;
+    
+    // +++ SMEMA协议相关成员 +++
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr smema_state_pub_;       // SMEMA状态发布
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr smema_business_ready_sub_;  // 业务层就绪订阅
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr smema_board_received_sub_;  // 板子接收确认订阅
+    bool smema_initialized_;
 };
 
 // 全局变量声明

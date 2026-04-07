@@ -99,27 +99,20 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
     bool start_rising = start_btn && !g_last_start_button;
     bool reset_rising = reset_btn && !g_last_reset_button;
     bool pause_rising = pause_btn && !g_last_pause_button;
-    // 急停按钮是低电平触发：检测下降沿（高->低）
-    bool emergency1_falling = !emergency_stop1 && g_last_emergency_stop1;
-    bool emergency2_falling = !emergency_stop2 && g_last_emergency_stop2;
-    // 急停按钮任意一个按下即触发（低电平触发）
-    bool any_emergency_triggered = emergency1_falling || emergency2_falling;
+    // 急停按钮低电平检测：任意一个为低电平即触发
+    bool any_emergency_active = !emergency_stop1 || !emergency_stop2;
     
-    // 启动按钮：点亮启动灯，熄灭其他灯，绿灯常亮，停止蜂鸣器
-    if (start_rising) {
+    // 启动按钮：点亮启动灯，熄灭其他灯，绿灯闪烁+蜂鸣器，等待轴就绪
+    // 急停激活时禁止启动
+    if (start_rising && !any_emergency_active) {
         g_start_light_on = true;
         g_reset_light_on = false;
         g_pause_light_on = false;
-        g_tricolor_state = LIGHT_GREEN_ON;  // 绿灯常亮
+        g_tricolor_state = LIGHT_GREEN_BLINK;  // 绿灯闪烁（等待轴就绪）
         g_start_button_pressed.store(true);
         // 取消复位计时（如果正在进行）
         g_reset_button_held = false;
-        // 确保蜂鸣器停止
-        if (g_last_buzzer_do) {
-            write_single_do_signal(803, false);
-            g_last_buzzer_do = false;
-        }
-        printf("[Lights] 启动按钮触发，启动灯亮起，绿灯常亮，蜂鸣器停\n");
+        printf("[Lights] 启动按钮触发，启动灯亮起，绿灯闪烁，蜂鸣器响，等待轴就绪...\n");
     }
     
     // 复位按钮：按住3秒确认，点亮复位灯，启动黄灯闪烁+蜂鸣器
@@ -176,15 +169,24 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
     }
 
     // ============================================================================
-    // 急停按钮（M516/M517）：低电平触发，任意一个按下（下降沿）立即触发暂停
+    // 急停按钮（M516/M517）：低电平触发，任意一个为低电平立即触发暂停
     // ============================================================================
-    if (any_emergency_triggered) {
+    // 边沿检测：只在急停状态变化时处理
+    static bool last_emergency_active = false;
+    bool emergency_rising = any_emergency_active && !last_emergency_active;
+    
+    if (any_emergency_active) {
         g_pause_light_on = true;
         g_start_light_on = false;
         g_reset_light_on = false;
         g_tricolor_state = LIGHT_OFF;
         g_pause_button_pressed.store(true);     // 急停触发暂停标志
-        g_long_pause_requested.store(true);     // 触发完整关闭流程（同长按暂停）
+        // 只在边沿触发时设置请求标志，避免main.cpp重复打印
+        if (emergency_rising) {
+            g_long_pause_requested.store(true); // 触发完整关闭流程（同长按暂停）
+            printf("[Lights] 急停激活（低电平有效，M516=%d, M517=%d），系统进入安全关闭流程\n",
+                   emergency_stop1, emergency_stop2);
+        }
         // 急停优先级高于短按暂停，清除短按暂停状态，强制走完整重启流程
         g_short_pause_active.store(false);
         // 取消复位计时（如果正在进行）
@@ -194,9 +196,8 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
             write_single_do_signal(803, false);
             g_last_buzzer_do = false;
         }
-        printf("[Lights] 急停按钮触发（低电平有效，M516=%d, M517=%d），系统进入安全关闭流程\n",
-               emergency_stop1, emergency_stop2);
     }
+    last_emergency_active = any_emergency_active;
     
     // 更新上次状态
     g_last_start_button = start_btn;
@@ -291,6 +292,19 @@ void notify_system_ready() {
             g_last_buzzer_do = false;
         }
         printf("[Lights] 系统就绪，黄灯停闪，绿灯闪烁，蜂鸣器停\n");
+    }
+}
+
+void notify_all_axes_ready() {
+    // 从绿灯闪烁切换到绿灯常亮（启动完成后）
+    if (g_tricolor_state == LIGHT_GREEN_BLINK) {
+        g_tricolor_state = LIGHT_GREEN_ON;
+        // 确保蜂鸣器停止
+        if (g_last_buzzer_do) {
+            write_single_do_signal(803, false);
+            g_last_buzzer_do = false;
+        }
+        printf("[Lights] 所有轴就绪，绿灯常亮，蜂鸣器停\n");
     }
 }
 

@@ -45,6 +45,7 @@ set(SOURCES
   src/servo_axis_factory.cpp
   src/io_modules/io_interface.cpp  # IO模块
   src/io_modules/lights_controller.cpp  # 灯光控制器
+  src/io_modules/smema_handler.cpp  # SMEMA协议处理器
   src/business/LayerCommandProcessor.cpp  # 层指令处理模块
   src/fault_manager/fault_management_system.cpp  # 故障管理系统
 )

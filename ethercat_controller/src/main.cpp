@@ -169,8 +169,8 @@ void resume_from_short_pause() {
         usleep(100000);  // 100ms
     }
     
-    // 清除启动按钮状态
-    g_start_button_pressed.store(false);
+    // 注意：不在这里清除启动按钮状态，让主循环在恢复完成后清除
+    // 避免在恢复流程执行期间按钮按下被清除
     
     printf("[恢复运行] 系统已恢复运行，业务逻辑将重走之前记录的状态\n");
     printf("[恢复运行] ========================================\n");
@@ -532,6 +532,8 @@ int main(int argc, char **argv) {
                 bool is_auto = g_resume_auto_mode.load();
                 printf("[恢复运行] 所有轴已就绪，执行%s模式切换...\n", 
                        is_auto ? "自动" : "手动");
+                // 所有轴就绪，绿灯常亮
+                notify_all_axes_ready();
                 for (auto& axis : axes) {
                     if (is_auto) {
                         axis->start_auto_mode();
@@ -558,6 +560,25 @@ int main(int argc, char **argv) {
             if (all_axes_auto_initialized) {
                 g_auto_mode_initialized.store(true);
                 printf("[恢复运行] 所有轴自动模式位置初始化完成\n");
+                // 关键修复：自动模式初始化完成后校正层号
+                global_node->calibrate_layer_after_auto_init();
+                // 所有轴自动模式初始化完成，绿灯常亮
+                notify_all_axes_ready();
+            }
+        }
+        
+        // 新增：检测系统正常运行时所有轴是否就绪（启动按钮按下后的状态）
+        if (g_system_running.load() && global_node && get_tricolor_state() == LIGHT_GREEN_BLINK) {
+            auto& axes = global_node->get_servo_axes();
+            bool all_axes_ready = true;
+            for (auto& axis : axes) {
+                if (!axis->is_ready()) {
+                    all_axes_ready = false;
+                    break;
+                }
+            }
+            if (all_axes_ready) {
+                notify_all_axes_ready();
             }
         }
         
@@ -569,6 +590,8 @@ int main(int argc, char **argv) {
                 g_system_running.store(true);
                 resume_from_short_pause();
                 printf("系统已恢复运行\n");
+                // 恢复完成后清除启动按钮状态，避免重复触发
+                g_start_button_pressed.store(false);
                 continue;
             }
 

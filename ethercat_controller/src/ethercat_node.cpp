@@ -134,6 +134,8 @@ void EthercatNode::initialize_node() {
     fault_code_pub_ = this->create_publisher<std_msgs::msg::String>("/fault_code", 10);
     // 添加轴状态发布器初始化
     axis_state_pub_ = this->create_publisher<std_msgs::msg::String>("/axis_states", 10);
+    // 添加axis5当前层号发布器（浮点，支持小数层如5.5）
+    axis5_layer_pub_ = this->create_publisher<std_msgs::msg::Float64>("/axis5_current_layer", 10);
     // 初始化故障管理器（升级为故障管理系统）
     fault_manager_ = std::make_unique<fault_management::FaultManagementSystem>(this);
     fault_manager_->set_fault_publisher(fault_code_pub_);
@@ -187,6 +189,23 @@ void EthercatNode::initialize_node() {
             this->handle_pause_state_report(msg);
         });
     
+    // +++ SMEMA协议发布器和订阅器 +++
+#if ENABLE_SMEMA
+    smema_state_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "/smema/state", rclcpp::QoS(10).reliable());
+    smema_business_ready_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/smema/business_ready", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+            this->handle_smema_business_ready(msg);
+        });
+    smema_board_received_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/smema/board_received", rclcpp::QoS(10).reliable(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+            this->handle_smema_board_received(msg);
+        });
+#endif
+    smema_initialized_ = false;
+    
     RCLCPP_INFO(this->get_logger(), "板宽控制模块初始化完成");
     RCLCPP_INFO(this->get_logger(), "暂停状态记录模块初始化完成");
 }
@@ -231,6 +250,60 @@ void EthercatNode::periodic_timer_callback() {
     if (!board_width_calibrated_ && are_all_axes_in_auto_mode()) {
         calibrate_board_width_from_position();
     }
+
+    // 7. 发布当前层号（用于Python业务逻辑同步）
+    publish_current_layer();
+}
+
+// 新增：发布当前层号
+void EthercatNode::publish_current_layer() {
+    if (!axis5_layer_pub_ || !layer_processor_) {
+        return;
+    }
+    
+    // 查找axis5轴
+    std::shared_ptr<ServoAxisBase> axis5;
+    for (auto& axis : servo_axes_) {
+        if (axis->get_name() == "axis5") {
+            axis5 = axis;
+            break;
+        }
+    }
+    
+    if (!axis5) {
+        return;
+    }
+    
+    // 更新层号（从axis5实际位置计算）
+    layer_processor_->update_current_layer_from_axis5(axis5);
+    
+    // 发布当前层号（浮点，支持小数层）
+    auto msg = std_msgs::msg::Float64();
+    msg.data = layer_processor_->get_current_layer_float();
+    axis5_layer_pub_->publish(msg);
+}
+
+// 新增：自动模式初始化完成后校正层号
+void EthercatNode::calibrate_layer_after_auto_init() {
+    if (!layer_processor_) {
+        return;
+    }
+    
+    // 查找axis5轴
+    std::shared_ptr<ServoAxisBase> axis5;
+    for (auto& axis : servo_axes_) {
+        if (axis->get_name() == "axis5") {
+            axis5 = axis;
+            break;
+        }
+    }
+    
+    if (!axis5) {
+        return;
+    }
+    
+    // 校正层号（从axis5实际位置计算）
+    layer_processor_->calibrate_layer_from_position(axis5);
 }
 
 void EthercatNode::handle_py_control_command(const std_msgs::msg::String::SharedPtr msg) {
@@ -238,28 +311,29 @@ void EthercatNode::handle_py_control_command(const std_msgs::msg::String::Shared
     
 #if CONTROL_SOURCE_IO
     // IO控制模式下，禁止通过话题切换手动/自动模式（避免与IO控制冲突）
-    if (command == CMD_START_MANUAL || command == CMD_START_AUTO) {
-        // === 即使拒绝命令，也要检查模式冲突并上报故障 ===
-        if (command == CMD_START_AUTO && fault_manager_) {
-            bool any_axis_in_manual = false;
-            for (auto& axis : servo_axes_) {
-                if (axis->get_operation_mode() == OperationMode::MANUAL) {
-                    any_axis_in_manual = true;
-                    break;
-                }
-            }
-            if (any_axis_in_manual) {
-                // 手动模式下收到自动指令，上报故障 0x9004
-                uint16_t fault_code = fault_manager_->handle_auto_command_in_manual_mode();
-                std::stringstream warn_ss;
-                warn_ss << "IO控制模式下，手动模式收到话题自动指令，已上报故障码: 0x" 
-                        << std::hex << std::setw(4) << std::setfill('0') << fault_code;
-                print_warning(warn_ss.str());
+    // 但允许开始作业信号触发的自动模式请求（0x0105命令）
+    if (command == CMD_START_MANUAL) {
+        RCLCPP_WARN(this->get_logger(), "IO控制模式已启用，忽略话题手动模式命令");
+        return;
+    }
+    // start_auto 命令在IO模式下允许执行（用于0x0105开始作业信号）
+    // 但保留手动模式冲突检测和上报
+    if (command == CMD_START_AUTO && fault_manager_) {
+        bool any_axis_in_manual = false;
+        for (auto& axis : servo_axes_) {
+            if (axis->get_operation_mode() == OperationMode::MANUAL) {
+                any_axis_in_manual = true;
+                break;
             }
         }
-        
-        RCLCPP_WARN(this->get_logger(), "IO控制模式已启用，忽略话题模式切换命令: %s", command.c_str());
-        return;
+        if (any_axis_in_manual) {
+            // 手动模式下收到自动指令，上报故障 0x9004
+            uint16_t fault_code = fault_manager_->handle_auto_command_in_manual_mode();
+            std::stringstream warn_ss;
+            warn_ss << "IO控制模式下，手动模式收到话题自动指令，已上报故障码: 0x" 
+                    << std::hex << std::setw(4) << std::setfill('0') << fault_code;
+            print_warning(warn_ss.str());
+        }
     }
 #endif
     
@@ -283,6 +357,16 @@ void EthercatNode::publish_py_io_status(const DI_Interface& di) {
        << ",DI13:" << di.conveyor_in_position
        << ",DI14:" << di.conveyor_out_position;
     
+#if ENABLE_SMEMA
+    // SMEMA信号（可选）
+    // DI23: smema_uba (M535)
+    // DI24: smema_ugb (M536)
+    // DI25: smema_ubb (M537)
+    ss << ",DI23:" << di.smema_uba
+       << ",DI24:" << di.smema_ugb
+       << ",DI25:" << di.smema_ubb;
+#endif
+    
     msg.data = ss.str();
     py_io_status_pub_->publish(msg);
 }
@@ -299,6 +383,12 @@ void EthercatNode::initialize_after_axes() {
     
     // 初始化业务逻辑处理器
     initialize_layer_processor();
+    
+#if ENABLE_SMEMA
+    // 初始化SMEMA协议处理器
+    init_smema_handler();
+#endif
+    
     RCLCPP_INFO(this->get_logger(), "业务逻辑模块初始化完成");
 }
 
@@ -1012,6 +1102,11 @@ void* io_monitor_thread(void* arg) {
         // 处理IO信号
         node->handle_io_signals(di);
         
+#if ENABLE_SMEMA
+        // 处理SMEMA协议周期
+        node->process_smema_cycle();
+#endif
+        
         usleep(100000); // 100ms刷新周期
     }
     
@@ -1305,7 +1400,7 @@ void EthercatNode::handle_axis3_width_command(const std_msgs::msg::Float64::Shar
     
     // === 非自动模式下无视板宽设定命令 ===
     if (!are_all_axes_in_auto_mode()) {
-        RCLCPP_WARN(this->get_logger(), "非自动模式，axis3忽略板宽设定命令");
+        print_warning("非自动模式，axis3忽略板宽设定命令");
         return;
     }
     
@@ -1434,7 +1529,7 @@ void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::Shar
     
     // === 非自动模式下无视板宽设定命令 ===
     if (!are_all_axes_in_auto_mode()) {
-        RCLCPP_WARN(this->get_logger(), "非自动模式，axis4忽略板宽设定命令");
+        print_warning("非自动模式，axis4忽略板宽设定命令");
         return;
     }
     
@@ -1869,3 +1964,95 @@ void EthercatNode::handle_pause_state_report(const std_msgs::msg::String::Shared
                 g_pause_state_record.outbound_state_value,
                 g_pause_state_record.outbound_source_layer);
 }
+
+// ========== SMEMA协议处理方法 ==========
+
+#if ENABLE_SMEMA
+
+void EthercatNode::init_smema_handler() {
+    SMEMA_Config config;
+    config.di_base_address = 535;  // M535-M537
+    config.do_base_address = 814;  // M814
+    config.timeout_ms = 30000;
+    config.enable_ugb = false;     // 可选信号
+    config.enable_ubb = false;     // 可选信号
+    
+    smema_init(&config);
+    smema_initialized_ = true;
+    RCLCPP_INFO(this->get_logger(), "SMEMA协议处理器初始化完成");
+}
+
+void EthercatNode::process_smema_cycle() {
+    if (!smema_initialized_) {
+        return;
+    }
+    
+    // 执行SMEMA状态机周期
+    smema_process_cycle();
+    
+    // 发布SMEMA状态
+    publish_smema_state();
+}
+
+void EthercatNode::publish_smema_state() {
+    if (!smema_state_pub_) {
+        return;
+    }
+    
+    SMEMA_State state = smema_get_state();
+    const char* state_str = smema_state_to_string(state);
+    
+    auto msg = std_msgs::msg::String();
+    msg.data = state_str;
+    smema_state_pub_->publish(msg);
+}
+
+void EthercatNode::handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg) {
+    if (!smema_initialized_) {
+        return;
+    }
+    
+    bool ready = msg->data;
+    smema_set_business_ready(ready);
+    
+    RCLCPP_DEBUG(this->get_logger(), "SMEMA业务层就绪状态: %s", ready ? "就绪" : "未就绪");
+}
+
+void EthercatNode::handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg) {
+    if (!smema_initialized_) {
+        return;
+    }
+    
+    if (msg->data) {
+        smema_confirm_board_received();
+        RCLCPP_INFO(this->get_logger(), "SMEMA: 业务层确认板子已接收");
+    }
+}
+
+#else  // ENABLE_SMEMA
+
+void EthercatNode::init_smema_handler() {
+    // SMEMA禁用，空实现
+    smema_initialized_ = false;
+    RCLCPP_INFO(this->get_logger(), "SMEMA协议已禁用");
+}
+
+void EthercatNode::process_smema_cycle() {
+    // SMEMA禁用，空实现
+}
+
+void EthercatNode::publish_smema_state() {
+    // SMEMA禁用，空实现
+}
+
+void EthercatNode::handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg) {
+    (void)msg;
+    // SMEMA禁用，空实现
+}
+
+void EthercatNode::handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg) {
+    (void)msg;
+    // SMEMA禁用，空实现
+}
+
+#endif  // ENABLE_SMEMA

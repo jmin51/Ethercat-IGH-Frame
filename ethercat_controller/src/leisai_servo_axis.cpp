@@ -148,6 +148,8 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
     if (reset_requested_) {
         reset_requested_ = false;
         current_state_ = AxisState::UNINITIALIZED;
+        // 重置运动状态，避免恢复时误判目标到达
+        reset_motion_state();
         printf("轴 %s 执行重置，回到未初始化状态\n", axis_name_.c_str());
     }
 

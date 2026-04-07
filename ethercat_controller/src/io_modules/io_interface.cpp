@@ -71,7 +71,8 @@ static void refresh_do_state_from_device() {
         current_do_state.lift_cylinder_down = do_values[10];
         current_do_state.gear_cylinder_extend = do_values[11];
         current_do_state.belt_forward = do_values[12];
-        current_do_state.belt_backward = do_values[13];  // 新增皮带反转状态读取
+        current_do_state.belt_backward = do_values[13];  // 皮带反转状态读取
+        current_do_state.smema_mr = do_values[14];       // SMEMA机器就绪
         // printf("DO状态已从设备刷新\n");  // 调试时启用，正式运行关闭
     } else {
         // 读取失败，关闭连接触发重连
@@ -369,6 +370,10 @@ DI_Interface read_all_di_signals() {
     di.gear_cylinder1_retract = di_values[20];// M532
     di.gear_cylinder2_extend = di_values[21];// M533
     di.gear_cylinder2_retract = di_values[22];// M534
+    // SMEMA协议信号
+    di.smema_uba = di_values[23];            // M535 上游有板待发
+    di.smema_ugb = di_values[24];            // M536 上游好板
+    di.smema_ubb = di_values[25];            // M537 上游坏板
     
     return di;
 }
@@ -389,7 +394,7 @@ bool read_single_di_signal(int di_address) {
     }
     
     // 地址有效性检查
-    if (di_address < 512 || di_address > 534) {
+    if (di_address < 512 || di_address > 537) {
         fprintf(stderr, "DI地址超出范围: %d\n", di_address);
         return false;
     }
@@ -463,7 +468,8 @@ int write_do_signals(DO_Interface do_signals) {
     do_values[10] = do_signals.lift_cylinder_down;   // M810
     do_values[11] = do_signals.gear_cylinder_extend;// M811
     do_values[12] = do_signals.belt_forward;        // M812
-    do_values[13] = do_signals.belt_backward;       // M813 新增皮带反转控制
+    do_values[13] = do_signals.belt_backward;       // M813 皮带反转控制
+    do_values[14] = do_signals.smema_mr;            // M814 SMEMA机器就绪
     
     // 写入设备
     int result = modbus_write_bits(ctx_do, 0, 16, do_values);
@@ -500,7 +506,7 @@ int write_single_do_signal(int do_address, bool state) {
     }
     
     // 地址有效性检查
-    if (do_address < 800 || do_address > 813) {
+    if (do_address < 800 || do_address > 814) {
         fprintf(stderr, "DO地址超出范围: %d\n", do_address);
         return -1;
     }
@@ -523,6 +529,7 @@ int write_single_do_signal(int do_address, bool state) {
             current_do_state.gear_cylinder_extend = do_values[11];
             current_do_state.belt_forward = do_values[12];
             current_do_state.belt_backward = do_values[13];
+            current_do_state.smema_mr = do_values[14];
         }
     } else {
         // 写入失败，关闭连接触发重连
@@ -682,6 +689,14 @@ void print_di_status(DI_Interface di) {
         if (first_print || di.gear_cylinder2_retract != last_di.gear_cylinder2_retract)
             printf("DI23 齿轮气缸2缩回: %s\n", di.gear_cylinder2_retract ? "到位" : "未到位");
         
+        // SMEMA信号
+        if (first_print || di.smema_uba != last_di.smema_uba)
+            printf("DI24 SMEMA上游有板(UBA): %s\n", di.smema_uba ? "有板" : "无板");
+        if (first_print || di.smema_ugb != last_di.smema_ugb)
+            printf("DI25 SMEMA上游好板(UGB): %s\n", di.smema_ugb ? "好板" : "非好板");
+        if (first_print || di.smema_ubb != last_di.smema_ubb)
+            printf("DI26 SMEMA上游坏板(UBB): %s\n", di.smema_ubb ? "坏板" : "非坏板");
+        
         last_di = di;
     }
 }
@@ -726,7 +741,8 @@ void print_do_status(DO_Interface do_control) {
     printf("DO11 顶升气缸下降: %s\n", do_control.lift_cylinder_down ? "动作" : "停止");
     printf("DO12 齿轮气缸伸出: %s\n", do_control.gear_cylinder_extend ? "动作" : "停止");
     printf("DO13 皮带正转: %s\n", do_control.belt_forward ? "运行" : "停止");
-    printf("DO14 皮带反转: %s\n", do_control.belt_backward ? "运行" : "停止");  // 新增
+    printf("DO14 皮带反转: %s\n", do_control.belt_backward ? "运行" : "停止");
+    printf("DO15 SMEMA机器就绪(MR): %s\n", do_control.smema_mr ? "就绪" : "未就绪");
 }
 
 // 非阻塞延时检查
@@ -760,8 +776,8 @@ bool parse_do_control_command(const std::string& command, DOControlCommand& do_c
     // 验证地址有效性
     try {
         int address = std::stoi(addr_str);
-        if (address < 800 || address > 813) {
-            fprintf(stderr, "DO地址超出范围 (800-812): %d\n", address);
+        if (address < 800 || address > 814) {
+            fprintf(stderr, "DO地址超出范围 (800-814): %d\n", address);
             return false;
         }
         do_cmd.do_address = addr_str;

@@ -43,6 +43,9 @@ TricolorLightState get_tricolor_state();
 // 通知系统就绪（AL states 0x08 且全部轴自动模式）
 void notify_system_ready();
 
+// 通知所有轴就绪（启动完成后，绿灯闪烁→常亮）
+void notify_all_axes_ready();
+
 // 获取按钮灯状态（用于外部查询）
 bool is_start_light_on();
 bool is_reset_light_on();

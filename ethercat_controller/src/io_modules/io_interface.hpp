@@ -7,8 +7,9 @@
 #include <string>
 
 // 宏开关配置 - 根据实际需求开启或关闭
-#define ENABLE_DI_MODULE    0  // 1:启用DI模块 0:禁用DI模块
-#define ENABLE_DO_MODULE    0  // 1:启用DO模块 0:禁用DO模块
+#define ENABLE_DI_MODULE    1  // 1:启用DI模块 0:禁用DI模块
+#define ENABLE_DO_MODULE    1  // 1:启用DO模块 0:禁用DO模块
+#define ENABLE_SMEMA        0  // 1:启用SMEMA协议通讯 0:禁用SMEMA协议
 
 // 设备IP配置
 #define DI_DEVICE_IP        "192.168.3.12"
@@ -41,6 +42,10 @@ typedef struct {
     bool gear_cylinder1_retract; // M532 齿轮对接气缸1缩回到位
     bool gear_cylinder2_extend;  // M533 齿轮对接气缸2伸出到位
     bool gear_cylinder2_retract; // M534 齿轮对接气缸2缩回到位
+    // SMEMA协议信号（下游设备）
+    bool smema_uba;              // M535 SMEMA上游有板待发 (Upstream Board Available)
+    bool smema_ugb;              // M536 SMEMA上游好板信号 (Upstream Good Board) - 可选
+    bool smema_ubb;              // M537 SMEMA上游坏板信号 (Upstream Bad Board) - 可选
 } DI_Interface;
 
 // DO 输出信号接口定义
@@ -55,7 +60,9 @@ typedef struct {
     bool lift_cylinder_down;    // M810 顶升气缸下降
     bool gear_cylinder_extend;  // M811 齿轮对接气缸伸出
     bool belt_forward;          // M812 皮带正转启动
-    bool belt_backward;          // M813 皮带反转启动 - 新增
+    bool belt_backward;          // M813 皮带反转启动
+    // SMEMA协议信号（下游设备）
+    bool smema_mr;              // M814 SMEMA机器就绪 (Machine Ready)
 } DO_Interface;
 
 // 初始化函数
