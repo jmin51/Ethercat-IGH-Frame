@@ -31,11 +31,15 @@ class CommandType(Enum):
     UPDATE_DI_STATUS = 0x0111  # 更新输入IO状态
     UPDATE_DO_STATUS = 0x0113  # 更新输出IO状态
 
-# 故障码定义（业务逻辑层）
+# 故障码定义（业务逻辑层）- 与C++层保持一致
+# C++层定义：CATEGORY_BUSINESS = 0x5000, BUSINESS_GENERAL = 0x0000
 class FaultCode(Enum):
-    """故障码定义 - 高字节0xE0表示业务逻辑层错误"""
-    NO_FAULT = 0x0000           # 无故障
-    BOARD_WIDTH_TIMEOUT = 0xE001  # 板宽调整超时
+    """故障码定义 - 遵循C++层 fault_codes.hpp 规范
+    业务逻辑错误类别：0x5xxx
+    子类别：BUSINESS_GENERAL = 0x0000 (通用业务逻辑)
+    """
+    NO_FAULT = 0x0000              # 无故障
+    BOARD_WIDTH_TIMEOUT = 0x5001   # 板宽调整超时 (0x5000 | 0x0000 | 0x01)
     
 class ByteMultiArrayParser(Node):
     def __init__(self):
@@ -252,12 +256,31 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'Axis3板宽状态解析错误: {e}')
 
     def axis_states_callback(self, msg):
-        """处理轴状态回调，通过/axis_states话题监听轴自动模式状态（JSON格式）"""
+        """处理轴状态回调，通过/axis_states话题监听轴自动模式状态（JSON格式）
+        
+        注意：检查所有轴都在AUTO_MODE后才下发板宽命令，与C++端are_all_axes_in_auto_mode()保持一致
+        """
         try:
             import json
             axis_states = json.loads(msg.data)
             
-            # 检测axis3和axis4的自动模式状态
+            # 获取所有轴列表（与C++端servo_axes_保持一致）
+            all_axis_names = ['axis1_1', 'axis1_2', 'axis2_1', 'axis2_2', 'axis3', 'axis4', 'axis5']
+            
+            # 检查所有轴是否都在自动模式
+            all_axes_in_auto = True
+            axes_not_in_auto = []
+            for axis_name in all_axis_names:
+                state = axis_states.get(axis_name, 'UNKNOWN')
+                if state != 'AUTO_MODE':
+                    all_axes_in_auto = False
+                    axes_not_in_auto.append(f"{axis_name}:{state}")
+            
+            # 调试日志：显示未就绪的轴
+            if self.auto_mode_initializing and not all_axes_in_auto:
+                self.get_logger().debug(f'等待轴进入自动模式: {axes_not_in_auto}')
+            
+            # 检测axis3和axis4的自动模式状态（用于内部状态追踪）
             axis3_auto = axis_states.get('axis3') == 'AUTO_MODE'
             axis4_auto = axis_states.get('axis4') == 'AUTO_MODE'
             
@@ -271,9 +294,10 @@ class ByteMultiArrayParser(Node):
             
             # 检查是否所有轴都已就绪，且有等待下发的板宽命令
             if self.auto_mode_initializing and self.pending_board_width is not None:
-                if all(self.board_width_axes_ready.values()):
+                # === 关键修复：所有轴都在自动模式后才下发，与C++端保持一致 ===
+                if all_axes_in_auto:
                     # 所有轴就绪，下发板宽命令
-                    self.get_logger().info('Axis3和Axis4均已进入自动模式，下发缓存的板宽命令')
+                    self.get_logger().info('所有轴均已进入自动模式，下发缓存的板宽命令')
                     self._publish_board_width_commands(self.pending_board_width)
                     self.pending_board_width = None
                     self.auto_mode_initializing = False

@@ -40,7 +40,7 @@ extern std::atomic<bool> g_should_clear_reset_light;
 // 短按暂停相关全局变量
 extern std::atomic<bool> g_short_pause_active;      // 短按暂停状态
 extern std::atomic<bool> g_short_pause_requested;   // 短按暂停请求
-extern std::atomic<bool> g_long_pause_requested;    // 长按暂停请求
+extern std::atomic<bool> g_full_shutdown_requested; // 完整关闭请求（急停/长按暂停触发）
 
 // 恢复后模式切换相关标志（解决轴未就绪时无法切换模式的问题）
 extern std::atomic<bool> g_resume_mode_switch_pending;  // 有待处理的恢复模式切换

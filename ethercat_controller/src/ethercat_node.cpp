@@ -21,9 +21,9 @@ std::atomic<bool> g_system_running(false);
 std::atomic<bool> g_start_button_pressed(false);
 std::atomic<bool> g_pause_button_pressed(false);
 std::atomic<bool> g_reset_button_pressed(false);  // 复位按钮状态
-std::atomic<bool> g_short_pause_requested(false); // 短按暂停请求
-std::atomic<bool> g_long_pause_requested(false);  // 长按暂停请求
-std::atomic<bool> g_short_pause_active(false);    // 短按暂停状态激活
+std::atomic<bool> g_short_pause_requested(false);   // 短按暂停请求
+std::atomic<bool> g_full_shutdown_requested(false); // 完整关闭请求（急停触发）
+std::atomic<bool> g_short_pause_active(false);      // 短按暂停状态激活
 
 // 恢复后模式切换相关标志定义
 std::atomic<bool> g_resume_mode_switch_pending(false);  // 有待处理的恢复模式切换
@@ -66,10 +66,9 @@ void EthercatNode::initialize_node() {
     // 创建发布器和订阅器
     joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 50);
     system_status_pub_ = this->create_publisher<std_msgs::msg::String>("/system_status", 10);
-    io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/io_status", 10);  // 新增IO状态发布器
+    io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/io_status", 10);
 
-    // 添加与Python节点通信的发布器和订阅器
-    py_io_status_pub_ = this->create_publisher<std_msgs::msg::String>("/py_io_status", 10);
+    // Python控制命令订阅
     py_control_command_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/py_control_command", rclcpp::QoS(10).reliable(),
         [this](const std_msgs::msg::String::SharedPtr msg) {
@@ -140,6 +139,14 @@ void EthercatNode::initialize_node() {
     fault_manager_ = std::make_unique<fault_management::FaultManagementSystem>(this);
     fault_manager_->set_fault_publisher(fault_code_pub_);
     fault_manager_->initialize();  // 启用日志回调自动捕获
+
+    // +++ 新增：订阅Python层业务逻辑故障 +++
+    business_logic_fault_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/business_logic_fault", 10,
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+            this->handle_business_logic_fault(msg);
+        });
+    RCLCPP_INFO(this->get_logger(), "已订阅Python层业务逻辑故障话题 /business_logic_fault");
 
     // +++ 新增：创建并启动 10ms 周期定时器 +++
     periodic_timer_ = this->create_wall_timer(
@@ -341,37 +348,7 @@ void EthercatNode::handle_py_control_command(const std_msgs::msg::String::Shared
     handle_control_command(command);
 }
 
-void EthercatNode::publish_py_io_status(const DI_Interface& di) {
-    auto msg = std_msgs::msg::String();
-    std::stringstream ss;
-    
-    // 修正DI编号映射，与io_interface.hpp中的定义保持一致
-    // DI10: buffer_sensor_2 (M522)
-    // DI11: buffer_in_position (M523)
-    // DI12: buffer_out_position (M524)
-    // DI13: conveyor_in_position (M525)
-    // DI14: conveyor_out_position (M526)
-    ss << "DI10:" << di.buffer_sensor_2
-       << ",DI11:" << di.buffer_in_position
-       << ",DI12:" << di.buffer_out_position
-       << ",DI13:" << di.conveyor_in_position
-       << ",DI14:" << di.conveyor_out_position;
-    
-#if ENABLE_SMEMA
-    // SMEMA信号（可选）
-    // DI23: smema_uba (M535)
-    // DI24: smema_ugb (M536)
-    // DI25: smema_ubb (M537)
-    ss << ",DI23:" << di.smema_uba
-       << ",DI24:" << di.smema_ugb
-       << ",DI25:" << di.smema_ubb;
-#endif
-    
-    msg.data = ss.str();
-    py_io_status_pub_->publish(msg);
-}
-
-// 新增：在轴初始化后调用的方法
+// 在轴初始化后调用的方法
 void EthercatNode::initialize_after_axes() {
     RCLCPP_INFO(this->get_logger(), "开始初始化业务逻辑模块（延迟初始化）");
     
@@ -891,9 +868,6 @@ void EthercatNode::stop_io_monitoring() {
 }
 
 void EthercatNode::handle_io_signals(DI_Interface di) {
-    // 发布IO状态到Python节点
-    publish_py_io_status(di);
-    
     pthread_mutex_lock(&io_mutex_);
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
@@ -1062,42 +1036,30 @@ void EthercatNode::publish_axis_states() {
 // IO监控线程函数
 void* io_monitor_thread(void* arg) {
     EthercatNode* node = static_cast<EthercatNode*>(arg);
-    time_t last_display = time(NULL);
     // 静态标志位，确保禁用警告只报告一次
     static bool di_disabled_warned = false;
     static bool do_disabled_warned = false;
 
     RCLCPP_INFO(node->get_logger(), "IO监控线程开始运行");
     
+#if !ENABLE_DI_MODULE
+    if (!di_disabled_warned) {
+        node->print_warning("DI模块已禁用");
+        di_disabled_warned = true;
+    }
+#endif
+    
+#if !ENABLE_DO_MODULE
+    if (!do_disabled_warned) {
+        node->print_warning("DO模块已禁用");
+        do_disabled_warned = true;
+    }
+#endif
+    
     while (node->is_io_running() && !g_should_exit.load()) {
         // 读取DI信号（如果启用）
         DI_Interface di;
         di = read_all_di_signals();
-        
-        // 获取当前DO状态
-        // DO_Interface do_control = get_current_do_state();
-        
-        // 每1秒显示一次状态，避免刷屏
-        if (should_execute_sequence(&last_display, 1)) {
-#if ENABLE_DI_MODULE
-            // print_di_status(di);
-#else
-            if (!di_disabled_warned) {
-                node->print_warning("DI模块已禁用");
-                di_disabled_warned = true;
-            }
-#endif
-            
-#if ENABLE_DO_MODULE
-            // print_do_status(do_control);
-#else
-            if (!do_disabled_warned) {
-                node->print_warning("DO模块已禁用");
-                do_disabled_warned = true;
-            }
-#endif
-            // printf("\n----------------------------------------\n");
-        }
         
         // 处理IO信号
         node->handle_io_signals(di);
@@ -1753,98 +1715,6 @@ void EthercatNode::publish_board_width_status(double current_width, double targe
     }
 }
 
-// void EthercatNode::print_warning(const std::string& message) {
-    // bool has_fault = false;
-    
-    // // 检查所有轴故障
-    // for (auto& axis : servo_axes_) {
-    //     if (axis->has_fault()) {
-    //         uint16_t fault_code = axis->get_fault_code();
-    //         std::string axis_name = axis->get_name();
-            
-    //         if (has_fault) ss << ",";
-    //         has_fault = true;
-            
-    //         ss << axis_name << ":0x" << std::hex << std::setw(4) << std::setfill('0') << fault_code;
-            
-    //         // 同时通过故障管理器记录
-    //         fault_manager_->add_axis_fault(axis_name, fault_code, "驱动器故障");
-    //     }
-    // }
-    
-    // // 如果还有其他故障源，也在这里添加
-    
-    // std_msgs::msg::String msg;
-    // if (has_fault) {
-    //     std::string fault_str = ss.str();
-    //     msg.data = fault_str;
-    // } else {
-    //     msg.data = "0";
-    // }
-    
-    // fault_code_pub_->publish(msg); 110ms发布周期，减少日志频率避免刷屏
-
-    // if (node_shutting_down_.load() || !rclcpp::ok()) {
-    //     return;
-    // }
-    
-    // auto msg = std_msgs::msg::String();
-    // std::stringstream ss;
-    
-    // bool has_fault = false;
-    
-    // // 检查所有轴的故障状态
-    // for (auto& axis : servo_axes_) {
-    //     // 获取轴的错误代码
-    //     uint16_t error_code = axis->get_error_code();
-        
-    //     // 检查是否处于故障状态
-    //     if (axis->get_current_state() == AxisState::FAULT) {
-    //         // 只有故障状态且错误码非0才发布
-    //         if (error_code != 0) {
-    //             ss << axis->get_name() << ":0x" << std::hex << error_code << ",";
-    //             has_fault = true;
-                
-    //             // 记录故障日志（减少频率避免刷屏）
-    //             static std::unordered_map<std::string, uint16_t> last_error_codes;
-    //             uint16_t last_code = last_error_codes[axis->get_name()];
-                
-    //             if (error_code != last_code) {
-    //                 RCLCPP_WARN(this->get_logger(), 
-    //                            "检测到轴故障: %s, 错误码: 0x%04X", 
-    //                            axis->get_name().c_str(), error_code);
-    //                 last_error_codes[axis->get_name()] = error_code;
-    //             }
-    //         }
-    //     }
-    // }
-    
-    // if (has_fault) {
-    //     std::string fault_str = ss.str();
-    //     // 移除最后一个逗号
-    //     if (!fault_str.empty() && fault_str.back() == ',') {
-    //         fault_str.pop_back();
-    //     }
-    //     msg.data = fault_str;
-    // } else {
-    //     // 无故障时发布"0"
-    //     msg.data = "0";
-    // }
-    
-    // fault_code_pub_->publish(msg);
-    
-    // // 减少日志频率，避免刷屏
-    // static int log_counter = 0;
-    // if (log_counter++ % 50 == 0) {  // 每5秒记录一次（假设100ms发布周期）
-    //     if (has_fault) {
-    //         RCLCPP_DEBUG(this->get_logger(), "发布故障状态: %s", msg.data.c_str());
-    //     } else {
-    //         RCLCPP_DEBUG(this->get_logger(), "系统正常，无故障");
-    //     }
-    //     log_counter = 0;
-    // }
-// }
-
 void EthercatNode::print_warning(const std::string& message) {
     RCLCPP_WARN(this->get_logger(), "%s", message.c_str());
     
@@ -1867,6 +1737,43 @@ void EthercatNode::report_axis_fault(const std::string& axis_name, uint16_t faul
         fault_manager_->add_axis_fault(axis_name, fault_code, description);
         RCLCPP_ERROR(this->get_logger(), "轴 %s 故障: 0x%04X - %s", 
                      axis_name.c_str(), fault_code, description.c_str());
+    }
+}
+
+// +++ 新增：处理Python层业务逻辑故障，转发到故障管理系统统一发布 +++
+void EthercatNode::handle_business_logic_fault(const std_msgs::msg::String::SharedPtr msg) {
+    if (!fault_manager_) {
+        return;
+    }
+
+    std::string fault_str = msg->data;
+    if (fault_str == "0" || fault_str.empty()) {
+        // 清除业务逻辑故障
+        fault_manager_->clear_fault("business_logic", 0);
+        return;
+    }
+
+    // 解析格式: "business_logic:0x5201" 或 "0x5201"
+    uint16_t fault_code = 0;
+    size_t pos = fault_str.find("0x");
+    if (pos != std::string::npos) {
+        try {
+            fault_code = static_cast<uint16_t>(std::stoi(fault_str.substr(pos + 2), nullptr, 16));
+        } catch (...) {
+            RCLCPP_WARN(this->get_logger(), "无法解析Python层故障码: %s", fault_str.c_str());
+            return;
+        }
+    }
+
+    if (fault_code != 0) {
+        // 提取故障描述
+        std::string description = "业务逻辑故障";
+        if (fault_code == 0x5201) description = "入库流程超时";
+        else if (fault_code == 0x5202) description = "出库流程超时";
+        else if (fault_code == 0x5001) description = "板宽调整超时";
+
+        fault_manager_->add_fault("business_logic", fault_code, description);
+        RCLCPP_WARN(this->get_logger(), "收到Python层故障: 0x%04X - %s", fault_code, description.c_str());
     }
 }
 

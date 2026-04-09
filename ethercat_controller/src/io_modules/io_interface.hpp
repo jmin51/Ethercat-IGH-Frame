@@ -82,10 +82,6 @@ int write_single_do_signal(int do_address, bool state);
 DO_Interface get_current_do_state();
 void refresh_do_state();  // 强制刷新DO状态
 
-// 信号打印接口
-void print_di_status(DI_Interface di);
-void print_do_status(DO_Interface do_control);
-
 // 模块状态检查
 bool is_di_module_enabled();
 bool is_do_module_enabled();
@@ -94,8 +90,6 @@ bool is_do_module_enabled();
 bool is_di_connected();
 bool is_do_connected();
 
-// 非阻塞延时检查
-int should_execute_sequence(time_t *last_time, int interval_seconds);
 // DO控制命令消息格式
 struct DOControlCommand {
     std::string do_address;  // DO地址，如 "801"

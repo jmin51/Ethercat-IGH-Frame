@@ -506,13 +506,13 @@ int main(int argc, char **argv) {
             printf("系统已短按暂停，等待启动按钮恢复...\n");
         }
         
-        // 检查长按暂停请求（急停或长按暂停按钮触发）
-        if (g_long_pause_requested.load()) {
-            printf("检测到长按暂停/急停请求...\n");
+        // 检查完整关闭请求（急停或长按暂停按钮触发）
+        if (g_full_shutdown_requested.load()) {
+            printf("检测到完整关闭请求（急停）...\n");
             g_system_running.store(false);
             g_start_button_pressed.store(false);
             g_reset_button_pressed.store(false);
-            g_long_pause_requested.store(false);
+            g_full_shutdown_requested.store(false);
             safe_shutdown(true);  // true表示暂停模式
             printf("系统已完全暂停，等待启动按钮...\n");
         }
@@ -661,6 +661,15 @@ int main(int argc, char **argv) {
         {
             printf("回原启动系统...\n");
             g_system_running.store(true);
+            // 清除暂停标志，防止实时线程立即退出（急停后残留）
+            g_pause_button_pressed.store(false);
+            // 清除完整关闭请求标志
+            g_full_shutdown_requested.store(false);
+            // 重置自动模式初始化标志（确保重新等待轴就绪）
+            g_auto_mode_initialized.store(false);
+            if (global_node) {
+                global_node->reset_auto_mode_init_published();
+            }
             
             // 重新初始化EtherCAT资源
             if (!master) {

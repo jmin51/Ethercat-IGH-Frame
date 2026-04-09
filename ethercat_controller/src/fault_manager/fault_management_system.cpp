@@ -15,10 +15,8 @@ FaultManagementSystem::FaultManagementSystem(rclcpp::Node* node,
                                              const std::string& fault_topic)
     : node_(node)
     , fault_topic_(fault_topic) {
-    
-    // 创建故障发布器
-    fault_publisher_ = node_->create_publisher<std_msgs::msg::String>(
-        fault_topic_, rclcpp::QoS(10).reliable());
+    // 注意：不在这里创建发布器，由外部通过 set_fault_publisher 设置
+    // 避免重复创建发布器导致话题冲突
 }
 
 FaultManagementSystem::~FaultManagementSystem() {

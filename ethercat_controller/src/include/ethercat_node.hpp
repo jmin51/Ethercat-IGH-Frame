@@ -84,6 +84,9 @@ public:
     // 故障上报接口（供轴状态机调用）
     void report_axis_fault(const std::string& axis_name, uint16_t fault_code, const std::string& description);
 
+    // +++ 新增：处理Python层业务逻辑故障 +++
+    void handle_business_logic_fault(const std_msgs::msg::String::SharedPtr msg);
+
 private:
     void initialize_node();
     void handle_displacement_command(const std_msgs::msg::String::SharedPtr msg);
@@ -95,12 +98,11 @@ private:
     void handle_control_command_msg(const std_msgs::msg::String::SharedPtr msg);
     void handle_axis_command(size_t axis_index, double newTargetPosition);
     double pulses_to_displacement(int32_t pulses, int32_t initial_pulses);
-    void publish_io_status();  // 新增：发布IO状态
-    
-    // 添加与Python节点通信的方法
-    void handle_py_control_command(const std_msgs::msg::String::SharedPtr msg);
-    void publish_py_io_status(const DI_Interface& di);
+    void publish_io_status();  // 发布IO状态
     void publish_axis_states();  // 发布所有轴的状态机状态
+    
+    // Python控制命令处理
+    void handle_py_control_command(const std_msgs::msg::String::SharedPtr msg);
 
     // 添加点动指令处理函数
     void handle_jog_command(const std_msgs::msg::String::SharedPtr msg);
@@ -110,12 +112,9 @@ private:
     
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr system_status_pub_;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr io_status_pub_;  // 新增IO状态发布器
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr displacement_sub_;  // 从Float64MultiArray改为String
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr io_status_pub_;  // IO状态发布器
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr displacement_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr control_command_sub_;
-    
-    // 添加与Python节点通信的发布器和订阅器
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr py_io_status_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr py_control_command_sub_;
     
     // 添加点动指令订阅器
@@ -149,6 +148,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_code_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr axis_state_pub_;  // 轴状态机状态发布器
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr axis5_layer_pub_;  // axis5当前层号发布器（浮点，支持小数层如5.5）
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr business_logic_fault_sub_;  // Python层故障订阅器
 
     // IO模块相关
     pthread_t io_thread_;

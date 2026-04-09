@@ -52,8 +52,8 @@ extern std::atomic<bool> g_reset_button_pressed;
 extern std::atomic<bool> g_pause_button_pressed;
 extern std::atomic<bool> g_system_running;
 extern std::atomic<bool> g_short_pause_requested;
-extern std::atomic<bool> g_short_pause_active;   // 短按暂停激活状态
-extern std::atomic<bool> g_long_pause_requested; // 长按暂停/急停请求
+extern std::atomic<bool> g_short_pause_active;     // 短按暂停激活状态
+extern std::atomic<bool> g_full_shutdown_requested; // 完整关闭请求
 
 // ============================================================================
 // 内部辅助函数
@@ -116,7 +116,8 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
     }
     
     // 复位按钮：按住3秒确认，点亮复位灯，启动黄灯闪烁+蜂鸣器
-    if (reset_rising) {
+    // 急停激活时禁止复位
+    if (reset_rising && !any_emergency_active) {
         // 复位按钮刚按下，开始计时
         g_reset_button_held = true;
         g_reset_press_start_time = std::chrono::steady_clock::now();
@@ -183,7 +184,7 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
         g_pause_button_pressed.store(true);     // 急停触发暂停标志
         // 只在边沿触发时设置请求标志，避免main.cpp重复打印
         if (emergency_rising) {
-            g_long_pause_requested.store(true); // 触发完整关闭流程（同长按暂停）
+            g_full_shutdown_requested.store(true); // 触发完整关闭流程
             printf("[Lights] 急停激活（低电平有效，M516=%d, M517=%d），系统进入安全关闭流程\n",
                    emergency_stop1, emergency_stop2);
         }

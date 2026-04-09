@@ -30,6 +30,17 @@ class CommandType(Enum):
     POSITION = auto()
     STOP = auto()
 
+# 故障码定义（业务逻辑层）- 与C++层保持一致
+# C++层定义：CATEGORY_BUSINESS = 0x5000, BUSINESS_SEQUENCE = 0x0200
+class FaultCode(Enum):
+    """故障码定义 - 遵循C++层 fault_codes.hpp 规范
+    业务逻辑错误类别：0x5xxx
+    子类别：BUSINESS_SEQUENCE = 0x0200 (业务流程序列)
+    """
+    NO_FAULT = 0x0000              # 无故障
+    WAREHOUSE_TIMEOUT = 0x5201     # 入库流程超时 (0x5000 | 0x0200 | 0x01)
+    OUTBOUND_TIMEOUT = 0x5202      # 出库流程超时 (0x5000 | 0x0200 | 0x02)
+
 class ControlAction:
     def __init__(self, cmd_type: CommandType, axis_name: str, command_value: str, 
                  target_position: float = 0.0, description: str = ""):
@@ -176,10 +187,10 @@ class BusinessLogicProcessor(Node):
             10
         )
    
-        # 创建订阅器
+        # 创建订阅器 - 使用 /io_status 话题（C++层发布的完整IO状态）
         self.io_status_sub = self.create_subscription(
             String, 
-            '/py_io_status', 
+            '/io_status', 
             self.io_status_callback, 
             10
         )
@@ -237,6 +248,18 @@ class BusinessLogicProcessor(Node):
         # 新增：当前层号（从axis5实际位置计算，支持小数层）
         self.current_layer_float = 1.0  # 浮点层号（如5.5层）
         self.layer_tolerance = 0.1      # 层号容差（如目标5层，实际4.7-5.3都认为到位）
+
+        # +++ 新增：入库/出库流程超时检测 +++
+        self.WAREHOUSE_PROCESS_TIMEOUT = 90.0  # 入库流程总超时90秒
+        self.OUTBOUND_PROCESS_TIMEOUT = 90.0   # 出库流程总超时90秒
+        self.warehouse_process_start_time = None  # 入库流程开始时间
+        self.outbound_process_start_time = None   # 出库流程开始时间
+        self.warehouse_timeout_reported = False   # 入库超时已上报标志
+        self.outbound_timeout_reported = False    # 出库超时已上报标志
+
+        # +++ 新增：故障码发布器（发布到独立话题，由C++层统一转发到/fault_code）+++ 
+        self.fault_code_pub = self.create_publisher(String, '/business_logic_fault', 10)
+        self.last_published_fault_code = FaultCode.NO_FAULT.value  # 上次发布的故障码
 
         # 创建层移动完成订阅器
         self.layer_completion_sub = self.create_subscription(
@@ -833,6 +856,9 @@ class BusinessLogicProcessor(Node):
         # 执行待处理命令
         self.execute_pending_commands()
 
+        # 检查流程超时
+        self.check_process_timeout()
+
     def process_io_signals(self):
         """处理IO信号变化 - 只在变化时打印"""
         if not self.auto_mode_enabled or not self.enabled:
@@ -857,6 +883,92 @@ class BusinessLogicProcessor(Node):
         
         # 更新前一个状态
         self.previous_io_signals = self.current_io_signals.copy()
+
+    def check_process_timeout(self):
+        """检查入库/出库流程是否超时，超时时发布故障码（不停止流程）"""
+        current_time = time.time()
+
+        # 检查入库流程超时
+        if (self.warehouse_state != WarehouseState.IDLE and
+            self.warehouse_process_start_time is not None and
+            not self.warehouse_timeout_reported):
+
+            elapsed = current_time - self.warehouse_process_start_time
+            if elapsed > self.WAREHOUSE_PROCESS_TIMEOUT:
+                fault_code = FaultCode.WAREHOUSE_TIMEOUT.value
+                self.get_logger().error(
+                    f'入库流程超时({elapsed:.1f}秒>{self.WAREHOUSE_PROCESS_TIMEOUT}秒)，'
+                    f'发布故障码=0x{fault_code:04X}'
+                )
+                self.publish_fault_code(fault_code)
+                self.warehouse_timeout_reported = True
+
+        # 检查出库流程超时
+        if (self.outbound_state != OutboundState.IDLE and
+            self.outbound_process_start_time is not None and
+            not self.outbound_timeout_reported):
+
+            elapsed = current_time - self.outbound_process_start_time
+            if elapsed > self.OUTBOUND_PROCESS_TIMEOUT:
+                fault_code = FaultCode.OUTBOUND_TIMEOUT.value
+                self.get_logger().error(
+                    f'出库流程超时({elapsed:.1f}秒>{self.OUTBOUND_PROCESS_TIMEOUT}秒)，'
+                    f'发布故障码=0x{fault_code:04X}'
+                )
+                self.publish_fault_code(fault_code)
+                self.outbound_timeout_reported = True
+
+    def publish_fault_code(self, fault_code: int):
+        """发布故障码到 /fault_code 话题（相同故障码只发布一次）"""
+        if fault_code == self.last_published_fault_code:
+            return  # 避免重复发布相同故障码
+
+        self.last_published_fault_code = fault_code
+
+        # 构建故障码字符串（格式与 ethercat_node 一致）
+        msg = String()
+        if fault_code == 0:
+            msg.data = "0"
+        else:
+            # 格式: "business_logic:0xXXXX"
+            msg.data = f'business_logic:0x{fault_code:04X}'
+
+        self.fault_code_pub.publish(msg)
+        self.get_logger().warn(f'发布故障码到/fault_code: {msg.data}')
+
+    def reset_process_timeout(self, process_type: str):
+        """重置流程超时状态（流程开始或结束时调用）
+        Args:
+            process_type: 'warehouse' 或 'outbound'
+        """
+        if process_type == 'warehouse':
+            self.warehouse_process_start_time = time.time()
+            self.warehouse_timeout_reported = False
+            self.get_logger().debug('重置入库流程超时计时器')
+        elif process_type == 'outbound':
+            self.outbound_process_start_time = time.time()
+            self.outbound_timeout_reported = False
+            self.get_logger().debug('重置出库流程超时计时器')
+
+    def clear_process_timeout(self, process_type: str):
+        """清除流程超时状态（流程正常完成时调用）
+        Args:
+            process_type: 'warehouse' 或 'outbound'
+        """
+        if process_type == 'warehouse':
+            self.warehouse_process_start_time = None
+            self.warehouse_timeout_reported = False
+            # 如果之前有超时故障，清除故障码
+            if self.last_published_fault_code == FaultCode.WAREHOUSE_TIMEOUT.value:
+                self.publish_fault_code(0)
+                self.last_published_fault_code = 0
+        elif process_type == 'outbound':
+            self.outbound_process_start_time = None
+            self.outbound_timeout_reported = False
+            # 如果之前有超时故障，清除故障码
+            if self.last_published_fault_code == FaultCode.OUTBOUND_TIMEOUT.value:
+                self.publish_fault_code(0)
+                self.last_published_fault_code = 0
 
     def process_warehouse_logic(self):
         """处理入库业务流程"""
@@ -902,6 +1014,8 @@ class BusinessLogicProcessor(Node):
                 if self.product_arrival_cycle_active and self.product_arrival_phase == "pre_warehouse":
                     self.product_arrival_phase = "warehouse"
                     self.get_logger().info('入库流程启动，更新产品到位发布阶段为: warehouse')
+                # 重置入库流程超时计时器
+                self.reset_process_timeout('warehouse')
                 self.get_logger().info(f'入库流程启动，进入等待入库状态，目标层: {self.target_layer}')
 
         elif self.warehouse_state == WarehouseState.WAIT_FOR_ENTRY:
@@ -1152,6 +1266,8 @@ class BusinessLogicProcessor(Node):
             self.warehouse_completion_published = False
             self.completed_reset_command_sent = False  # 重置标志，为下次流程做准备
             self.warehouse_state = WarehouseState.IDLE
+            # 清除入库流程超时状态
+            self.clear_process_timeout('warehouse')
             self.get_logger().info(f'升降机已回到第1层(当前层={self.current_layer_float:.2f})，流程状态重置为IDLE')
 
     def process_outbound_logic(self):
@@ -1189,6 +1305,8 @@ class BusinessLogicProcessor(Node):
                 self._reset_key_do_signals()
                 self.outbound_state = OutboundState.WAIT_FOR_EXIT
                 self.outbound_process_requested = False
+                # 重置出库流程超时计时器
+                self.reset_process_timeout('outbound')
                 self.get_logger().info(f'出库流程启动，进入等待出库状态，源层: {self.source_layer}')
 
         elif self.outbound_state == OutboundState.WAIT_FOR_EXIT:
@@ -1345,6 +1463,8 @@ class BusinessLogicProcessor(Node):
                     self._outbound_conveyor_out_was_true = False  # 重置检测标志
                     self.outbound_state = OutboundState.IDLE
                     self.outbound_process_requested = False  # 关键：重置启动请求标志
+                    # 清除出库流程超时状态
+                    self.clear_process_timeout('outbound')
                     # 发布出库完成消息（只在状态变化时发布一次）
                     if not self.outbound_completion_published:
                         completion_msg = Bool()
