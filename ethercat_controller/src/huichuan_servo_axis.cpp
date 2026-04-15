@@ -65,18 +65,6 @@ void HuichuanServoAxis::register_pdo_entries(ec_pdo_entry_reg_t* reg_list, int& 
         sc_, 0x6064, 0, domain1, NULL);
     off_error_code_ = ecrt_slave_config_reg_pdo_entry(
         sc_, 0x603F, 0, domain1, NULL);
-    
-    // if (control_word_ == nullptr) {
-    //     RCLCPP_FATAL(rclcpp::get_logger("huichuan_servo"),
-    //                 "%s 轴PDO注册失败", axis_name_.c_str());
-    // }
-    
-    // // 注册到列表
-    // reg_list[index++] = {slave_position_, 0x6040, 0, domain1, &control_word_};
-    // reg_list[index++] = {slave_position_, 0x6041, 0, domain1, &status_word_};
-    // reg_list[index++] = {slave_position_, 0x607A, 0, domain1, &off_target_position_};
-    // reg_list[index++] = {slave_position_, 0x6064, 0, domain1, &off_actual_position_};
-    // reg_list[index++] = {slave_position_, 0x603F, 0, domain1, &off_error_code_};
 }
 
 void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
@@ -426,13 +414,6 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
         jog_stop_requested_ = false;
     }
     
-    // // 原有的位移指令处理（可选保留或注释掉）
-    // if (displacement_updated_) {
-    //     displacement_updated_ = false;
-    //     int32_t displacement_pulses = displacement_to_pulses(target_displacement_);
-    //     target_pulses_ = joint_position_ + displacement_pulses;
-    // }
-    
     // 限制最大速度
     const int32_t MAX_STEP = displacement_to_pulses(MAX_JOG_SPEED * PERIOD);
     int32_t error = target_pulses_ - joint_position_;
@@ -482,17 +463,6 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
         target_pulses_ = displacement_to_pulses(target_displacement_);
         printf("轴 %s 绝对位置更新: %.3fmm -> 目标脉冲 %d (初始: %d, 当前: %d)\n", 
                 axis_name_.c_str(), target_displacement_, target_pulses_, initial_position_, joint_position_);
-        
-        // // 安全检测
-        // const int32_t MAX_SAFE_DELTA = 2500;
-        // int32_t position_delta = abs(target_pulses_ - joint_position_);
-        // if (position_delta > MAX_SAFE_DELTA) {
-        //     current_state_ = AxisState::FAULT;
-        //     RCLCPP_ERROR(rclcpp::get_logger("huichuan_servo"), 
-        //                 "汇川轴 %s 运动控制错误：差值过大(%d脉冲)", 
-        //                 axis_name_.c_str(), position_delta);
-        //     return;
-        // }
     }
     
     // 使用逐步逼近
@@ -509,48 +479,6 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
             printf("轴 %s 已到达目标位置!(汇川自动模式)\n", axis_name_.c_str());
         }
     }
-    // // 自动模式使用固定最大速度
-    // int32_t error = target_pulses_ - joint_position_;
-        
-        // // 判断是否到达目标
-        // const int32_t TOLERANCE = 50;
-        // if (abs(error) <= TOLERANCE) {
-        //     if (!target_reached_) {
-        //         std::lock_guard<std::mutex> lock(flag_mutex_);
-        //         target_reached_flag_ = true;
-        //         target_reached_ = true;
-        //         printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
-        //     }
-        //     joint_position_ = target_pulses_; // 精确对齐
-        // } else {
-        //     const int32_t MAX_STEP = 40;
-        //     int32_t step = (abs(error) > MAX_STEP) ? 
-        //                   ((error > 0) ? MAX_STEP : -MAX_STEP) : error;
-        //     joint_position_ += step;
-        //     target_reached_ = false;
-        // }
-        
-        // EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    // }
-    // if (displacement_updated_) {
-    //     displacement_updated_ = false;
-    //     target_pulses_ = initial_position_ + displacement_to_pulses(target_displacement_);
-        
-    //     // 汇川特有的安全检测
-    //     const int32_t MAX_SAFE_DELTA = 2500;
-    //     int32_t position_delta = abs(target_pulses_ - joint_position_);
-    //     if (position_delta > MAX_SAFE_DELTA) {
-    //         current_state_ = AxisState::FAULT;
-    //         RCLCPP_ERROR(rclcpp::get_logger("huichuan_servo"), 
-    //                     "汇川轴 %s 运动控制错误：差值过大(%d脉冲)", 
-    //                     axis_name_.c_str(), position_delta);
-    //         return;
-    //     }
-    // }
-    
-    // // 汇川直接位置控制
-    // EC_WRITE_S32(domain1_pd + off_target_position_, target_pulses_);
-    // joint_position_ = target_pulses_;
 }
 
 void HuichuanServoAxis::set_huichuan_specific_parameter(double param) {

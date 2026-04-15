@@ -24,6 +24,14 @@ class OutboundState(Enum):
     CONVEYOR_MOVING = auto()
     COMPLETED = auto()
 
+class PassThroughState(Enum):
+    """放行流程状态"""
+    IDLE = auto()
+    WAIT_FOR_PRODUCT_ARRIVAL = auto()  # 等待产品到位
+    CONVEYOR_RUNNING = auto()          # 输送带运行中（自动放行）
+    WAIT_FOR_CONVEYOR_OUT = auto()
+    COMPLETED = auto()
+
 class CommandType(Enum):
     JOG = auto()
     LAYER = auto()
@@ -40,6 +48,7 @@ class FaultCode(Enum):
     NO_FAULT = 0x0000              # 无故障
     WAREHOUSE_TIMEOUT = 0x5201     # 入库流程超时 (0x5000 | 0x0200 | 0x01)
     OUTBOUND_TIMEOUT = 0x5202      # 出库流程超时 (0x5000 | 0x0200 | 0x02)
+    GEAR_CYLINDER_TIMEOUT = 0x5203 # 齿轮对接气缸伸出超时 (0x5000 | 0x0200 | 0x03)
 
 class ControlAction:
     def __init__(self, cmd_type: CommandType, axis_name: str, command_value: str, 
@@ -60,6 +69,7 @@ class BusinessLogicProcessor(Node):
         # 初始化状态变量
         self.warehouse_state = WarehouseState.IDLE
         self.outbound_state = OutboundState.IDLE
+        self.release_state = PassThroughState.IDLE  # 新增：放行流程状态
         self.current_layer = 1
         self.target_layer = 1
         self.source_layer = 1
@@ -67,6 +77,7 @@ class BusinessLogicProcessor(Node):
         # 添加上一个状态记录
         self.previous_warehouse_state = WarehouseState.IDLE
         self.previous_outbound_state = OutboundState.IDLE
+        self.previous_release_state = PassThroughState.IDLE  # 新增：放行流程上一个状态
         self.previous_io_signals = {
             'buffer_in_position': False,
             'buffer_out_position': False,
@@ -85,6 +96,9 @@ class BusinessLogicProcessor(Node):
         self.warehouse_process_stop_requested = False
         self.outbound_process_requested = False
         self.outbound_process_stop_requested = False
+        self.release_process_requested = False  # 新增：放行流程启动请求
+        self.release_process_stop_requested = False  # 新增：放行流程停止请求
+        self.release_request_received = False  # 新增：放行请求信号（收到后启动输送带）
         
         # +++ 新增：暂停状态记录相关 +++
         self.pause_state_reported = False  # 是否已报告暂停状态
@@ -125,6 +139,18 @@ class BusinessLogicProcessor(Node):
         # 新增：层指令状态跟踪，避免重复发送
         self.last_layer_command = None  # 存储最后发送的层指令
         self.layer_command_sent = False  # 标记层指令是否已发送
+        
+        # +++ 新增：放行流程状态变量 +++
+        self.release_conveyor_out_was_true = False  # conveyor_out曾经为True的标志
+        self.release_conveyor_out_delay_started = False  # 放行完成延迟开始标志
+        self.release_conveyor_out_delay_counter = 0  # 放行完成延迟计数器
+        self.release_completion_published = False  # 放行完成消息发布标志
+
+        # +++ 新增：811齿轮对接气缸检测相关状态 +++
+        self.GEAR_CYLINDER_TIMEOUT_SEC = 2.0  # 齿轮对接气缸伸出超时时间2秒
+        self.gear_cylinder_811_sent_time = None  # 811发送时间
+        self.gear_cylinder_811_checking = False  # 是否正在检测气缸到位
+        self.gear_cylinder_811_timeout_reported = False  # 超时已上报标志
 
         # 新增：产品到位发布状态管理（0x0109）
         self.product_arrival_cycle_active = False  # 是否处于产品到位发布周期中
@@ -147,12 +173,19 @@ class BusinessLogicProcessor(Node):
             'conveyor_in_position': False,
             'conveyor_out_position': False,
             'buffer_sensor_2': False,
+            'feed_product_detect': False,  # 新增：入料产品检测信号
             # SMEMA信号
             'smema_uba': False,   # 上游有板待发
             'smema_ugb': False,   # 上游好板
             'smema_ubb': False,   # 上游坏板
             'smema_mr': False     # 机器就绪（输出信号状态反馈）
         }
+        
+        # +++ 新增：产品到位检测状态机 +++
+        self.product_arrival_state = "IDLE"  # IDLE/WAITING_FEED/CONVEYOR_RUNNING/WAITING_BUFFER_IN/WAITING_BUFFER_OUT/COMPLETED
+        self.feed_detected = False           # 是否检测到feed_product_detect
+        self.buffer_in_detected = False      # 是否检测到buffer_in
+        self.conveyor_started_for_arrival = False  # 输送带是否已启动用于进料
         
         # +++ SMEMA协议相关状态 +++
         self.smema_state = "IDLE"           # SMEMA状态: IDLE/READY/RECEIVING/ARRIVED
@@ -173,6 +206,7 @@ class BusinessLogicProcessor(Node):
         self.warehouse_completed_pub = self.create_publisher(Bool, '/warehouse_completed', 10)
         self.outbound_completed_pub = self.create_publisher(Bool, '/outbound_completed', 10)
         self.product_arrival_pub = self.create_publisher(Bool, '/product_arrival', 10)
+        self.release_completed_pub = self.create_publisher(Bool, '/release_completed', 10)  # 新增：放行完成发布器
         
         # +++ SMEMA协议发布器 +++
         if self.ENABLE_SMEMA:
@@ -227,6 +261,21 @@ class BusinessLogicProcessor(Node):
             Empty,
             '/outbound_stop',
             self.outbound_stop_callback,
+            10
+        )
+        
+        # +++ 新增：放行流程订阅器 +++
+        self.release_start_sub = self.create_subscription(
+            Empty,
+            '/release_start',
+            self.release_start_callback,
+            10
+        )
+        
+        self.release_stop_sub = self.create_subscription(
+            Empty,
+            '/release_stop',
+            self.release_stop_callback,
             10
         )
         
@@ -379,11 +428,13 @@ class BusinessLogicProcessor(Node):
         DI25: M537 smema_ubb (SMEMA上游坏板)
         """
         mapping = {
+            8: 'feed_product_detect',   # M520 入料产品检测
             10: 'buffer_sensor_2',      # M522 缓存架对射2
             11: 'buffer_in_position',   # M523 缓存架入料产品到位检测
             12: 'buffer_out_position',  # M524 缓存架出料产品到位检测
             13: 'conveyor_in_position', # M525 接驳台入料产品到位检测
             14: 'conveyor_out_position', # M526 接驳台出料产品到位检测
+            21: 'gear_cylinder_2_in_position',  # M533 齿轮对接气缸2伸出到位
             # SMEMA信号
             23: 'smema_uba',            # M535 SMEMA上游有板待发
             24: 'smema_ugb',            # M536 SMEMA上游好板
@@ -422,13 +473,19 @@ class BusinessLogicProcessor(Node):
             self.product_arrival_cycle_active = True
             self.product_arrival_published_in_cycle = False
             self.product_arrival_phase = "pre_warehouse"
+            # 重置产品到位检测状态机
+            self._reset_product_arrival_state_machine()
 
-    def _handle_product_arrival_publication(self, buffer_in: bool):
-        """处理产品到位发布逻辑（0x0109）
+    def process_product_arrival_logic(self):
+        """处理产品到位检测状态机（新逻辑）
         
-        逻辑：
-        1. 开始作业(0x0105)到第一次入库开始前：只发布一次0x0109
-        2. 入库完成后到下一次入库开始前：只发布一次0x0109
+        状态流转：
+        IDLE → WAITING_FEED: 检测到feed_product_detect上升沿
+        WAITING_FEED → CONVEYOR_RUNNING: 启动输送带
+        CONVEYOR_RUNNING → WAITING_BUFFER_IN: 等待buffer_in
+        WAITING_BUFFER_IN → WAITING_BUFFER_OUT: 检测到buffer_in上升沿
+        WAITING_BUFFER_OUT → COMPLETED: 检测到buffer_in下降沿，发布0x0109
+        COMPLETED → IDLE: 等待下一轮
         """
         # 如果没有处于产品到位发布周期，不处理
         if not self.product_arrival_cycle_active:
@@ -438,14 +495,71 @@ class BusinessLogicProcessor(Node):
         if self.product_arrival_published_in_cycle:
             return
         
-        # 检查是否有产品到位
-        if buffer_in:
-            # 发布产品到位消息
-            arrival_msg = Bool()
-            arrival_msg.data = True
-            self.product_arrival_pub.publish(arrival_msg)
-            self.product_arrival_published_in_cycle = True
-            self.get_logger().info(f'✅ 检测到产品到位，发布0x0109（阶段: {self.product_arrival_phase}）')
+        di = self.current_io_signals
+        feed_detect = di['feed_product_detect']
+        buffer_in = di['buffer_in_position']
+        
+        # 状态机处理
+        if self.product_arrival_state == "IDLE":
+            # 等待进料检测信号
+            if feed_detect and not self.feed_detected:
+                # 检测到feed_product_detect上升沿
+                self.feed_detected = True
+                self.product_arrival_state = "CONVEYOR_RUNNING"
+                self.get_logger().info('产品到位检测：检测到feed_product_detect，启动输送带')
+                
+                # 启动输送带
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis1_1", "reverse",
+                    description="进料：启动轴1_1反转"
+                ))
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis1_2", "forward",
+                    description="进料：启动轴1_2正转"
+                ))
+                self.conveyor_started_for_arrival = True
+        
+        elif self.product_arrival_state == "CONVEYOR_RUNNING":
+            # 等待buffer_in信号
+            if buffer_in and not self.buffer_in_detected:
+                # 检测到buffer_in上升沿
+                self.buffer_in_detected = True
+                self.product_arrival_state = "WAITING_BUFFER_OUT"
+                self.get_logger().info('产品到位检测：检测到buffer_in，等待产品离开')
+        
+        elif self.product_arrival_state == "WAITING_BUFFER_OUT":
+            # 等待buffer_in消失（产品完全到位）
+            if not buffer_in and self.buffer_in_detected:
+                # 检测到buffer_in下降沿，产品到位
+                self.get_logger().info('产品到位检测：buffer_in消失，产品已到位')
+                
+                # 停止输送带
+                if self.conveyor_started_for_arrival:
+                    self.add_command(ControlAction(
+                        CommandType.JOG, "axis1_1", "stop",
+                        description="进料：停止轴1_1"
+                    ))
+                    self.add_command(ControlAction(
+                        CommandType.JOG, "axis1_2", "stop",
+                        description="进料：停止轴1_2"
+                    ))
+                    self.conveyor_started_for_arrival = False
+                
+                # 发布产品到位消息0x0109
+                arrival_msg = Bool()
+                arrival_msg.data = True
+                self.product_arrival_pub.publish(arrival_msg)
+                self.product_arrival_published_in_cycle = True
+                self.product_arrival_state = "COMPLETED"
+                self.get_logger().info(f'✅ 产品到位检测完成，发布0x0109（阶段: {self.product_arrival_phase}）')
+        
+        elif self.product_arrival_state == "COMPLETED":
+            # 等待feed_detect消失，重置状态机
+            if not feed_detect:
+                self.product_arrival_state = "IDLE"
+                self.feed_detected = False
+                self.buffer_in_detected = False
+                self.get_logger().info('产品到位检测：重置状态机，等待下一轮')
 
     def outbound_start_callback(self, msg):
         """处理出库启动命令"""
@@ -469,6 +583,46 @@ class BusinessLogicProcessor(Node):
         self._reset_key_do_signals()
         self.outbound_process_stop_requested = True
         self.get_logger().info('收到出库流程停止请求')
+    
+    def release_start_callback(self, msg):
+        """处理放行启动命令 - 进入等待产品到位状态"""
+        if not self.auto_mode_enabled:
+            self.get_logger().warn('自动模式未启用，忽略放行启动命令')
+            return
+            
+        if self.release_state not in [PassThroughState.IDLE, PassThroughState.COMPLETED]:
+            self.get_logger().warn('放行流程已在运行中，无法重复启动')
+            return
+        
+        self.release_process_requested = True
+        self.release_process_stop_requested = False
+        # 重置完成发布标志，确保下次放行可以正常发布完成消息
+        self.release_completion_published = False
+        self.get_logger().info('收到放行流程启动请求，进入等待产品到位状态')
+
+    def _reset_product_arrival_state_machine(self):
+        """重置产品到位检测状态机"""
+        self.product_arrival_state = "IDLE"
+        self.feed_detected = False
+        self.buffer_in_detected = False
+        if self.conveyor_started_for_arrival:
+            # 如果输送带还在运行，停止它
+            self.add_command(ControlAction(
+                CommandType.JOG, "axis1_1", "stop",
+                description="重置：停止轴1_1"
+            ))
+            self.add_command(ControlAction(
+                CommandType.JOG, "axis1_2", "stop",
+                description="重置：停止轴1_2"
+            ))
+            self.conveyor_started_for_arrival = False
+        self.get_logger().debug('产品到位检测状态机已重置')
+
+    def release_stop_callback(self, msg):
+        """处理放行停止命令"""
+        self._reset_key_do_signals()
+        self.release_process_stop_requested = True
+        self.get_logger().info('收到放行流程停止请求')
 
     def layer_completion_callback(self, msg):
         """层移动完成回调处理 - 修复版本"""
@@ -844,11 +998,17 @@ class BusinessLogicProcessor(Node):
         if self.ENABLE_SMEMA:
             self.process_smema_logic()
         
+        # 处理产品到位检测逻辑（新状态机）
+        self.process_product_arrival_logic()
+        
         # 处理入库逻辑
         self.process_warehouse_logic()
         
         # 处理出库逻辑
         self.process_outbound_logic()
+        
+        # 处理放行逻辑
+        self.process_release_logic()
         
         # 处理IO信号变化
         self.process_io_signals()
@@ -858,6 +1018,9 @@ class BusinessLogicProcessor(Node):
 
         # 检查流程超时
         self.check_process_timeout()
+
+        # 检查齿轮对接气缸到位状态
+        self.check_gear_cylinder_position()
 
     def process_io_signals(self):
         """处理IO信号变化 - 只在变化时打印"""
@@ -936,6 +1099,41 @@ class BusinessLogicProcessor(Node):
         self.fault_code_pub.publish(msg)
         self.get_logger().warn(f'发布故障码到/fault_code: {msg.data}')
 
+    def check_gear_cylinder_position(self):
+        """检查811齿轮对接气缸伸出到位状态（M533）"""
+        if not self.gear_cylinder_811_checking:
+            return
+
+        di = self.current_io_signals
+        gear_cylinder_in_position = di.get('gear_cylinder_2_in_position', False)
+
+        # 检测到位信号
+        if gear_cylinder_in_position:
+            self.gear_cylinder_811_checking = False
+            self.gear_cylinder_811_sent_time = None
+            self.get_logger().info('✅ M533齿轮对接气缸2伸出到位检测通过')
+            return
+
+        # 检查超时
+        if self.gear_cylinder_811_sent_time is not None:
+            elapsed = time.time() - self.gear_cylinder_811_sent_time
+            if elapsed > self.GEAR_CYLINDER_TIMEOUT_SEC:
+                if not self.gear_cylinder_811_timeout_reported:
+                    fault_code = FaultCode.GEAR_CYLINDER_TIMEOUT.value
+                    self.get_logger().error(
+                        f'❌ M533齿轮对接气缸2伸出到位超时({elapsed:.1f}秒>{self.GEAR_CYLINDER_TIMEOUT_SEC}秒)，'
+                        f'发布故障码=0x{fault_code:04X}'
+                    )
+                    self.publish_fault_code(fault_code)
+                    self.gear_cylinder_811_timeout_reported = True
+
+    def reset_gear_cylinder_check(self):
+        """重置齿轮对接气缸检测状态"""
+        self.gear_cylinder_811_checking = False
+        self.gear_cylinder_811_sent_time = None
+        self.gear_cylinder_811_timeout_reported = False
+        self.get_logger().debug('重置齿轮对接气缸检测状态')
+
     def reset_process_timeout(self, process_type: str):
         """重置流程超时状态（流程开始或结束时调用）
         Args:
@@ -991,9 +1189,9 @@ class BusinessLogicProcessor(Node):
             self.previous_warehouse_state = self.warehouse_state
         
         # === 产品到位发布逻辑（0x0109）===
-        # 情况1：入库前/出库前，收到产品到位，发布一次
-        # 情况2：入库/出库流程完成后，收到产品到位，再次发布，形成循环
-        self._handle_product_arrival_publication(buffer_in)
+        # 已由 process_product_arrival_logic 状态机统一处理
+        # 状态机流程：feed_detect → conveyor → buffer_in上升 → buffer_in下降 → 发布0x0109
+        # 此处不再重复调用旧方法
     
         # 处理停止请求
         if self.warehouse_process_stop_requested:
@@ -1019,8 +1217,9 @@ class BusinessLogicProcessor(Node):
                 self.get_logger().info(f'入库流程启动，进入等待入库状态，目标层: {self.target_layer}')
 
         elif self.warehouse_state == WarehouseState.WAIT_FOR_ENTRY:
-            # 检测入库条件
-            if buffer_in and not buffer_out:
+            # 检测入库条件：等待产品到位检测状态机完成（product_arrival_published_in_cycle=True）
+            # 且 buffer_in 有产品（产品到位后buffer_in应该为True）
+            if self.product_arrival_published_in_cycle and buffer_in and not buffer_out:
                 # +++ 新增检查：确保当前层是第1层（使用从axis5位置计算的层号）+++
                 if not self.is_target_layer_reached(1):
                     self.get_logger().warn(f'提升机不在第1层（当前层={self.current_layer_float:.2f}），等待回到第1层后再开始入库')
@@ -1169,8 +1368,14 @@ class BusinessLogicProcessor(Node):
             
             # 步骤3：延迟到达，执行后续操作
             self.send_do_control_once("811", True)  # 激活DO气缸伸出信号
-            self.get_logger().info(f'DO气缸已激活，延迟{elapsed:.1f}秒')
-            
+            self.get_logger().info(f'DO811气缸伸出已激活，延迟{elapsed:.1f}秒')
+
+            # +++ 新增：启动齿轮对接气缸到位检测 +++
+            self.gear_cylinder_811_sent_time = time.time()
+            self.gear_cylinder_811_checking = True
+            self.gear_cylinder_811_timeout_reported = False
+            self.get_logger().info('启动M533齿轮对接气缸2伸出到位检测...')
+
             # 重置延迟计时器
             self.post_lift_delay_start = None
             
@@ -1250,6 +1455,8 @@ class BusinessLogicProcessor(Node):
             if self.product_arrival_cycle_active:
                 self.product_arrival_published_in_cycle = False
                 self.product_arrival_phase = "post_warehouse"
+                # 重置产品到位检测状态机，准备下一轮检测
+                self._reset_product_arrival_state_machine()
                 self.get_logger().info('入库流程完成，重置产品到位发布状态，等待下一轮产品到位')
 
             # +++ 关键修复：等待层移动完成（到达第1层）后再进入IDLE +++
@@ -1348,7 +1555,14 @@ class BusinessLogicProcessor(Node):
                 CommandType.JOG, "axis2_2", "reverse", 
                 description="启动轴2_2反转（出库）"
             ))
-            self.send_do_control_once("811", True)  # 激活DO信号
+            self.send_do_control_once("811", True)  # 激活DO811齿轮对接气缸伸出
+            self.get_logger().info('出库：DO811齿轮对接气缸伸出已激活')
+
+            # +++ 新增：启动齿轮对接气缸到位检测 +++
+            self.gear_cylinder_811_sent_time = time.time()
+            self.gear_cylinder_811_checking = True
+            self.gear_cylinder_811_timeout_reported = False
+            self.get_logger().info('启动M533齿轮对接气缸2伸出到位检测...')
 
             # 立即转换到新的状态
             self.outbound_state = OutboundState.POST_LIFT_PROCESSING
@@ -1482,6 +1696,133 @@ class BusinessLogicProcessor(Node):
                         self.product_arrival_published_in_cycle = False
                         self.product_arrival_phase = "post_outbound"
                         self.get_logger().info('出库流程完成，重置产品到位发布状态，等待下一轮产品到位')
+    
+    def process_release_logic(self):
+        """处理放行业务流程
+        
+        放行逻辑：
+        1. 收到放行启动信号 → 进入等待产品到位状态
+        2. 检测 buffer_in=True → 发布产品到位信号
+        3. 等待放行请求信号 → 启动输送带（axis1_1反转，axis1_2正转，DO813激活）
+        4. 检测停止条件：
+           - 收到放行停止信号
+           - conveyor_out信号从无到有再到无后，发布放行完成
+        """
+        di = self.current_io_signals
+        buffer_in = di['buffer_in_position']
+        conveyor_out = di['conveyor_out_position']
+        
+        # 检查状态是否变化
+        state_changed = (self.release_state != self.previous_release_state)
+        
+        # 只在状态变化时打印
+        if state_changed:
+            self.get_logger().info(
+                f'放行流程状态变化: {self.previous_release_state.name} -> {self.release_state.name}'
+            )
+            self.previous_release_state = self.release_state
+        
+        # 处理停止请求
+        if self.release_process_stop_requested:
+            # 停止输送带
+            self.add_command(ControlAction(
+                CommandType.JOG, "axis1_1", "stop",
+                description="停止轴1_1"
+            ))
+            self.add_command(ControlAction(
+                CommandType.JOG, "axis1_2", "stop",
+                description="停止轴1_2"
+            ))
+            self.send_do_control_once("813", False)  # 停止DO14皮带反转
+            
+            self.release_state = PassThroughState.IDLE
+            self.release_process_stop_requested = False
+            self.release_process_requested = False
+            self.get_logger().info('放行流程已停止')
+            return
+        
+        if self.release_state == PassThroughState.IDLE:
+            # 等待启动信号
+            if self.release_process_requested:
+                self._reset_key_do_signals()  # 重置关键DO信号，确保安全状态
+                self.release_process_requested = False
+                self.release_state = PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL
+                self.get_logger().info('放行流程启动，进入等待产品到位状态')
+        
+        elif self.release_state == PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL:
+            # 等待产品到位检测状态机完成（由 process_product_arrival_logic 处理）
+            # 当 product_arrival_published_in_cycle = True 时表示产品已到位
+            if self.product_arrival_published_in_cycle:
+                # 产品到位后启动输送带（放行）
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis1_1", "reverse",
+                    description="启动轴1_1反转（放行）"
+                ))
+                self.add_command(ControlAction(
+                    CommandType.JOG, "axis1_2", "forward",
+                    description="启动轴1_2正转（放行）"
+                ))
+                self.send_do_control_once("813", True)  # 激活DO14皮带反转
+                
+                self.release_state = PassThroughState.CONVEYOR_RUNNING
+                self.get_logger().info('产品到位检测完成，输送带已启动（放行）')
+        
+        elif self.release_state == PassThroughState.CONVEYOR_RUNNING:
+            # 检测 conveyor_out 信号变化
+            if conveyor_out:
+                # conveyor_out 从无到有
+                if not self.release_conveyor_out_was_true:
+                    self.release_conveyor_out_was_true = True
+                    self.get_logger().info('放行流程：检测到货物到达出料位(conveyor_out=1)')
+            else:
+                # conveyor_out 从有到无
+                if self.release_conveyor_out_was_true:
+                    self.get_logger().info('放行流程：检测到货物离开出料位(conveyor_out=0)，开始延迟')
+                    self.release_conveyor_out_delay_started = True
+                    self.release_conveyor_out_delay_counter = 0
+                    self.release_state = PassThroughState.WAIT_FOR_CONVEYOR_OUT
+        
+        elif self.release_state == PassThroughState.WAIT_FOR_CONVEYOR_OUT:
+            # 延迟处理（货物离开后延迟0.3秒）
+            if self.release_conveyor_out_delay_started:
+                self.release_conveyor_out_delay_counter += 1
+                
+                # 0.3秒延迟（3个周期，每周期100ms）
+                if self.release_conveyor_out_delay_counter >= 3:
+                    # 停止输送带并完成流程
+                    self.add_command(ControlAction(
+                        CommandType.JOG, "axis1_1", "stop",
+                        description="停止轴1_1"
+                    ))
+                    self.add_command(ControlAction(
+                        CommandType.JOG, "axis1_2", "stop",
+                        description="停止轴1_2"
+                    ))
+                    self.send_do_control_once("813", False)  # 停止DO14皮带反转
+                    
+                    self.release_conveyor_out_delay_started = False
+                    self.release_conveyor_out_was_true = False
+                    self.release_state = PassThroughState.COMPLETED
+                    self.get_logger().info('放行流程：延迟结束，进入完成状态')
+        
+        elif self.release_state == PassThroughState.COMPLETED:
+            # 发布放行完成消息
+            if not self.release_completion_published:
+                completion_msg = Bool()
+                completion_msg.data = True
+                self.release_completed_pub.publish(completion_msg)
+                self.release_completion_published = True
+                self.get_logger().info('✅ 放行流程完成，发布完成消息')
+            
+            # 重置流程状态，回到IDLE
+            self.release_process_requested = False
+            self.release_completion_published = False
+            self.release_state = PassThroughState.IDLE
+            # 重置产品到位检测状态机，准备下一轮检测
+            if self.product_arrival_cycle_active:
+                self.product_arrival_published_in_cycle = False
+                self._reset_product_arrival_state_machine()
+                self.get_logger().info('放行流程完成，重置产品到位检测状态机，等待下一轮产品到位')
 
     def check_outbound_condition(self) -> bool:
         """检查出库启动条件"""
@@ -1595,6 +1936,16 @@ class BusinessLogicProcessor(Node):
         self.outbound_process_requested = False
         self.outbound_process_stop_requested = False
         
+        # 重置放行流程状态
+        self.release_state = PassThroughState.IDLE
+        self.release_process_requested = False
+        self.release_process_stop_requested = False
+        self.release_request_received = False
+        self.release_conveyor_out_was_true = False
+        self.release_conveyor_out_delay_started = False
+        self.release_conveyor_out_delay_counter = 0
+        self.release_completion_published = False
+        
         # 重置延迟计数器
         self.delay_started = False
         self.delay_condition_triggered = False
@@ -1643,6 +1994,9 @@ class BusinessLogicProcessor(Node):
         
         # 重置 COMPLETED 状态标志
         self.completed_reset_command_sent = False
+
+        # +++ 新增：重置齿轮对接气缸检测状态 +++
+        self.reset_gear_cylinder_check()
         
         # 清空待处理命令
         self.pending_commands.clear()

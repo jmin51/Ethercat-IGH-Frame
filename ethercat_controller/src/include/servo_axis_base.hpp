@@ -146,7 +146,6 @@ protected:
 
     // 保护方法 - 子类可以重写或使用
     virtual void initialize_members();
-    // virtual int32_t displacement_to_pulses(double displacement_mm);
     virtual double pulses_to_displacement(int32_t pulses);
     virtual void check_state_changes(uint16_t read_status_word, uint16_t error_code);
     virtual void handle_fault_clear(uint8_t* domain1_pd);

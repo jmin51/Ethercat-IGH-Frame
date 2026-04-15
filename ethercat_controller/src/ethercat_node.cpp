@@ -84,7 +84,7 @@ void EthercatNode::initialize_node() {
     control_command_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/control_command", rclcpp::QoS(10).reliable(),
         [this](const std_msgs::msg::String::SharedPtr msg) {
-            handle_control_command_msg(msg);
+            handle_control_command(msg->data);
         });
     // 添加点动指令订阅
     jog_command_sub_ = this->create_subscription<std_msgs::msg::String>(
@@ -99,30 +99,6 @@ void EthercatNode::initialize_node() {
             handle_jog_speed_command(msg);
         });
 
-    // 添加入库流程话题订阅器
-    warehouse_start_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
-        "/warehouse_start", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
-            handle_warehouse_start(msg);
-        });
-        
-    warehouse_stop_sub_ = this->create_subscription<std_msgs::msg::Empty>(
-        "/warehouse_stop", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::Empty::SharedPtr msg) {
-            handle_warehouse_stop(msg);
-        });
-    // 添加出库流程话题订阅器
-    outbound_start_sub_ = this->create_subscription<std_msgs::msg::UInt8>(
-        "/outbound_start", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::UInt8::SharedPtr msg) {
-            handle_outbound_start(msg);
-        });
-        
-    outbound_stop_sub_ = this->create_subscription<std_msgs::msg::Empty>(
-        "/outbound_stop", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::Empty::SharedPtr msg) {
-            handle_outbound_stop(msg);
-        });
     // 添加DO控制话题订阅
     do_control_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/do_control", rclcpp::QoS(10).reliable(),
@@ -642,10 +618,6 @@ void EthercatNode::handle_control_command(const std::string& command) {
     }
 }
 
-void EthercatNode::handle_control_command_msg(const std_msgs::msg::String::SharedPtr msg) {
-    handle_control_command(msg->data);
-}
-
 // 实现新的位移指令处理函数
 void EthercatNode::handle_displacement_command(const std_msgs::msg::String::SharedPtr msg) {  
     if (servo_axes_.empty()) {
@@ -970,7 +942,9 @@ void EthercatNode::publish_io_status() {
     ss << "DI19:" << (di.gear_cylinder1_retract ? "1" : "0") << ","; // 齿轮对接气缸1伸出到位
     ss << "DI20:" << (di.gear_cylinder1_retract ? "1" : "0") << ","; // 齿轮对接气缸1缩回到位
     ss << "DI21:" << (di.gear_cylinder2_extend ? "1" : "0") << ","; // 齿轮对接气缸2伸出到位
-    ss << "DI22:" << (di.gear_cylinder2_retract ? "1" : "0");       // 齿轮对接气缸2缩回到位
+    ss << "DI22:" << (di.gear_cylinder2_retract ? "1" : "0") << ","; // 齿轮对接气缸2缩回到位
+    ss << "DI23:" << (di.smema_uba ? "1" : "0") << ",";             // SMEMA上游有板待发
+    ss << "DI24:" << (di.smema_dbr ? "1" : "0");                    // SMEMA下游要板
 
     ss << " | DO状态: ";
     
@@ -988,7 +962,9 @@ void EthercatNode::publish_io_status() {
     ss << "DO10:" << (do_status.lift_cylinder_down ? "1" : "0") << ","; // 顶升气缸下降
     ss << "DO11:" << (do_status.gear_cylinder_extend ? "1" : "0") << ","; // 齿轮对接气缸伸出
     ss << "DO12:" << (do_status.belt_forward ? "1" : "0") << ",";       // 皮带正转启动
-    ss << "DO13:" << (do_status.belt_backward ? "1" : "0");              // 皮带反转启动
+    ss << "DO13:" << (do_status.belt_backward ? "1" : "0") << ",";      // 皮带反转启动
+    ss << "DO14:" << (do_status.smema_mr ? "1" : "0") << ",";           // SMEMA本机要板
+    ss << "DO15:" << (do_status.smema_ba ? "1" : "0");                  // SMEMA本机有板待发
     
     pthread_mutex_unlock(&io_mutex_);
     
@@ -1036,13 +1012,12 @@ void EthercatNode::publish_axis_states() {
 // IO监控线程函数
 void* io_monitor_thread(void* arg) {
     EthercatNode* node = static_cast<EthercatNode*>(arg);
-    // 静态标志位，确保禁用警告只报告一次
-    static bool di_disabled_warned = false;
-    static bool do_disabled_warned = false;
-
+    
     RCLCPP_INFO(node->get_logger(), "IO监控线程开始运行");
     
 #if !ENABLE_DI_MODULE
+    // 静态标志位，确保禁用警告只报告一次
+    static bool di_disabled_warned = false;
     if (!di_disabled_warned) {
         node->print_warning("DI模块已禁用");
         di_disabled_warned = true;
@@ -1050,6 +1025,8 @@ void* io_monitor_thread(void* arg) {
 #endif
     
 #if !ENABLE_DO_MODULE
+    // 静态标志位，确保禁用警告只报告一次
+    static bool do_disabled_warned = false;
     if (!do_disabled_warned) {
         node->print_warning("DO模块已禁用");
         do_disabled_warned = true;
@@ -1103,15 +1080,6 @@ void EthercatNode::initialize_layer_processor() {
         print_error("未找到axis5，使用默认索引0");
         axis5_index = 0; // 如果找不到，可能需要调整这个默认值
     }
-    // // 查找axis5的索引
-    // size_t axis5_index = 0;
-    // for (size_t i = 0; i < servo_axes_.size(); ++i) {
-    //     if (servo_axes_[i]->get_name() == "axis5") {
-    //         axis5_index = i;
-    //         RCLCPP_INFO(this->get_logger(), "找到axis5，索引位置: %zu", axis5_index);
-    //         break;
-    //     }
-    // }
     
     // 初始化处理器
     layer_processor_->initialize(axis5_index);
@@ -1275,42 +1243,6 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
         print_error("速度值转换失败: " + speed_str + ", 错误: " + e.what());
         return false;
     }
-}
-
-void EthercatNode::handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg) {
-    if (node_shutting_down_.load() || !rclcpp::ok()) {
-        return;
-    }
-    
-    uint8_t target_layer = msg->data;
-    RCLCPP_INFO(this->get_logger(), "收到入库启动命令，目标层: %d", target_layer);
-    
-    // 这里可以添加直接处理逻辑，或者通过Python节点处理
-}
-
-void EthercatNode::handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg) {
-    if (node_shutting_down_.load() || !rclcpp::ok()) {
-        return;
-    }
-    
-    RCLCPP_INFO(this->get_logger(), "收到入库停止命令");
-}
-
-void EthercatNode::handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg) {
-    if (node_shutting_down_.load() || !rclcpp::ok()) {
-        return;
-    }
-    
-    uint8_t source_layer = msg->data;
-    RCLCPP_INFO(this->get_logger(), "收到出库启动命令，源层: %d", source_layer);
-}
-
-void EthercatNode::handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg) {
-    if (node_shutting_down_.load() || !rclcpp::ok()) {
-        return;
-    }
-    
-    RCLCPP_INFO(this->get_logger(), "收到出库停止命令");
 }
 
 /* ---------------------------------------板宽度调整------------------------------------------------ */
@@ -1565,20 +1497,6 @@ double EthercatNode::calculate_displacement_from_width(double board_width_cm) {
     return displacement_mm;
 }
 
-// double EthercatNode::calculate_width_from_displacement(double displacement_mm) {
-//     // 反向计算：从位移计算板宽
-//     // 电机转数 = 位移 / 丝杠导程
-//     // 输出转数 = 电机转数 / 减速比
-//     // 板宽变化 = 输出转数 × 丝杠导程
-    
-//     double motor_revolutions = displacement_mm / screw_lead_;
-//     double output_revolutions = motor_revolutions / gear_ratio_;
-//     double width_change_mm = output_revolutions * screw_lead_;
-//     double width_change_cm = width_change_mm / 10.0;
-    
-//     return current_board_width_ + width_change_cm;
-// }
-
 // +++ 新增：根据实际位置校正板宽（启动后执行一次）+++
 void EthercatNode::calibrate_board_width_from_position() {
     // 检查轴是否已初始化
@@ -1682,7 +1600,6 @@ void EthercatNode::execute_board_width_adjustment() {
                target_board_width_, displacement_mm);
     
     // 使用现有的位移命令接口控制电机
-    // handle_axis_command(axis4_index, displacement_mm);
     double absolute_displacement_mm = (target_board_width_ - 15.0) * 10.0; // 15.0为板宽零点，无偏移
     handle_axis_command(axis4_index, absolute_displacement_mm);
     

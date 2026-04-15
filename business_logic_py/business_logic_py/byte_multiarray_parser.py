@@ -19,6 +19,8 @@ class CommandType(Enum):
     WRITE_IO = 0x0115             # 写IO /do_control
     CLEAR_SYSTEM_FAULT = 0x0117   # 告警和错误清除 /fault_code
     CLEAR_AXIS_FAULT = 0x011B     # 清除轴故障 /control_command
+    NOTIFY_RELEASE = 0x011C       # 通知放行（PC->PLC）
+    RELEASE_RESULT = 0x011D       # 放行结果（PLC->PC）
 
     # 原有的指令码定义（不在图片中的）
     SYSTEM_CONTROL = 0x01
@@ -844,6 +846,8 @@ class ByteMultiArrayParser(Node):
                 self.process_clear_system_fault(payload)
             elif command_code == CommandType.CLEAR_AXIS_FAULT.value:  # 清除轴故障
                 self.process_clear_axis_fault(payload)
+            elif command_code == CommandType.NOTIFY_RELEASE.value:  # 通知放行
+                self.process_notify_release(payload)
             # 原有的指令码处理
             elif command_code == CommandType.SYSTEM_CONTROL.value:
                 self.process_system_control(payload)
@@ -862,62 +866,58 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'消息解析错误: {e}')
 
     def process_start_operation(self, payload):
-        """处理开始作业命令 (0x0105) - /control_command -> start_auto，并解析宽度信息"""
-        # 0. 首先发布开始作业信号（启动产品到位发布周期）
+        """处理开始作业命令 (0x0105) - /control_command -> start_auto
+        
+        统一格式：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        """
+        # 检查负载长度：至少需要5字节
+        if len(payload) < 5:
+            self.get_logger().warn(f'开始作业命令负载长度不足: {len(payload)}字节，需要至少5字节')
+            return
+        
+        # 解析产品宽度（前2字节，小端序）
+        width_low = payload[0]
+        width_high = payload[1]
+        width_integer = (width_high << 8) | width_low
+        actual_width_cm = width_integer * 0.1  # 除以10得到实际宽度（厘米）
+        
+        # 解析库位编号（第3-4字节，小端序）
+        layer_low = payload[2]
+        layer_high = payload[3]
+        layer_num = (layer_high << 8) | layer_low
+        
+        # 解析出库区域（第5字节）
+        outbound_area = payload[4]
+        
+        # 0. 发布开始作业信号（启动产品到位发布周期）
         start_signal = Bool()
         start_signal.data = True
         self.start_operation_signal_pub.publish(start_signal)
-        self.get_logger().info('发布开始作业信号(0x0105)，启动产品到位发布周期')
         
         # 1. 发布开始自动模式命令
         command_str = "start_auto"
         msg = String()
         msg.data = command_str
         self.control_pub.publish(msg)
-        self.get_logger().info('发布开始作业命令: 进入自动模式')
-
-        # 2. 解析并发布宽度信息（从第3和第4字节提取，放大10倍的小端序整数）
-        if len(payload) >= 2:
-            # 提取第3和第4字节（索引2和3）作为宽度数据
-            # 消息格式：[0x05, 0x01, width_low, width_high, ...]
-            width_low = payload[0]  # 第3字节（低位）
-            width_high = payload[1]  # 第4字节（高位）
-            
-            # 小端序转换为整数（16位）
-            width_integer = (width_high << 8) | width_low
-            
-            # 除以10.0得到实际宽度值（单位：厘米）
-            actual_width_cm = width_integer * 0.1
-
-            self.get_logger().info(f'解析到宽度信息: 原始值={width_integer}, 实际值={actual_width_cm}cm')
-
-            # ========== 关键修复：等待轴自动模式就绪后再下发板宽命令 ==========
-            # 缓存板宽值，等待axis3和axis4都进入自动模式后再下发
-            
-            # 1. 先重置板宽完成状态并标记等待
-            self.axis4_width_completed = False
-            self.axis3_width_completed = False
-            self.axis4_width_adjusting = False
-            self.axis3_width_adjusting = False
-            self.pending_start_result = True
-            self.start_result_wait_start_time = time.time()
-            
-            # 2. 缓存板宽值，等待轴就绪
-            self.pending_board_width = actual_width_cm
-            self.auto_mode_initializing = True
-            self.auto_mode_init_start_time = time.time()
-            self.board_width_axes_ready = {'axis3': False, 'axis4': False}
-            
-            self.get_logger().info(f'板宽命令已缓存({actual_width_cm}cm)，等待axis3和axis4进入自动模式后下发...')
-            
-            # 3. 板宽命令下发由axis_states_callback处理
-            # 当检测到axis3和axis4都进入AUTO_MODE状态时，自动触发板宽下发
-            # 注意：如果轴已经在AUTO_MODE，需要等待下一次axis_states消息（约10ms内）
-            
-        else:
-            self.get_logger().warn('开始作业命令负载长度不足，需要至少4字节，仅启动自动模式。')
-            # 没有板宽调整，直接发布0x0106
-            self.publish_start_result()
+        
+        # 2. 缓存板宽值，等待轴就绪后下发
+        self.axis4_width_completed = False
+        self.axis3_width_completed = False
+        self.axis4_width_adjusting = False
+        self.axis3_width_adjusting = False
+        self.pending_start_result = True
+        self.start_result_wait_start_time = time.time()
+        
+        self.pending_board_width = actual_width_cm
+        self.auto_mode_initializing = True
+        self.auto_mode_init_start_time = time.time()
+        self.board_width_axes_ready = {'axis3': False, 'axis4': False}
+        
+        # 记录详细信息
+        self.get_logger().info(
+            f'开始作业命令(105): 产品宽度={actual_width_cm}cm, '
+            f'库位={layer_num}, 出库区域={outbound_area}'
+        )
 
     def publish_start_result(self, extra_fault_code=None):
         """发布开始结果响应 (命令码0x0106)，根据/fault_code反馈决定异常码
@@ -1054,40 +1054,36 @@ class ByteMultiArrayParser(Node):
         self.last_io_state = current_io_state
 
     def process_notify_storage(self, payload):
-        """处理通知存放命令 (0x0101) - /warehouse_start"""
-        # 检查负载长度：至少需要2字节（层高）
-        if len(payload) < 2:
-            self.get_logger().warn('通知存放命令负载长度不足')
+        """处理通知存放命令 (0x0101) - /warehouse_start
+        
+        统一格式：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        """
+        # 检查负载长度：至少需要5字节
+        if len(payload) < 5:
+            self.get_logger().warn(f'通知存放命令负载长度不足: {len(payload)}字节，需要至少5字节')
             return
         
-        # 解析层高（小端序）：最后2个字节
-        # 如果payload长度大于2，取最后2个字节；否则取全部
-        if len(payload) >= 2:
-            # 取最后2个字节作为层高
-            layer_low = payload[-2]  # 层高低位字节
-            layer_high = payload[-1]  # 层高高位字节
-            original_layer = (layer_high << 8) | layer_low  # 小端序组合
-        else:
-            # 如果只有2个字节，直接使用
-            layer_low = payload[0]
-            layer_high = payload[1]
-            original_layer = (layer_high << 8) | layer_low
+        # 解析产品宽度（前2字节，小端序）
+        width_low = payload[0]
+        width_high = payload[1]
+        product_width = (width_high << 8) | width_low
+        
+        # 解析库位编号（第3-4字节，小端序）
+        layer_low = payload[2]
+        layer_high = payload[3]
+        original_layer = (layer_high << 8) | layer_low
+        
+        # 解析出库区域（第5字节）
+        outbound_area = payload[4]
         
         # 层号映射：1-41 映射到 -15 到 28
-        # 映射规律：
-        # 1-15 -> -15 到 -1
-        # 16-41 -> 3 到 28
         if 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
         elif 16 <= original_layer <= 41:
             mapped_layer = original_layer - 13
         else:
-            # 如果层号超出范围，记录警告并尝试默认映射
-            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}，尝试使用默认映射')
-            if original_layer <= 15:
-                mapped_layer = original_layer - 16
-            else:
-                mapped_layer = original_layer - 13
+            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')
+            mapped_layer = original_layer - 13
         
         # 发布到/warehouse_start话题
         msg = Int8()
@@ -1095,53 +1091,47 @@ class ByteMultiArrayParser(Node):
         self.warehouse_start_pub.publish(msg)   
             
         # 记录详细信息
-        self.get_logger().info(f'发布仓库启动命令: 原始层{original_layer} -> 映射层{mapped_layer} (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
-        
-        # 如果有额外的数据（组号和IO状态），记录但不处理
-        if len(payload) > 2:
-            extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
-            self.get_logger().info(f'忽略额外数据: {extra_data}')
+        self.get_logger().info(
+            f'入库命令(101): 产品宽度={product_width}, '
+            f'库位={original_layer}->{mapped_layer}, '
+            f'出库区域={outbound_area}'
+        )
         
         # 追踪命令：标记有待响应的101命令
         self.pending_command = 0x0101
         self.pending_response_sent = False
-        self.get_logger().debug('标记待响应命令: 0x0101（入库）')
             
     def process_notify_retrieval(self, payload):
-        """处理通知取出命令 (0x0103) - /outbound_start，包含层号映射（1-41 映射到 -15 到 28）"""
-        # 检查负载长度：至少需要2字节（层高）
-        if len(payload) < 4:
-            self.get_logger().warn('通知取出命令负载长度不足，需要至少4字节')
+        """处理通知取出命令 (0x0103) - /outbound_start
+        
+        统一格式：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        """
+        # 检查负载长度：至少需要5字节
+        if len(payload) < 5:
+            self.get_logger().warn(f'通知取出命令负载长度不足: {len(payload)}字节，需要至少5字节')
             return
         
-        # 完整格式：[组号低位, 组号高位, IO状态低位, IO状态高位, 层高低位, 层高高位]
-        # 我们只关心最后2个字节（层高）
-        if len(payload) >= 4:
-            # 取最后2个字节作为层高
-            layer_low = payload[2]  # 第3个字节是层高低位
-            layer_high = payload[3]  # 第4个字节是层高高位
-        else:
-            # 如果只有2个字节，直接使用（简化格式）
-            layer_low = payload[0]
-            layer_high = payload[1]
+        # 解析产品宽度（前2字节，小端序）
+        width_low = payload[0]
+        width_high = payload[1]
+        product_width = (width_high << 8) | width_low
         
-        original_layer = (layer_high << 8) | layer_low  # 小端序组合
+        # 解析库位编号（第3-4字节，小端序）
+        layer_low = payload[2]
+        layer_high = payload[3]
+        original_layer = (layer_high << 8) | layer_low
+        
+        # 解析出库区域（第5字节）
+        outbound_area = payload[4]
         
         # 层号映射：1-41 映射到 -15 到 28
-        # 映射规律：
-        # 1-15 -> -15 到 -1
-        # 16-41 -> 3 到 28
         if 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
         elif 16 <= original_layer <= 41:
             mapped_layer = original_layer - 13
         else:
-            # 如果层号超出范围，记录警告并尝试默认映射
-            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}，尝试使用默认映射')
-            if original_layer <= 15:
-                mapped_layer = original_layer - 16
-            else:
-                mapped_layer = original_layer - 13
+            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')
+            mapped_layer = original_layer - 13
         
         # 发布到/outbound_start话题
         msg = Int8()
@@ -1149,26 +1139,56 @@ class ByteMultiArrayParser(Node):
         self.outbound_start_pub.publish(msg)
         
         # 记录详细信息
-        self.get_logger().info(f'发布出库启动命令: 原始层{original_layer} -> 映射层{mapped_layer} (字节序列: 0x{layer_low:02X} 0x{layer_high:02X})')
-        
-        # 如果有额外的数据（组号和IO状态），记录但不处理
-        if len(payload) > 2:
-            extra_data = payload[:-2]  # 除了最后2个字节外的所有数据
-            self.get_logger().info(f'忽略额外数据: {extra_data}')
+        self.get_logger().info(
+            f'出库命令(103): 产品宽度={product_width}, '
+            f'库位={original_layer}->{mapped_layer}, '
+            f'出库区域={outbound_area}'
+        )
 
     def process_end_operation(self, payload):
-        """处理结束作业命令 (0x0107) - /warehouse_stop /outbound_stop"""
-        # 根据表格：出入库同时停止（不管数据）
+        """处理结束作业命令 (0x0107) - /warehouse_stop /outbound_stop
+        
+        统一格式：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        """
+        # 检查负载长度：至少需要5字节
+        if len(payload) < 5:
+            self.get_logger().warn(f'结束作业命令负载长度不足: {len(payload)}字节，需要至少5字节')
+            return
+        
+        # 解析产品宽度（前2字节，小端序）
+        width_low = payload[0]
+        width_high = payload[1]
+        product_width = (width_high << 8) | width_low
+        
+        # 解析库位编号（第3-4字节，小端序）
+        layer_low = payload[2]
+        layer_high = payload[3]
+        layer_num = (layer_high << 8) | layer_low
+        
+        # 解析出库区域（第5字节）
+        outbound_area = payload[4]
+        
+        # 根据表格：出入库同时停止
         msg = Empty()
         self.warehouse_stop_pub.publish(msg)
         self.outbound_stop_pub.publish(msg)
-        self.get_logger().info('发布仓库/出库停止命令')
-        # 结束作业命令，直接发布 /control_command -> stop命令
+        
+        # 发布停止命令
         command_str = "stop"
         control_msg = String()
         control_msg.data = command_str
         self.control_pub.publish(control_msg)
-        self.get_logger().info('发布开始作业命令: 进入自动模式')
+        
+        # 同步停止放行流程
+        if not hasattr(self, 'release_stop_pub'):
+            self.release_stop_pub = self.create_publisher(Empty, '/release_stop', 10)
+        self.release_stop_pub.publish(msg)
+        
+        # 记录详细信息
+        self.get_logger().info(
+            f'结束作业命令(107): 产品宽度={product_width}, '
+            f'库位={layer_num}, 出库区域={outbound_area}'
+        )
 
     def process_axis_jog(self, payload):
         """处理轴点动命令 (0x010D) - /jog_command"""
@@ -1315,6 +1335,97 @@ class ByteMultiArrayParser(Node):
         msg.data = command_str
         self.control_pub.publish(msg)
         self.get_logger().info('发布清除轴故障命令')
+
+    def process_notify_release(self, payload):
+        """处理通知放行命令 (0x011C) - PC->PLC
+
+        统一格式：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        需要回包：0x011D 放行结果(2字节异常码)
+        """
+        try:
+            # 检查负载长度：至少需要5字节
+            if len(payload) < 5:
+                self.get_logger().warn(f'通知放行命令负载长度不足: {len(payload)}字节，需要至少5字节')
+                self.publish_release_result(0x0001)  # 参数错误
+                return
+
+            # 解析产品宽度（前2字节，小端序）
+            width_low = payload[0]
+            width_high = payload[1]
+            width_value = (width_high << 8) | width_low
+
+            # 解析库位编号（第3-4字节，小端序）
+            layer_low = payload[2]
+            layer_high = payload[3]
+            layer_num = (layer_high << 8) | layer_low
+
+            # 解析出库区域（第5字节）
+            outbound_area = payload[4]
+
+            # 记录详细信息
+            self.get_logger().info(
+                f'放行命令(11C): 产品宽度={width_value}, '
+                f'库位={layer_num}, 出库区域={outbound_area}'
+            )
+            
+            # 发布放行启动到ROS2话题
+            from std_msgs.msg import Empty
+            release_start_msg = Empty()
+            
+            if not hasattr(self, 'release_start_pub'):
+                self.release_start_pub = self.create_publisher(Empty, '/release_start', 10)
+            
+            self.release_start_pub.publish(release_start_msg)
+            
+            # 存储待响应的放行命令
+            self.pending_release_command = True
+            
+            # 立即回包 0x011D 放行结果（正常完成，异常码=0）
+            self.publish_release_result(0x0000)
+            
+        except Exception as e:
+            self.get_logger().error(f'处理通知放行命令失败: {e}')
+            # 出错时回包，带通用错误码
+            self.publish_release_result(0xFFFF)
+
+    def publish_release_result(self, error_code):
+        """发布放行结果 (0x011D) - PLC->PC"""
+        try:
+            # 构建4字节响应消息 (小端序)
+            # 格式: [命令码低8位, 命令码高8位, 异常码低8位, 异常码高8位]
+            message_data = []
+            
+            # 命令码: 0x011D (小端序: 0x1D, 0x01)
+            message_data.append(bytes([0x1D]))  # 低字节
+            message_data.append(bytes([0x01]))  # 高字节
+            
+            # 异常码: 16位小端序
+            message_data.append(bytes([error_code & 0xFF]))        # 低字节
+            message_data.append(bytes([(error_code >> 8) & 0xFF])) # 高字节
+            
+            # 创建MultiArrayLayout
+            layout = MultiArrayLayout()
+            layout.data_offset = 0
+            layout.dim = [MultiArrayDimension()]
+            layout.dim[0].label = 'release_result'
+            layout.dim[0].size = len(message_data)
+            layout.dim[0].stride = 1
+            
+            # 创建并发布消息
+            msg = ByteMultiArray()
+            msg.layout = layout
+            msg.data = message_data
+            
+            self.integrated_pub.publish(msg)
+            
+            status = "正常" if error_code == 0 else f"异常(0x{error_code:04X})"
+            self.get_logger().info(f'发布放行结果(0x011D): {status}')
+            
+            # 重置待响应状态
+            self.pending_release_command = False
+            
+        except Exception as e:
+            self.get_logger().error(f'发布放行结果失败: {e}')
 
     # 原有的处理函数保持不变
     def process_system_control(self, payload):

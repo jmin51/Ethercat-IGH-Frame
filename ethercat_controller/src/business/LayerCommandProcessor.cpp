@@ -32,7 +32,6 @@ void LayerCommandProcessor::initialize_default_layer_heights() {
     for (int8_t layer = -20; layer <= 28; ++layer) {
         layer_heights_[layer] = (layer - 1) * 25.0;
     }
-    RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，共%ld层", layer_heights_.size());
     RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，范围: -20到+30，共%d层", static_cast<int>(layer_heights_.size()));
 }
 

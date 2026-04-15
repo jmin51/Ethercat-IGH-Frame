@@ -358,11 +358,15 @@ global_node->publish_pause_state_resume_request();
 ## SMEMA 协议通信架构
 
 ### 设计哲学
-- **标准兼容**：遵循IPC-SMEMA-9851标准，确保与上游设备互联互通
-- **下游视角**：本机作为下游设备，接收上游板子，输出MR信号
-- **状态机驱动**：IDLE → READY → RECEIVING → BOARD_ARRIVED → IDLE
-- **业务解耦**：SMEMA层仅负责握手，业务层决定何时就绪
-- **宏开关控制**：通过宏开关控制是否启用SMEMA，方便灵活配置
+- **标准兼容**：遵循IPC-SMEMA-9851标准，确保上下游设备互联互通
+- **中游视角**：本机作为中游设备，双向握手（上游接收+下游发送）
+- **双状态机并行**：上游握手状态机 + 下游握手状态机独立运行
+- **产品到位驱动**：`product_in_position`信号控制握手方向
+  - `false`（无板）→ 输出MR=ON（要板）→ 启动上游握手
+  - `true`（有板）→ 输出BA=ON（有板）→ 启动下游握手
+- **信号滤波**：50ms防抖，避免误触发
+- **超时保护**：30秒超时，防止死锁
+- **可屏蔽控制**：`smema_set_enabled()`控制协议启用/禁用
 
 ### 启用/禁用配置
 
@@ -379,101 +383,219 @@ self.ENABLE_SMEMA = True  # True:启用SMEMA协议通讯 False:禁用SMEMA协议
 当禁用时：
 - C++端：SMEMA处理器函数为空实现，不创建发布器/订阅器
 - Python端：不处理SMEMA逻辑，不创建相关发布器/订阅器
-- 硬件：DO814(MR)信号不会被控制，可作为普通DO使用
+- 硬件：DO814(MR)、DO815(BA)信号不会被控制，可作为普通DO使用
+
+**设计说明**：
+- SMEMA信号（UBA、DBR）始终存在于DI结构体中，即使 `ENABLE_SMEMA=0`
+- **资源浪费**：2字节内存 + 每次读取2次赋值操作（纳秒级）
+- **设计理由**：保持代码简洁，避免过度优化；启用时只需改一个宏开关
+- **符合原则**：实用主义铁律——不对抗假想敌，避免理论完美陷阱
+
+**禁用时的默认值**：
+- `di.smema_uba = false`（默认无板）
+- `di.smema_dbr = true`（默认要板，方便调试）
+- **设计理由**：禁用SMEMA时，无需下游设备连接，默认要板状态方便业务层调试
 
 ### 核心组件
 
 #### 1. SMEMA 处理器 (smema_handler)
-- **独立模块**：封装SMEMA握手协议所有逻辑
-- **信号防抖**：3周期防抖，避免误触发
+- **双向握手**：上游接收板子 + 下游发送板子
+- **信号防抖**：50ms防抖（符合SMEMA标准）
 - **超时保护**：30秒超时，防止死锁
-- **状态发布**：实时发布SMEMA状态到 `/smema/state`
+- **状态查询**：提供上下游状态独立查询接口
 
-#### 2. 信号定义
-| 信号 | 方向 | 寄存器 | 说明 |
-|------|------|--------|------|
-| UBA | 输入(DI) | M535 | 上游有板待发 |
-| UGB | 输入(DI) | M536 | 上游好板（可选） |
-| UBB | 输入(DI) | M537 | 上游坏板（可选） |
-| MR | 输出(DO) | M814 | 机器就绪 |
+#### 2. 信号定义（中游设备）
+| 信号 | 方向 | 寄存器 | Modbus索引 | 说明 | 握手方向 |
+|------|------|--------|-----------|------|----------|
+| UBA | 输入(DI) | M535 | di_values[23] | 上游有板待发 | 上游握手 |
+| MR | 输出(DO) | M814 | do_values[14] | 本机要板 | 上游握手 |
+| DBR | 输入(DI) | M538 | di_values[24] | 下游要板 | 下游握手 |
+| BA | 输出(DO) | M815 | do_values[15] | 本机有板待发 | 下游握手 |
 
-#### 3. 状态机流程
+**注意**：硬件上M536/M537端子不存在，M538紧接着M535。
+
+#### 3. 上游握手状态机（接收板子）
 ```
-IDLE: 等待业务层就绪（缓存区空闲）
-  ↓ 业务层就绪
-READY: 输出MR=ON，等待UBA
+UPSTREAM_IDLE: 本机无板 → 输出MR=ON
+  ↓ product_in_position=false
+UPSTREAM_READY: 等待上游UBA=ON
   ↓ UBA=ON
-RECEIVING: 板子传输中，保持MR=ON
+UPSTREAM_RECEIVING: 板子传输中，保持MR=ON
   ↓ UBA=OFF（传输完成）
-BOARD_ARRIVED: 板子到达，等待业务层确认
+UPSTREAM_BOARD_ARRIVED: 板子到达，等待业务层确认
   ↓ 业务层确认接收
-IDLE: 输出MR=OFF，循环
+UPSTREAM_IDLE: 输出MR=OFF，循环
 ```
 
-#### 4. 跨层协作
-| 层级 | 职责 | 通信话题 |
-|------|------|----------|
-| C++ SMEMA处理器 | 信号握手、状态机、硬件控制 | `/smema/state` (发布) |
-| Python业务逻辑 | 业务决策、缓存管理、流程控制 | `/smema/business_ready` (订阅) |
-| Python业务逻辑 | 板子处理完成确认 | `/smema/board_received` (订阅) |
+#### 4. 下游握手状态机（发送板子）
+```
+DOWNSTREAM_IDLE: 本机有板 → 输出BA=ON
+  ↓ product_in_position=true
+DOWNSTREAM_AVAILABLE: 等待下游DBR=ON
+  ↓ DBR=ON
+DOWNSTREAM_SENDING: 板子传输中，保持BA=ON
+  ↓ DBR=OFF（传输完成）
+DOWNSTREAM_SENT: 板子已发，等待业务层确认
+  ↓ 业务层确认发送
+DOWNSTREAM_IDLE: 输出BA=OFF，循环
+```
+
+#### 5. 跨层协作
+| 层级 | 职责 | 接口 |
+|------|------|------|
+| C++ SMEMA处理器 | 双向握手、状态机、硬件控制 | `smema_set_product_in_position()` |
+| C++ SMEMA处理器 | 上游板子到达通知 | `smema_can_receive_board()` |
+| C++ SMEMA处理器 | 下游板子发送通知 | `smema_can_send_board()` |
+| Python业务逻辑 | 产品到位信号驱动 | 调用C++接口设置`product_in_position` |
+| Python业务逻辑 | 板子接收确认 | 调用`smema_confirm_board_received()` |
+| Python业务逻辑 | 板子发送确认 | 调用`smema_confirm_board_sent()` |
 
 ### 关键工作流程
 
-#### 板子到达检测
+#### 上游接收板子流程
 ```
-上游设备输出UBA=ON → C++检测UBA上升沿 → 状态转到RECEIVING
-→ 上游传输板子 → 上游释放UBA=OFF → C++检测到UBA下降沿
-→ 状态转到BOARD_ARRIVED → 发布状态到Python → Python处理入库
-→ Python发布board_received → C++状态回到IDLE
+1. 业务层检测：本机无板（product_in_position=false）
+2. C++调用：smema_set_product_in_position(false)
+3. SMEMA处理器：输出MR=ON（要板）
+4. 上游设备：检测到MR=ON + 上游有板 → 输出UBA=ON
+5. SMEMA处理器：检测到UBA=ON → 状态转到RECEIVING
+6. 上游设备：传输板子 → 传输完成 → 输出UBA=OFF
+7. SMEMA处理器：检测到UBA=OFF → 状态转到BOARD_ARRIVED
+8. 业务层：检测到板子到达 → 调用smema_confirm_board_received()
+9. SMEMA处理器：输出MR=OFF → 状态回到IDLE
 ```
 
-#### 业务层就绪判定
+#### 下游发送板子流程
 ```
-Python检查：缓存区空闲(buffer_in=0, conveyor_in=0) 
-           && 入库流程空闲(warehouse_state=IDLE)
-           && 出库流程空闲(outbound_state=IDLE)
-→ 发布business_ready=True → C++设置MR=ON
+1. 业务层检测：本机有板（product_in_position=true）
+2. C++调用：smema_set_product_in_position(true)
+3. SMEMA处理器：输出BA=ON（有板）
+4. 下游设备：检测到BA=ON + 下游要板 → 输出DBR=ON
+5. SMEMA处理器：检测到DBR=ON → 状态转到SENDING
+6. 业务层：启动皮带发送板子
+7. 下游设备：接收板子 → 接收完成 → 输出DBR=OFF
+8. SMEMA处理器：检测到DBR=OFF → 状态转到SENT
+9. 业务层：确认发送完成 → 调用smema_confirm_board_sent()
+10. SMEMA处理器：输出BA=OFF → 状态回到IDLE
+```
+
+#### 产品到位信号驱动逻辑
+```python
+# Python业务层示例
+def update_product_position(self):
+    # 检测产品到位信号
+    product_in_position = (
+        self.di['buffer_in_position'] or 
+        self.di['conveyor_in_position']
+    )
+    
+    # 驱动SMEMA握手
+    self.set_smema_product_position(product_in_position)
+    
+    # 检查上游板子是否到达
+    if smema_can_receive_board():
+        self.handle_board_arrived()
+        smema_confirm_board_received()
+    
+    # 检查下游板子是否发送完成
+    if smema_can_send_board():
+        self.handle_board_sent()
+        smema_confirm_board_sent()
 ```
 
 ### 使用示例
 
 ```cpp
 // C++端：初始化SMEMA处理器
-init_smema_handler();
+SMEMA_Config config = {
+    .di_base_address = 535,
+    .do_base_address = 814,
+    .handshake_filter_ms = 50,
+    .receive_timeout_ms = 30000,
+    .send_timeout_ms = 30000,
+    .enable_ugb = false,
+    .enable_ubb = false
+};
+smema_init(&config);
 
 // 主循环每100ms调用
-process_smema_cycle();
+smema_process_cycle();
 
-// 发布SMEMA状态
-publish_smema_state();
+// 业务层设置产品到位信号
+smema_set_product_in_position(true);   // 本机有板
+smema_set_product_in_position(false);  // 本机无板
+
+// 检查上游板子是否到达
+if (smema_can_receive_board()) {
+    // 处理板子到达逻辑
+    smema_confirm_board_received();
+}
+
+// 检查下游板子是否发送完成
+if (smema_can_send_board()) {
+    // 处理板子发送完成逻辑
+    smema_confirm_board_sent();
+}
+
+// 查询状态
+Upstream_State upstream = smema_get_upstream_state();
+Downstream_State downstream = smema_get_downstream_state();
+SMEMA_Status status = smema_get_status();
+
+// 屏蔽控制
+smema_set_enabled(false);  // 禁用SMEMA协议
 ```
 
 ```python
-# Python端：业务层就绪检测
-business_ready = (
-    not di['buffer_in_position'] and 
-    not di['conveyor_in_position'] and
-    self.warehouse_state == WarehouseState.IDLE and
-    self.outbound_state == OutboundState.IDLE
-)
-ready_msg = Bool()
-ready_msg.data = business_ready
-self.smema_business_ready_pub.publish(ready_msg)
-
-# 板子处理完成后确认
-received_msg = Bool()
-received_msg.data = True
-self.smema_board_received_pub.publish(received_msg)
+# Python端：业务层驱动示例
+def main_loop(self):
+    # 检测产品到位信号
+    product_in_position = (
+        self.di['buffer_in_position'] or 
+        self.di['conveyor_in_position']
+    )
+    
+    # 驱动SMEMA握手
+    self.c_interface.set_product_in_position(product_in_position)
+    
+    # 检查上游板子是否到达
+    if self.c_interface.can_receive_board():
+        self.handle_board_arrived()
+        self.c_interface.confirm_board_received()
+    
+    # 检查下游板子是否发送完成
+    if self.c_interface.can_send_board():
+        self.handle_board_sent()
+        self.c_interface.confirm_board_sent()
 ```
 
 ### 集成点
 
-1. **io_interface.hpp/cpp**：添加SMEMA信号到DI/DO结构体
-2. **ethercat_node.cpp**：初始化SMEMA处理器，IO循环中调用process_smema_cycle()
-3. **business_logic_processor.py**：业务层就绪判断，板子接收确认
-4. **硬件接线**：DI模块M535接上游BA，DO模块M814接上游MR
+1. **io_interface.hpp/cpp**：添加SMEMA双向握手信号到DI/DO结构体
+   - DI：UBA(M535/di_values[23])、DBR(M538/di_values[24])
+   - DO：MR(M814/do_values[14])、BA(M815/do_values[15])
+   - **注意**：硬件上M536/M537端子不存在，M538紧接着M535
+2. **smema_handler.cpp/hpp**：双向握手状态机实现
+3. **ethercat_node.cpp**：
+   - 初始化SMEMA处理器，IO循环中调用`smema_process_cycle()`
+   - `/io_status`话题发布SMEMA信号：DI23/DI24/DO14/DO15
+4. **business_logic_processor.py**：业务层通过`smema_set_product_in_position()`驱动握手
+5. **硬件接线**：
+   - 上游握手：DI模块M535接上游BA，DO模块M814接上游MR
+   - 下游握手：DI模块M538接下游MR，DO模块M815接下游BA
+
+### 设计决策记录（SMEMA）
+
+9. **为何采用双向握手架构** (2026-04-14)：
+   - **需求**：设备作为中游设备，既要接收上游板子，又要发送板子给下游
+   - **设计**：双状态机并行运行，通过`product_in_position`信号驱动握手方向
+   - **优势**：
+     - 符合SMEMA标准：上游有板∧本机要板→接收；本机有板∧下游要板→发送
+     - 简化业务逻辑：业务层只需设置产品到位信号，握手逻辑自动处理
+     - 状态清晰：上下游状态独立，互不干扰
+   - **关键洞察**：产品到位信号是握手的唯一驱动源，消除了业务层与握手层的耦合
 
 ---
 
-*文档最后更新：2026-04-01*
-*对应架构版本：v2.5（SMEMA协议支持）*
+*文档最后更新：2026-04-14*
+*对应架构版本：v2.6（SMEMA双向握手支持）*

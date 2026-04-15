@@ -44,8 +44,6 @@ ec_sync_info_t leisai_slave_syncs[] = {
 // 添加缺失的常量定义
 const int HOMING_TOLERANCE = 100;
 const int HOMING_STEP = 50;
-// extern ec_domain_t *domain1;
-// extern uint8_t *domain1_pd;  // 统一使用domain1_pd
 
 LeisaiServoAxis::LeisaiServoAxis(const std::string& name, uint16_t position, AxisType axis_type, uint32_t product_code, double gear_ratio)
     : ServoAxisBase(name, position, axis_type, DriveBrand::LEISAI, product_code, gear_ratio), 
@@ -66,9 +64,6 @@ void LeisaiServoAxis::configure(ec_master_t* master) {
         RCLCPP_FATAL(rclcpp::get_logger("ethercat_controller"), 
                     "%s 轴PDO配置失败", axis_name_.c_str());
     }
-    
-    // // 静态变量，用于记录是否首次上电配置，判断是否为axis3并且复位按钮被按下
-    // static bool is_first_power_on = true;
     
     // 判断是否为axis3并且复位按钮被按下
     if (axis_name_ == "axis3" && g_reset_button_pressed.load()) {
@@ -111,20 +106,6 @@ void LeisaiServoAxis::register_pdo_entries(ec_pdo_entry_reg_t* reg_list, int& in
         off_error_code_ = ecrt_slave_config_reg_pdo_entry(
             sc_, 0x683F, 0, domain1, NULL);
     }
-    
-    // if (control_word_ < 0 || status_word_ < 0 || 
-    //     off_target_position_ < 0 || off_actual_position_ < 0) {
-    // if (control_word_ == nullptr) {
-    //     RCLCPP_FATAL(rclcpp::get_logger("ethercat_controller"),
-    //                 "%s 轴PDO注册失败", axis_name_.c_str());
-    // }
-    
-    // // 注册到列表
-    // reg_list[index++] = {slave_position_, 0x6040, 0, domain1, &control_word_};
-    // reg_list[index++] = {slave_position_, 0x6041, 0, domain1, &status_word_};
-    // reg_list[index++] = {slave_position_, 0x607A, 0, domain1, &off_target_position_};
-    // reg_list[index++] = {slave_position_, 0x6064, 0, domain1, &off_actual_position_};
-    // reg_list[index++] = {slave_position_, 0x603F, 0, domain1, &off_error_code_};
 }
 
 void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
@@ -512,31 +493,6 @@ void LeisaiServoAxis::handle_leisai_manual_operation(uint8_t* domain1_pd, int32_
     
     joint_position_ += step;
     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    // // 平滑移动到目标位置
-    // static int position_counter = 0;
-    // if (position_counter++ >= 10) {
-    //     position_counter = 0;
-        
-    //     const int32_t TOLERANCE = 100; //PULSE_Tolerance;
-    //     int32_t error = target_pulses_ - joint_position_;
-        
-    //     // 基于速度的匀速移动（单位：脉冲/周期）
-    //     if (abs(error) > TOLERANCE) {
-    //         const int32_t VELOCITY = 500; // 速度值，可根据需要调整
-    //         int32_t step = (error > 0) ? VELOCITY : -VELOCITY;
-            
-    //         // 如果剩余距离小于步长，直接到达目标
-    //         if (abs(error) <= abs(step)) {
-    //             joint_position_ = target_pulses_;
-    //         } else {
-    //             joint_position_ += step;
-    //         }
-    //     } else {
-    //         joint_position_ = target_pulses_;
-    //     }
-
-    //     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
-    // }
 }
 
 void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {

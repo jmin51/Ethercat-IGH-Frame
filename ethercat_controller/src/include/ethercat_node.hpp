@@ -95,7 +95,6 @@ private:
     bool parse_displacement_command(const std::string& command, 
                                     std::vector<std::pair<std::string, double>>& axis_commands);
 
-    void handle_control_command_msg(const std_msgs::msg::String::SharedPtr msg);
     void handle_axis_command(size_t axis_index, double newTargetPosition);
     double pulses_to_displacement(int32_t pulses, int32_t initial_pulses);
     void publish_io_status();  // 发布IO状态
@@ -119,12 +118,7 @@ private:
     
     // 添加点动指令订阅器
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr jog_command_sub_;
-    // 添加入库流程话题订阅器
-    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr warehouse_start_sub_;
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr warehouse_stop_sub_;
-    // 添加出库流程话题订阅器
-    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr outbound_start_sub_;
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr outbound_stop_sub_;
+
     // 添加IO控制话题
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr do_control_sub_;
     // 添加点动速度设置订阅器
@@ -176,13 +170,6 @@ private:
     void initialize_layer_processor();
 
     void handle_do_control(const std_msgs::msg::String::SharedPtr msg);
-    // 添加入库处理函数
-    void handle_warehouse_start(const std_msgs::msg::UInt8::SharedPtr msg);
-    void handle_warehouse_stop(const std_msgs::msg::Empty::SharedPtr msg);
-
-    // 添加出库处理函数
-    void handle_outbound_start(const std_msgs::msg::UInt8::SharedPtr msg);
-    void handle_outbound_stop(const std_msgs::msg::Empty::SharedPtr msg);
     
 // 在EthercatNode类定义中添加
 private:
@@ -222,7 +209,6 @@ private:
     void initialize_board_width_parameters();
     void handle_board_width_command(const std_msgs::msg::Float64::SharedPtr msg);
     double calculate_displacement_from_width(double board_width_cm);
-    // double calculate_width_from_displacement(double displacement_mm);
     bool validate_board_width(double width);
     void execute_board_width_adjustment();
     void publish_board_width_status(double current_width, double target_width, 

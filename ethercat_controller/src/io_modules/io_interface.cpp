@@ -318,10 +318,6 @@ DI_Interface read_all_di_signals() {
         try_reconnect_di();
         // 重连后仍无效，返回空数据
         if (!ctx_di) {
-            // static int init_error_count = 0;
-            // if (init_error_count++ % 1000 == 0) {
-            //     fprintf(stderr, "DI Modbus 未连接，重连失败 (已抑制%d次)\n", init_error_count);
-            // }
             return di;
         }
     }
@@ -341,9 +337,12 @@ DI_Interface read_all_di_signals() {
         }
         return di;
     } else {
-        // 成功时重置错误计数
-        static int error_count = 0;
-        error_count = 0;
+        // 成功时重置错误计数（用于失败计数抑制）
+        // 注意：此处error_count与失败分支的error_count是不同的静态变量
+        // 成功分支的error_count仅用于重置，不需要使用
+        static int success_error_count = 0;
+        success_error_count = 0;
+        (void)success_error_count;  // 避免未使用警告
     }
     
     // 映射到结构体
@@ -371,9 +370,14 @@ DI_Interface read_all_di_signals() {
     di.gear_cylinder2_extend = di_values[21];// M533
     di.gear_cylinder2_retract = di_values[22];// M534
     // SMEMA协议信号
+#if ENABLE_SMEMA
     di.smema_uba = di_values[23];            // M535 上游有板待发
-    di.smema_ugb = di_values[24];            // M536 上游好板
-    di.smema_ubb = di_values[25];            // M537 上游坏板
+    di.smema_dbr = di_values[24];            // M536 下游要板（硬件上M536/M537不存在）
+#else
+    // SMEMA禁用时提供默认值，方便调试
+    di.smema_uba = false;                    // 默认无板
+    di.smema_dbr = true;                     // 默认要板，方便调试
+#endif
     
     return di;
 }
@@ -469,7 +473,8 @@ int write_do_signals(DO_Interface do_signals) {
     do_values[11] = do_signals.gear_cylinder_extend;// M811
     do_values[12] = do_signals.belt_forward;        // M812
     do_values[13] = do_signals.belt_backward;       // M813 皮带反转控制
-    do_values[14] = do_signals.smema_mr;            // M814 SMEMA机器就绪
+    do_values[14] = do_signals.smema_mr;            // M814 SMEMA机器就绪/本机要板
+    do_values[15] = do_signals.smema_ba;            // M815 SMEMA本机有板待发
     
     // 写入设备
     int result = modbus_write_bits(ctx_do, 0, 16, do_values);
@@ -506,7 +511,7 @@ int write_single_do_signal(int do_address, bool state) {
     }
     
     // 地址有效性检查
-    if (do_address < 800 || do_address > 814) {
+    if (do_address < 800 || do_address > 815) {
         fprintf(stderr, "DO地址超出范围: %d\n", do_address);
         return -1;
     }
@@ -530,6 +535,7 @@ int write_single_do_signal(int do_address, bool state) {
             current_do_state.belt_forward = do_values[12];
             current_do_state.belt_backward = do_values[13];
             current_do_state.smema_mr = do_values[14];
+            current_do_state.smema_ba = do_values[15];
         }
     } else {
         // 写入失败，关闭连接触发重连
@@ -625,8 +631,8 @@ bool parse_do_control_command(const std::string& command, DOControlCommand& do_c
     // 验证地址有效性
     try {
         int address = std::stoi(addr_str);
-        if (address < 800 || address > 814) {
-            fprintf(stderr, "DO地址超出范围 (800-814): %d\n", address);
+        if (address < 800 || address > 815) {
+            fprintf(stderr, "DO地址超出范围 (800-815): %d\n", address);
             return false;
         }
         do_cmd.do_address = addr_str;
