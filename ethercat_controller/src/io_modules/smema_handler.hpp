@@ -89,14 +89,8 @@ void smema_set_product_in_position(bool in_position);
 // 检查是否可以接收新板子（上游握手就绪）
 bool smema_can_receive_board(void);
 
-// 确认板子已被业务层接收（上游握手完成）
-void smema_confirm_board_received(void);
-
 // 检查是否可以发送板子（下游握手就绪）
 bool smema_can_send_board(void);
-
-// 确认板子已被业务层发送（下游握手完成）
-void smema_confirm_board_sent(void);
 
 // ==================== 手动控制（调试用） ====================
 void smema_set_mr_manual(bool state);

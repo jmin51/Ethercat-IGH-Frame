@@ -2,7 +2,8 @@
 """
 ROS2 ByteMultiArray 发布脚本 - 支持多种指令
 支持入库指令（0x0101）、出库指令（0x0103）、结束作业指令（0x0107）、
-轴点动指令（0x010D）、IO控制指令（0x0115）、清除系统故障（0x0117）和清除轴故障（0x011B）
+轴点动指令（0x010D）、IO控制指令（0x0115）、清除系统故障（0x0117）、
+清除轴故障（0x011B）、通知放行指令（0x011C）
 """
 
 import rclpy
@@ -16,12 +17,12 @@ def main():
     parser = argparse.ArgumentParser(description='发布ByteMultiArray消息')
     parser.add_argument('--command', type=str, required=True, 
                         choices=['start', 'warehouse', 'outbound', 'stop', 'jog', 'io', 
-                                'start_result', 'clear_system_fault', 'clear_axis_fault'], 
-                        help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制) 或 start_result(开始结果) 或 clear_system_fault(清除系统故障) 或 clear_axis_fault(清除轴故障)')
+                                'start_result', 'clear_system_fault', 'clear_axis_fault', 'release'], 
+                        help='指令类型: start(开始作业) 或 warehouse(入库) 或 outbound(出库) 或 stop(结束作业) 或 jog(轴点动) 或 io(IO控制) 或 start_result(开始结果) 或 clear_system_fault(清除系统故障) 或 clear_axis_fault(清除轴故障) 或 release(通知放行)')
     parser.add_argument('--layer', type=int, default=1,
-                       help='层高（仅warehouse和outbound指令有效，默认1）')
+                       help='层高/库位号（warehouse、outbound、release指令有效，默认1）')
     parser.add_argument('--width', type=float, default=15.0,
-                    help='板宽值，单位厘米（仅start指令有效，默认15.0）')
+                    help='板宽值/产品宽度，单位厘米（start、release指令有效，默认15.0）')
     parser.add_argument('--axis', type=int, default=1,
                        help='轴号（仅jog指令有效，默认1）')
     parser.add_argument('--direction', type=int, choices=[0, 1, 2], default=1,
@@ -252,6 +253,38 @@ def main():
         layout.dim[0].stride = 1
         
         node.get_logger().info('构造清除轴故障指令: 指令码 0x011B')
+    
+    # +++ 新增：通知放行指令 (0x011C) +++
+    elif args.command == 'release':
+        # 通知放行指令 (0x011C)
+        # 格式: [指令码低位0x1C, 指令码高位0x01, 
+        #        产品宽度(4字节，小端序), 库位号(2字节，小端序)]
+        
+        # 1. 将产品宽度转换为4字节，小端序
+        width_integer = int(args.width)
+        width_bytes = width_integer.to_bytes(4, byteorder='little', signed=False)
+        
+        # 2. 将库位号转换为小端序的两个字节
+        layer_low = args.layer & 0xFF  # 低8位
+        layer_high = (args.layer >> 8) & 0xFF  # 高8位
+        
+        msg_data = [
+            bytes([0x1C]),  # 指令码低位
+            bytes([0x01]),  # 指令码高位 (0x011C = 通知放行指令)
+            bytes([width_bytes[0]]),  # 产品宽度字节0（最低位）
+            bytes([width_bytes[1]]),  # 产品宽度字节1
+            bytes([width_bytes[2]]),  # 产品宽度字节2
+            bytes([width_bytes[3]]),  # 产品宽度字节3（最高位）
+            bytes([layer_low]),       # 库位号低位
+            bytes([layer_high])       # 库位号高位
+        ]
+        
+        layout.dim = [MultiArrayDimension()]
+        layout.dim[0].label = 'release_command'
+        layout.dim[0].size = 8
+        layout.dim[0].stride = 1
+        
+        node.get_logger().info(f'构造通知放行指令: 宽度={args.width}, 库位号={args.layer}')
     
     # 创建ByteMultiArray消息
     msg = ByteMultiArray()

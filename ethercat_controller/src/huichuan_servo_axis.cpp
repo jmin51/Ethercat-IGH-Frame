@@ -516,7 +516,7 @@ int32_t HuichuanServoAxis::get_max_step() const {
     if (axis_name_ == "axis4") {
         max_step = 100;  // 板宽调整轴限速
     } else {
-        max_step = 80;  // 默认限速
+        max_step = 120;  // 默认限速
     }
     return max_step;
 }

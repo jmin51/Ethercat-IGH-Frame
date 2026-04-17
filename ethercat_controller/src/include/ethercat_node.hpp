@@ -78,8 +78,6 @@ public:
     void init_smema_handler();
     void process_smema_cycle();
     void publish_smema_state();
-    void handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg);
-    void handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg);
 
     // 故障上报接口（供轴状态机调用）
     void report_axis_fault(const std::string& axis_name, uint16_t fault_code, const std::string& description);
@@ -249,9 +247,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr pause_state_report_sub_;
     
     // +++ SMEMA协议相关成员 +++
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr smema_state_pub_;       // SMEMA状态发布
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr smema_business_ready_sub_;  // 业务层就绪订阅
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr smema_board_received_sub_;  // 板子接收确认订阅
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr smema_product_position_sub_; // 产品到位信号订阅
     bool smema_initialized_;
 };
 

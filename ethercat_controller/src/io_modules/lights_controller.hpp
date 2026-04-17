@@ -13,6 +13,7 @@
 // ============================================================================
 enum TricolorLightState {
     LIGHT_OFF,          // 全部熄灭
+    LIGHT_RED_ON,       // 红灯常亮（暂停/急停）
     LIGHT_YELLOW_BLINK, // 黄灯闪烁（复位中）
     LIGHT_GREEN_BLINK,  // 绿灯闪烁（就绪）
     LIGHT_GREEN_ON      // 绿灯常亮（运行中）

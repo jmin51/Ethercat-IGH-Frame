@@ -36,6 +36,7 @@ static TricolorLightState g_tricolor_state = LIGHT_OFF;
 // 闪烁控制
 static auto g_last_toggle_time = std::chrono::steady_clock::now();
 static bool g_blink_state = false;
+static bool g_last_red_do = false;
 static bool g_last_yellow_do = false;
 static bool g_last_green_do = false;
 static bool g_last_buzzer_do = false;
@@ -83,6 +84,7 @@ void init_lights_controller() {
     write_single_do_signal(801, false);  // 复位灯
     write_single_do_signal(802, false);  // 暂停灯
     write_single_do_signal(803, false);  // 蜂鸣器
+    write_single_do_signal(804, false);  // 红灯
     write_single_do_signal(805, false);  // 黄灯
     write_single_do_signal(806, false);  // 绿灯
     
@@ -149,24 +151,19 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
         }
     }
     
-    // 暂停按钮：点亮暂停灯，熄灭其他灯，停止三色灯和蜂鸣器
+    // 暂停按钮：点亮暂停灯，熄灭其他灯，红灯亮
     if (pause_rising) {
         g_pause_light_on = true;
         g_start_light_on = false;
         g_reset_light_on = false;
-        g_tricolor_state = LIGHT_OFF;
+        g_tricolor_state = LIGHT_RED_ON;  // 红灯亮
         // 注意：短按暂停不设置 g_pause_button_pressed，避免实时线程退出
         // g_pause_button_pressed 仅用于长按暂停/急停导致完全停止的场景
         g_short_pause_requested.store(true);  // 设置短按暂停请求标志
         // 注意：g_system_running 由 pause_motors_only() 设置，不在此处设置
         // 取消复位计时（如果正在进行）
         g_reset_button_held = false;
-        // 确保蜂鸣器停止
-        if (g_last_buzzer_do) {
-            write_single_do_signal(803, false);
-            g_last_buzzer_do = false;
-        }
-        printf("[Lights] 暂停按钮触发，系统停止，暂停灯亮起\n");
+        printf("[Lights] 暂停按钮触发，系统停止，暂停灯亮起，红灯亮\n");
     }
 
     // ============================================================================
@@ -180,23 +177,18 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
         g_pause_light_on = true;
         g_start_light_on = false;
         g_reset_light_on = false;
-        g_tricolor_state = LIGHT_OFF;
+        g_tricolor_state = LIGHT_RED_ON;  // 红灯亮
         g_pause_button_pressed.store(true);     // 急停触发暂停标志
         // 只在边沿触发时设置请求标志，避免main.cpp重复打印
         if (emergency_rising) {
             g_full_shutdown_requested.store(true); // 触发完整关闭流程
-            printf("[Lights] 急停激活（低电平有效，M516=%d, M517=%d），系统进入安全关闭流程\n",
+            printf("[Lights] 急停激活（低电平有效，M516=%d, M517=%d），系统进入安全关闭流程，红灯亮\n",
                    emergency_stop1, emergency_stop2);
         }
         // 急停优先级高于短按暂停，清除短按暂停状态，强制走完整重启流程
         g_short_pause_active.store(false);
         // 取消复位计时（如果正在进行）
         g_reset_button_held = false;
-        // 确保蜂鸣器停止
-        if (g_last_buzzer_do) {
-            write_single_do_signal(803, false);
-            g_last_buzzer_do = false;
-        }
     }
     last_emergency_active = any_emergency_active;
     
@@ -225,28 +217,39 @@ void update_tricolor_lights() {
     }
     
     // 根据当前状态控制三色灯和蜂鸣器
+    bool red_should_on = false;
     bool yellow_should_on = false;
     bool green_should_on = false;
     bool buzzer_should_on = false;  // 蜂鸣器
     
     switch (g_tricolor_state) {
+        case LIGHT_RED_ON:
+            red_should_on = true;      // 红灯常亮
+            yellow_should_on = false;
+            green_should_on = false;
+            buzzer_should_on = false;  // 红灯时不响蜂鸣器
+            break;
         case LIGHT_YELLOW_BLINK:
+            red_should_on = false;
             yellow_should_on = g_blink_state;
             green_should_on = false;
             buzzer_should_on = true;  // 黄灯闪烁时蜂鸣器响
             break;
         case LIGHT_GREEN_BLINK:
+            red_should_on = false;
             yellow_should_on = false;
             green_should_on = g_blink_state;
-            buzzer_should_on = false;  // 绿灯闪烁时蜂鸣器停
+            buzzer_should_on = true;  // 绿灯闪烁时蜂鸣器响
             break;
         case LIGHT_GREEN_ON:
+            red_should_on = false;
             yellow_should_on = false;
             green_should_on = true;  // 绿灯常亮
             buzzer_should_on = false;
             break;
         case LIGHT_OFF:
         default:
+            red_should_on = false;
             yellow_should_on = false;
             green_should_on = false;
             buzzer_should_on = false;
@@ -254,6 +257,10 @@ void update_tricolor_lights() {
     }
     
     // 只在状态变化时写入DO（减少Modbus通信）
+    if (red_should_on != g_last_red_do) {
+        write_single_do_signal(804, red_should_on);      // 红灯 M804
+        g_last_red_do = red_should_on;
+    }
     if (yellow_should_on != g_last_yellow_do) {
         write_single_do_signal(805, yellow_should_on);  // 黄灯
         g_last_yellow_do = yellow_should_on;
@@ -294,6 +301,7 @@ void notify_system_ready() {
         }
         printf("[Lights] 系统就绪，黄灯停闪，绿灯闪烁，蜂鸣器停\n");
     }
+    // 注意：红灯状态只能通过启动按钮退出，不在此处自动切换
 }
 
 void notify_all_axes_ready() {

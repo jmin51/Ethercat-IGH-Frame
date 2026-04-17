@@ -108,6 +108,7 @@ class ByteMultiArrayParser(Node):
         self.warehouse_stop_pub = self.create_publisher(Empty, '/warehouse_stop', 10)
         self.outbound_start_pub = self.create_publisher(Int8, '/outbound_start', 10)
         self.outbound_stop_pub = self.create_publisher(Empty, '/outbound_stop', 10)
+        self.outbound_area_pub = self.create_publisher(Int8, '/outbound_area', 10)  # 新增：出库区域发布器
         self.do_control_pub = self.create_publisher(String, '/do_control', 10)
         self.board_width_pub = self.create_publisher(Float64, '/board_width_command', 10)
         self.axis3_width_pub = self.create_publisher(Float64, '/axis3_width_command', 10)
@@ -1137,6 +1138,11 @@ class ByteMultiArrayParser(Node):
         msg = Int8()
         msg.data = mapped_layer
         self.outbound_start_pub.publish(msg)
+        
+        # 发布出库区域到/outbound_area话题
+        area_msg = Int8()
+        area_msg.data = outbound_area
+        self.outbound_area_pub.publish(area_msg)
         
         # 记录详细信息
         self.get_logger().info(

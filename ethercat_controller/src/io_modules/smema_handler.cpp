@@ -24,9 +24,9 @@ static struct {
     // 产品到位信号（业务层驱动）
     bool product_in_position;            // true=本机有板，false=本机无板
     
-    // 业务层确认标志
-    bool board_received_confirmed;       // 业务层已确认接收
-    bool board_sent_confirmed;           // 业务层已确认发送
+    // 业务层确认标志（已废弃，改用product_in_position控制）
+    // bool board_received_confirmed;
+    // bool board_sent_confirmed;
     
     // 手动模式
     bool manual_mode_mr;                 // 手动控制MR
@@ -192,12 +192,12 @@ static void handle_upstream_ready(void) {
         transition_upstream_state(UPSTREAM_IDLE);
     }
     
-    // 超时检测
-    if (is_upstream_timeout()) {
-        printf("[SMEMA上游] 警告：等待上游发板超时\n");
-        ctx.status.receive_timeout_count++;
-        transition_upstream_state(UPSTREAM_IDLE);
-    }
+    // // 超时检测
+    // if (is_upstream_timeout()) {
+    //     printf("[SMEMA上游] 警告：等待上游发板超时\n");
+    //     ctx.status.receive_timeout_count++;
+    //     transition_upstream_state(UPSTREAM_IDLE);
+    // }
 }
 
 // UPSTREAM_RECEIVING：板子传输中
@@ -213,7 +213,6 @@ static void handle_upstream_receiving(void) {
         // UBA从ON变为OFF，板子传输完成
         printf("[SMEMA上游] 检测到UBA=OFF，板子传输完成\n");
         ctx.status.receive_count++;
-        ctx.board_received_confirmed = false;
         transition_upstream_state(UPSTREAM_BOARD_ARRIVED);
     }
     
@@ -225,21 +224,21 @@ static void handle_upstream_receiving(void) {
     }
 }
 
-// UPSTREAM_BOARD_ARRIVED：等待业务层确认
+// UPSTREAM_BOARD_ARRIVED：等待产品到位
 static void handle_upstream_board_arrived(void) {
-    // 保持MR=ON直到业务层确认
+    // 保持MR=ON直到产品到位
     write_mr_signal(true);
     
-    // 检查业务层是否已确认接收
-    if (ctx.board_received_confirmed) {
-        printf("[SMEMA上游] 业务层已确认接收板子，返回IDLE\n");
+    // 检查产品是否到位（业务层通过product_in_position信号控制）
+    if (ctx.product_in_position) {
+        printf("[SMEMA上游] 产品已到位，返回IDLE\n");
         write_mr_signal(false);
         transition_upstream_state(UPSTREAM_IDLE);
     }
     
     // 超时检测（业务层处理太慢）
     if (is_upstream_timeout()) {
-        printf("[SMEMA上游] 警告：业务层处理超时，强制返回IDLE\n");
+        printf("[SMEMA上游] 警告：等待产品到位超时\n");
         ctx.status.receive_timeout_count++;
         write_mr_signal(false);
         transition_upstream_state(UPSTREAM_IDLE);
@@ -305,7 +304,6 @@ static void handle_downstream_sending(void) {
         // DBR从ON变为OFF，板子传输完成
         printf("[SMEMA下游] 检测到DBR=OFF，板子传输完成\n");
         ctx.status.send_count++;
-        ctx.board_sent_confirmed = false;
         transition_downstream_state(DOWNSTREAM_SENT);
     }
     
@@ -317,21 +315,21 @@ static void handle_downstream_sending(void) {
     }
 }
 
-// DOWNSTREAM_SENT：等待业务层确认
+// DOWNSTREAM_SENT：等待产品离开
 static void handle_downstream_sent(void) {
-    // 保持BA=ON直到业务层确认
+    // 保持BA=ON直到产品离开
     write_ba_signal(true);
     
-    // 检查业务层是否已确认发送
-    if (ctx.board_sent_confirmed) {
-        printf("[SMEMA下游] 业务层已确认发送板子，返回IDLE\n");
+    // 检查产品是否离开（业务层通过product_in_position信号控制）
+    if (!ctx.product_in_position) {
+        printf("[SMEMA下游] 产品已离开，返回IDLE\n");
         write_ba_signal(false);
         transition_downstream_state(DOWNSTREAM_IDLE);
     }
     
     // 超时检测（业务层处理太慢）
     if (is_downstream_timeout()) {
-        printf("[SMEMA下游] 警告：业务层处理超时，强制返回IDLE\n");
+        printf("[SMEMA下游] 警告：等待产品离开超时\n");
         ctx.status.send_timeout_count++;
         write_ba_signal(false);
         transition_downstream_state(DOWNSTREAM_IDLE);
@@ -370,8 +368,6 @@ void smema_init(SMEMA_Config* config) {
     
     // 初始化内部状态
     ctx.product_in_position = false;
-    ctx.board_received_confirmed = false;
-    ctx.board_sent_confirmed = false;
     ctx.manual_mode_mr = false;
     ctx.manual_mode_ba = false;
     ctx.enabled = true;
@@ -476,23 +472,11 @@ void smema_set_product_in_position(bool in_position) {
 }
 
 bool smema_can_receive_board(void) {
-    return (ctx.status.upstream_state == UPSTREAM_BOARD_ARRIVED) && 
-           !ctx.board_received_confirmed;
-}
-
-void smema_confirm_board_received(void) {
-    ctx.board_received_confirmed = true;
-    printf("[SMEMA上游] 业务层确认板子已接收\n");
+    return (ctx.status.upstream_state == UPSTREAM_BOARD_ARRIVED);
 }
 
 bool smema_can_send_board(void) {
-    return (ctx.status.downstream_state == DOWNSTREAM_SENT) && 
-           !ctx.board_sent_confirmed;
-}
-
-void smema_confirm_board_sent(void) {
-    ctx.board_sent_confirmed = true;
-    printf("[SMEMA下游] 业务层确认板子已发送\n");
+    return (ctx.status.downstream_state == DOWNSTREAM_SENT);
 }
 
 // ==================== 手动控制 ====================
@@ -518,8 +502,6 @@ void smema_reset(void) {
     ctx.status.dbr_active = false;
     ctx.manual_mode_mr = false;
     ctx.manual_mode_ba = false;
-    ctx.board_received_confirmed = false;
-    ctx.board_sent_confirmed = false;
     transition_upstream_state(UPSTREAM_IDLE);
     transition_downstream_state(DOWNSTREAM_IDLE);
     printf("[SMEMA] 状态机已复位\n");

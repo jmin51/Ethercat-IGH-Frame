@@ -31,6 +31,8 @@ class ControlCommander(Node):
         self.outbound_stop_pub = self.create_publisher(Empty, '/outbound_stop', 10)
         # 新增层控制发布器
         self.layer_pub = self.create_publisher(Int8, '/layer_command', 10)
+        # 新增放行命令发布器
+        self.release_pub = self.create_publisher(Empty, '/release_start', 10)
         
         # 设置非阻塞输入
         self.old_settings = termios.tcgetattr(sys.stdin)
@@ -179,7 +181,7 @@ class ControlCommander(Node):
             # 5. 仓库控制区块
             warehouse_block = (
                 "\n[仓库控制]" +
-                "  30:启动入库  31:停止入库  32:启动出库  33:停止出库\t"
+                "  30:启动入库(输入层号)  31:停止入库  32:启动出库(输入层号)  33:停止出库\t"
             )
             
             # 6. 层控制区块
@@ -188,13 +190,19 @@ class ControlCommander(Node):
                 "  34:移动到指定层（请输入层号: -20~30）\t"
             )
             
-            # 7. 其他控制区块
+            # 7. 放行控制区块
+            release_ctrl_block = (
+                "\t[放行控制]" +
+                "  35:发送放行命令\t"
+            )
+            
+            # 8. 其他控制区块
             other_ctrl_block = (
                 "\t[其他控制]" +
                 "  s:停止所有轴(含点动和位移)  r:复位所有IO  b:返回主菜单\t"
             )
             
-            # 8. 拼接最终菜单
+            # 9. 拼接最终菜单
             menu = (
                 "\n" + "=" * 50 + "\n" +
                 "自动模式 - 位移控制与IO控制\n" +
@@ -205,6 +213,7 @@ class ControlCommander(Node):
                 io_ctrl_block +
                 warehouse_block +
                 layer_block +
+                release_ctrl_block +
                 other_ctrl_block +
                 "=" * 50 + "\n" +
                 "请输入命令代码: "
@@ -287,12 +296,62 @@ class ControlCommander(Node):
             else:
                 self.print_auto_menu()
     
-    def send_warehouse_start(self):
-        """发送入库启动命令"""
+    def read_layer_input(self):
+        """读取用户输入的层号（-20~30），返回int或None"""
+        import termios
+        import tty
+        import sys
+        
+        # 临时恢复终端设置以读取整行输入
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        
+        try:
+            # 读取用户输入的层号
+            layer_input = ""
+            while True:
+                char = sys.stdin.read(1)
+                if char == '\n' or char == '\r':  # 回车结束输入
+                    break
+                elif char == '\x7f' or char == '\b':  # 退格键
+                    if layer_input:
+                        layer_input = layer_input[:-1]
+                        # 回显退格
+                        sys.stdout.write('\b \b')
+                        sys.stdout.flush()
+                else:
+                    layer_input += char
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
+            
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+            
+            if layer_input:
+                try:
+                    layer_num = int(layer_input)
+                    if -20 <= layer_num <= 30:
+                        return layer_num
+                    else:
+                        print("错误：层号 {} 超出范围（-20~30）".format(layer_num))
+                        return None
+                except ValueError:
+                    print("错误：'{}' 不是有效的整数".format(layer_input))
+                    return None
+            else:
+                print("取消操作")
+                return None
+        finally:
+            # 恢复终端设置
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            tty.setraw(sys.stdin.fileno())
+    
+    def send_warehouse_start(self, layer):
+        """发送入库启动命令，带层号参数"""
         msg = Int8()
-        msg.data = 24
+        msg.data = layer
         self.warehouse_start_pub.publish(msg)
-        print("启动入库")
+        print("启动入库，目标层: {}".format(layer))
     
     def send_warehouse_stop(self):
         """发送入库停止命令"""
@@ -300,12 +359,18 @@ class ControlCommander(Node):
         self.warehouse_stop_pub.publish(msg)
         print("停止入库")
     
-    def send_outbound_start(self):
-        """发送出库启动命令"""
+    def send_release_command(self):
+        """发送放行命令 - 触发放行流程，等待传感器信号"""
+        msg = Empty()
+        self.release_pub.publish(msg)
+        print("发送放行命令: 等待传感器信号确认")
+    
+    def send_outbound_start(self, layer):
+        """发送出库启动命令，带层号参数"""
         msg = Int8()
-        msg.data = 24
+        msg.data = layer
         self.outbound_start_pub.publish(msg)
-        print("启动出库")
+        print("启动出库，目标层: {}".format(layer))
     
     def send_outbound_stop(self):
         """发送出库停止命令"""
@@ -525,13 +590,21 @@ class ControlCommander(Node):
         
         # 仓库控制命令 (命令代码更新为30-33)
         elif key == '30':  # 启动入库
-            self.send_warehouse_start()
+            print("请输入入库目标层号（-20~30），按回车确认: ", end='', flush=True)
+            layer_num = self.read_layer_input()
+            if layer_num is not None:
+                self.send_warehouse_start(layer_num)
+            self.print_auto_menu()
         
         elif key == '31':  # 停止入库
             self.send_warehouse_stop()
         
         elif key == '32':  # 启动出库
-            self.send_outbound_start()
+            print("请输入出库目标层号（-20~30），按回车确认: ", end='', flush=True)
+            layer_num = self.read_layer_input()
+            if layer_num is not None:
+                self.send_outbound_start(layer_num)
+            self.print_auto_menu()
         
         elif key == '33':  # 停止出库
             self.send_outbound_stop()
@@ -587,6 +660,10 @@ class ControlCommander(Node):
             
             # 重新打印菜单
             self.print_auto_menu()
+        
+        # 放行控制命令 (新增命令35)
+        elif key == '35':  # 发送放行命令
+            self.send_release_command()
         
         else:
             print("未知命令: {}".format(key))

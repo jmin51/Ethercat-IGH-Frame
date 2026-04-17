@@ -172,19 +172,13 @@ void EthercatNode::initialize_node() {
             this->handle_pause_state_report(msg);
         });
     
-    // +++ SMEMA协议发布器和订阅器 +++
+    // +++ SMEMA协议订阅器 +++
 #if ENABLE_SMEMA
-    smema_state_pub_ = this->create_publisher<std_msgs::msg::String>(
-        "/smema/state", rclcpp::QoS(10).reliable());
-    smema_business_ready_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/smema/business_ready", rclcpp::QoS(10).reliable(),
+    // 订阅产品到位信号（业务层驱动）
+    smema_product_position_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/smema/product_in_position", rclcpp::QoS(10).reliable(),
         [this](const std_msgs::msg::Bool::SharedPtr msg) {
-            this->handle_smema_business_ready(msg);
-        });
-    smema_board_received_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/smema/board_received", rclcpp::QoS(10).reliable(),
-        [this](const std_msgs::msg::Bool::SharedPtr msg) {
-            this->handle_smema_board_received(msg);
+            smema_set_product_in_position(msg->data);
         });
 #endif
     smema_initialized_ = false;
@@ -1795,15 +1789,15 @@ void EthercatNode::handle_pause_state_report(const std_msgs::msg::String::Shared
 
 void EthercatNode::init_smema_handler() {
     SMEMA_Config config;
-    config.di_base_address = 535;  // M535-M537
-    config.do_base_address = 814;  // M814
-    config.timeout_ms = 30000;
-    config.enable_ugb = false;     // 可选信号
-    config.enable_ubb = false;     // 可选信号
+    config.di_base_address = 535;  // M535(UBA), M538(DBR)
+    config.do_base_address = 814;  // M814(MR), M815(BA)
+    config.handshake_filter_ms = 50;
+    config.receive_timeout_ms = 30000;
+    config.send_timeout_ms = 30000;
     
     smema_init(&config);
     smema_initialized_ = true;
-    RCLCPP_INFO(this->get_logger(), "SMEMA协议处理器初始化完成");
+    RCLCPP_INFO(this->get_logger(), "SMEMA协议处理器初始化完成（双向握手）");
 }
 
 void EthercatNode::process_smema_cycle() {
@@ -1814,43 +1808,11 @@ void EthercatNode::process_smema_cycle() {
     // 执行SMEMA状态机周期
     smema_process_cycle();
     
-    // 发布SMEMA状态
-    publish_smema_state();
+    // 不需要发布状态，Python层从IO状态中读取
 }
 
 void EthercatNode::publish_smema_state() {
-    if (!smema_state_pub_) {
-        return;
-    }
-    
-    SMEMA_State state = smema_get_state();
-    const char* state_str = smema_state_to_string(state);
-    
-    auto msg = std_msgs::msg::String();
-    msg.data = state_str;
-    smema_state_pub_->publish(msg);
-}
-
-void EthercatNode::handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg) {
-    if (!smema_initialized_) {
-        return;
-    }
-    
-    bool ready = msg->data;
-    smema_set_business_ready(ready);
-    
-    RCLCPP_DEBUG(this->get_logger(), "SMEMA业务层就绪状态: %s", ready ? "就绪" : "未就绪");
-}
-
-void EthercatNode::handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg) {
-    if (!smema_initialized_) {
-        return;
-    }
-    
-    if (msg->data) {
-        smema_confirm_board_received();
-        RCLCPP_INFO(this->get_logger(), "SMEMA: 业务层确认板子已接收");
-    }
+    // 不需要发布状态，Python层从IO状态中读取UBA/DBR/MR/BA信号
 }
 
 #else  // ENABLE_SMEMA
@@ -1866,16 +1828,6 @@ void EthercatNode::process_smema_cycle() {
 }
 
 void EthercatNode::publish_smema_state() {
-    // SMEMA禁用，空实现
-}
-
-void EthercatNode::handle_smema_business_ready(const std_msgs::msg::Bool::SharedPtr msg) {
-    (void)msg;
-    // SMEMA禁用，空实现
-}
-
-void EthercatNode::handle_smema_board_received(const std_msgs::msg::Bool::SharedPtr msg) {
-    (void)msg;
     // SMEMA禁用，空实现
 }
 

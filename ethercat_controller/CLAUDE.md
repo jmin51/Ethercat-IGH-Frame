@@ -409,10 +409,8 @@ self.ENABLE_SMEMA = True  # True:启用SMEMA协议通讯 False:禁用SMEMA协议
 |------|------|--------|-----------|------|----------|
 | UBA | 输入(DI) | M535 | di_values[23] | 上游有板待发 | 上游握手 |
 | MR | 输出(DO) | M814 | do_values[14] | 本机要板 | 上游握手 |
-| DBR | 输入(DI) | M538 | di_values[24] | 下游要板 | 下游握手 |
+| DBR | 输入(DI) | M536 | di_values[24] | 下游要板 | 下游握手 |
 | BA | 输出(DO) | M815 | do_values[15] | 本机有板待发 | 下游握手 |
-
-**注意**：硬件上M536/M537端子不存在，M538紧接着M535。
 
 #### 3. 上游握手状态机（接收板子）
 ```
@@ -446,9 +444,13 @@ DOWNSTREAM_IDLE: 输出BA=OFF，循环
 | C++ SMEMA处理器 | 双向握手、状态机、硬件控制 | `smema_set_product_in_position()` |
 | C++ SMEMA处理器 | 上游板子到达通知 | `smema_can_receive_board()` |
 | C++ SMEMA处理器 | 下游板子发送通知 | `smema_can_send_board()` |
-| Python业务逻辑 | 产品到位信号驱动 | 调用C++接口设置`product_in_position` |
-| Python业务逻辑 | 板子接收确认 | 调用`smema_confirm_board_received()` |
-| Python业务逻辑 | 板子发送确认 | 调用`smema_confirm_board_sent()` |
+| Python业务逻辑 | 产品到位信号驱动 | 发布到`/smema/product_in_position`话题 |
+| Python业务逻辑 | 状态查询 | 从`/io_status`话题读取UBA/DBR/MR/BA信号 |
+
+**设计原则**：
+- **单一信号驱动**：`product_in_position`信号控制所有握手逻辑
+- **简化设计**：删除冗余的确认信号，减少ROS2话题
+- **业务层控制**：通过设置`product_in_position`控制握手完成时机
 
 ### 关键工作流程
 
@@ -461,8 +463,8 @@ DOWNSTREAM_IDLE: 输出BA=OFF，循环
 5. SMEMA处理器：检测到UBA=ON → 状态转到RECEIVING
 6. 上游设备：传输板子 → 传输完成 → 输出UBA=OFF
 7. SMEMA处理器：检测到UBA=OFF → 状态转到BOARD_ARRIVED
-8. 业务层：检测到板子到达 → 调用smema_confirm_board_received()
-9. SMEMA处理器：输出MR=OFF → 状态回到IDLE
+8. 业务层：检测到板子到位 → 设置product_in_position=true
+9. SMEMA处理器：检测到product_in_position=true → 输出MR=OFF → 状态回到IDLE
 ```
 
 #### 下游发送板子流程
@@ -475,8 +477,8 @@ DOWNSTREAM_IDLE: 输出BA=OFF，循环
 6. 业务层：启动皮带发送板子
 7. 下游设备：接收板子 → 接收完成 → 输出DBR=OFF
 8. SMEMA处理器：检测到DBR=OFF → 状态转到SENT
-9. 业务层：确认发送完成 → 调用smema_confirm_board_sent()
-10. SMEMA处理器：输出BA=OFF → 状态回到IDLE
+9. 业务层：检测到板子已发送 → 设置product_in_position=false
+10. SMEMA处理器：检测到product_in_position=false → 输出BA=OFF → 状态回到IDLE
 ```
 
 #### 产品到位信号驱动逻辑
@@ -512,29 +514,25 @@ SMEMA_Config config = {
     .do_base_address = 814,
     .handshake_filter_ms = 50,
     .receive_timeout_ms = 30000,
-    .send_timeout_ms = 30000,
-    .enable_ugb = false,
-    .enable_ubb = false
+    .send_timeout_ms = 30000
 };
 smema_init(&config);
 
 // 主循环每100ms调用
 smema_process_cycle();
 
-// 业务层设置产品到位信号
-smema_set_product_in_position(true);   // 本机有板
-smema_set_product_in_position(false);  // 本机无板
+// 业务层设置产品到位信号（通过ROS2话题）
+// Python端发布到 /smema/product_in_position 话题
+// C++端自动调用 smema_set_product_in_position()
 
 // 检查上游板子是否到达
 if (smema_can_receive_board()) {
     // 处理板子到达逻辑
-    smema_confirm_board_received();
 }
 
 // 检查下游板子是否发送完成
 if (smema_can_send_board()) {
     // 处理板子发送完成逻辑
-    smema_confirm_board_sent();
 }
 
 // 查询状态
@@ -572,17 +570,16 @@ def main_loop(self):
 ### 集成点
 
 1. **io_interface.hpp/cpp**：添加SMEMA双向握手信号到DI/DO结构体
-   - DI：UBA(M535/di_values[23])、DBR(M538/di_values[24])
+   - DI：UBA(M535/di_values[23])、DBR(M536/di_values[24])
    - DO：MR(M814/do_values[14])、BA(M815/do_values[15])
-   - **注意**：硬件上M536/M537端子不存在，M538紧接着M535
 2. **smema_handler.cpp/hpp**：双向握手状态机实现
 3. **ethercat_node.cpp**：
    - 初始化SMEMA处理器，IO循环中调用`smema_process_cycle()`
    - `/io_status`话题发布SMEMA信号：DI23/DI24/DO14/DO15
-4. **business_logic_processor.py**：业务层通过`smema_set_product_in_position()`驱动握手
+4. **business_logic_processor.py**：业务层通过`/smema/product_in_position`话题驱动握手
 5. **硬件接线**：
    - 上游握手：DI模块M535接上游BA，DO模块M814接上游MR
-   - 下游握手：DI模块M538接下游MR，DO模块M815接下游BA
+   - 下游握手：DI模块M536接下游MR，DO模块M815接下游BA
 
 ### 设计决策记录（SMEMA）
 
@@ -594,6 +591,15 @@ def main_loop(self):
      - 简化业务逻辑：业务层只需设置产品到位信号，握手逻辑自动处理
      - 状态清晰：上下游状态独立，互不干扰
    - **关键洞察**：产品到位信号是握手的唯一驱动源，消除了业务层与握手层的耦合
+
+10. **为何删除确认信号** (2026-04-15)：
+    - **问题**：原设计需要业务层发布`board_received`和`board_sent`确认信号，增加了复杂度
+    - **改进**：改为通过`product_in_position`信号控制握手完成
+    - **优势**：
+      - 减少ROS2话题数量（从3个减少到1个）
+      - 简化设计：单一信号驱动所有握手逻辑
+      - 业务层控制权不变：通过设置`product_in_position`控制握手完成时机
+    - **关键洞察**：能消失的分支永远比能写对的分支更优雅
 
 ---
 
