@@ -36,8 +36,6 @@ std::atomic<bool> g_auto_mode_initialized(false);       // 所有轴自动模式
 PauseStateRecord g_pause_state_record;
 
 // 添加缺失的常量定义
-// const int HOMING_TOLERANCE = 100;
-// const int HOMING_STEP = 50;
 bool running = true;  // 添加缺失的running变量
 
 // 其他全局变量
@@ -740,18 +738,6 @@ void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg
     std::string command = msg->data;
     RCLCPP_INFO(this->get_logger(), "收到点动命令: %s", command.c_str());
     
-//     for (auto& axis : servo_axes_) {
-//         if (command == "forward") {
-//             axis->jog_forward();
-//             RCLCPP_INFO(this->get_logger(), "轴 %s 开始正转", axis->get_name().c_str());
-//         } else if (command == "reverse") {
-//             axis->jog_reverse();
-//             RCLCPP_INFO(this->get_logger(), "轴 %s 开始反转", axis->get_name().c_str());
-//         } else if (command == "stop") {
-//             axis->jog_stop();
-//             RCLCPP_INFO(this->get_logger(), "轴 %s 停止", axis->get_name().c_str());
-//         }
-//     }
     // 解析格式："axis1_1:forward" 或 "axis1_1:reverse" 或 "axis1_1:stop"
     size_t colon_pos = command.find(':');
     if (colon_pos == std::string::npos) {
@@ -1243,7 +1229,6 @@ bool EthercatNode::parse_jog_speed_command(const std::string& command, std::stri
 void EthercatNode::initialize_board_width_parameters() {
     // axis4 参数初始化 (保持不变)
     screw_lead_ = 10.0;           // 丝杠导程10mm
-    // gear_ratio_ = 9.0;            // 减速比9.0
     pulses_per_rev_ = 10000;      // 每转脉冲数10000
     min_board_width_ = 8.0;      // 最小板宽10cm
     max_board_width_ = 48.0;      // 最大板宽50cm

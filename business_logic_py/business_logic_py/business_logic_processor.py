@@ -27,6 +27,7 @@ class OutboundState(Enum):
 class PassThroughState(Enum):
     """放行流程状态"""
     IDLE = auto()
+    RETURNING_TO_LAYER_1 = auto()      # 回到第一层
     WAIT_FOR_PRODUCT_ARRIVAL = auto()  # 等待产品到位
     CONVEYOR_RUNNING = auto()          # 输送带运行中（自动放行）
     WAIT_FOR_CONVEYOR_OUT = auto()
@@ -1796,8 +1797,32 @@ class BusinessLogicProcessor(Node):
             if self.release_process_requested:
                 self._reset_key_do_signals()  # 重置关键DO信号，确保安全状态
                 self.release_process_requested = False
+                
+                # 检查是否在第一层
+                if not self.is_target_layer_reached(1):
+                    # 不在第一层，发送命令回到第一层
+                    if self.auto_mode_initialized:
+                        self.send_layer_command(1)
+                        self.release_state = PassThroughState.RETURNING_TO_LAYER_1
+                        self.get_logger().info(f'放行流程启动，当前层={self.current_layer_float:.2f}，发送层指令回到第1层')
+                    else:
+                        # 等待轴自动模式初始化
+                        self.pending_resume_state = {
+                            'type': 'release_return_to_layer_1'
+                        }
+                        self.release_state = PassThroughState.RETURNING_TO_LAYER_1
+                        self.get_logger().info('放行流程启动，等待轴自动模式初始化完成后发送层指令回到第1层')
+                else:
+                    # 已在第一层，直接进入等待产品到位状态
+                    self.release_state = PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL
+                    self.get_logger().info(f'放行流程启动，当前已在第1层({self.current_layer_float:.2f})，进入等待产品到位状态')
+        
+        elif self.release_state == PassThroughState.RETURNING_TO_LAYER_1:
+            # 等待接驳台回到第一层
+            if self.is_target_layer_reached(1):
+                # 已到达第一层，进入等待产品到位状态
                 self.release_state = PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL
-                self.get_logger().info('放行流程启动，进入等待产品到位状态')
+                self.get_logger().info(f'接驳台已回到第1层({self.current_layer_float:.2f})，进入等待产品到位状态')
         
         elif self.release_state == PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL:
             # 等待产品到位检测状态机完成（由 process_product_arrival_logic 处理）
@@ -2350,6 +2375,10 @@ class BusinessLogicProcessor(Node):
             target_layer = state_info.get('layer', 1)
             self.send_layer_command(target_layer)
             self.get_logger().info(f'轴就绪后执行出库IDLE恢复：发送层指令回到第{target_layer}层')
+        elif state_info['type'] == 'release_return_to_layer_1':
+            # 执行放行流程回到第1层的恢复
+            self.send_layer_command(1)
+            self.get_logger().info(f'轴就绪后执行放行恢复：发送层指令回到第1层')
 
 def main(args=None):
     rclpy.init(args=args)

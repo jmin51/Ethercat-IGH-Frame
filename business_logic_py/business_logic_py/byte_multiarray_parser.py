@@ -1309,7 +1309,6 @@ class ByteMultiArrayParser(Node):
         
         # 记录详细信息
         self.get_logger().info(f'发布点动命令: {command_str} (轴号: {axis_num}->{axis_name}, 方向: 0x{direction_high:02X}{direction_low:02X})')
-        # self.get_logger().info(f'发布点动命令: {command_str} (轴号: 0x{axis_high:02X}{axis_low:02X}, 方向: 0x{direction_high:02X}{direction_low:02X})')
 
         # 如果有额外的数据，记录但不处理
         if len(payload) > 4:

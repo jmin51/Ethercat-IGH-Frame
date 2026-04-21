@@ -329,27 +329,6 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
     check_state_changes(read_status_word, error_code);
 }
 
-void HuichuanServoAxis::handle_huichuan_initialization(uint8_t* domain1_pd, uint16_t status_word) {
-    /* 特有的初始化序列
-    static unsigned int init_counter = 0;
-    init_counter++;
-    
-    if (status_word == 0x0250) {
-        EC_WRITE_U16(domain1_pd + control_word_, 0x0006);
-    } else if (status_word == 0x0631) {
-        EC_WRITE_U16(domain1_pd + control_word_, 0x0007);
-    } else if (status_word == 0x0633) {
-        int32_t current_pos = EC_READ_S32(domain1_pd + off_actual_position_);
-        EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
-        EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
-        
-        if (init_counter > 50) { // 汇川需要更长的初始化时间
-            current_state_ = AxisState::READY;
-            RCLCPP_INFO(rclcpp::get_logger("huichuan_servo"), 
-                       "汇川轴 %s 进入就绪状态", axis_name_.c_str());
-        }
-    } */
-}
 
 void HuichuanServoAxis::handle_huichuan_homing(uint8_t* domain1_pd, int32_t current_pos) {
     // 已经回零完成退出回零逻辑
@@ -425,24 +404,7 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
 }
 
 void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int32_t current_pos) {
-    // // 添加调试信息
-    // static int debug_counter = 0;
-    // if (debug_counter++ % 200 == 0) {
-    //     printf("轴 %s - 当前位置: %d, 目标位置: %d, 初始位置: %d, 误差: %d\n",
-    //            axis_name_.c_str(), current_pos, target_pulses_, initial_position_, 
-    //            target_pulses_ - current_pos);
-    // }
-    // // 汇川自动模式特有逻辑
-    // if (!homing_completed_) {
-    //     handle_huichuan_homing(domain1_pd, current_pos);
-    //     if (displacement_updated_) {
-    //         displacement_updated_ = false;
-    //         RCLCPP_WARN(rclcpp::get_logger("huichuan_servo"), 
-    //                    "汇川轴 %s 回零期间忽略位移指令", axis_name_.c_str());
-    //     }
-    //     return;
-    // }
-    
+
     if (!position_initialized_) {
         joint_position_ = current_pos;
         initial_position_ = current_pos; //current_pos;
