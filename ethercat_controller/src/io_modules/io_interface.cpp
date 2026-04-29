@@ -372,7 +372,8 @@ DI_Interface read_all_di_signals() {
     // SMEMA协议信号
 #if ENABLE_SMEMA
     di.smema_uba = di_values[23];            // M535 上游有板待发
-    di.smema_dbr = di_values[24];            // M536 下游要板
+    di.smema_dbr_test = di_values[25];              // M537 下游要板测试信号
+    di.smema_dbr = di_values[24] | di_values[25];  // M536 下游要板 = 主信号 | 测试信号(OR逻辑)
 #else
     // SMEMA禁用时提供默认值，方便调试
     di.smema_uba = false;                    // 默认无板

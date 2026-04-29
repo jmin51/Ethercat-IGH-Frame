@@ -283,12 +283,13 @@ static void handle_downstream_available(void) {
         transition_downstream_state(DOWNSTREAM_IDLE);
     }
     
-    // 超时检测
-    if (is_downstream_timeout()) {
-        printf("[SMEMA下游] 警告：等待下游要板超时\n");
-        ctx.status.send_timeout_count++;
-        transition_downstream_state(DOWNSTREAM_IDLE);
-    }
+    // 注释掉超时检测：下游设备可能暂时不需要板子，BA应保持ON等待
+    // 超时会导致振荡循环：AVAILABLE → IDLE → AVAILABLE → ...
+    // if (is_downstream_timeout()) {
+    //     printf("[SMEMA下游] 警告：等待下游要板超时\n");
+    //     ctx.status.send_timeout_count++;
+    //     transition_downstream_state(DOWNSTREAM_IDLE);
+    // }
 }
 
 // DOWNSTREAM_SENDING：板子传输中
@@ -307,12 +308,13 @@ static void handle_downstream_sending(void) {
         transition_downstream_state(DOWNSTREAM_SENT);
     }
     
-    // 超时检测
-    if (is_downstream_timeout()) {
-        printf("[SMEMA下游] 警告：发送超时（DBR长时间未释放）\n");
-        ctx.status.send_timeout_count++;
-        transition_downstream_state(DOWNSTREAM_IDLE);
-    }
+    // 注释掉超时检测：下游设备可能接收慢，BA应保持ON等待
+    // 业务层负责启动皮带发送板子，超时应由业务层处理
+    // if (is_downstream_timeout()) {
+    //     printf("[SMEMA下游] 警告：发送超时（DBR长时间未释放）\n");
+    //     ctx.status.send_timeout_count++;
+    //     transition_downstream_state(DOWNSTREAM_IDLE);
+    // }
 }
 
 // DOWNSTREAM_SENT：等待产品离开
@@ -327,13 +329,13 @@ static void handle_downstream_sent(void) {
         transition_downstream_state(DOWNSTREAM_IDLE);
     }
     
-    // 超时检测（业务层处理太慢）
-    if (is_downstream_timeout()) {
-        printf("[SMEMA下游] 警告：等待产品离开超时\n");
-        ctx.status.send_timeout_count++;
-        write_ba_signal(false);
-        transition_downstream_state(DOWNSTREAM_IDLE);
-    }
+    // 注释掉超时检测：业务层负责移除板子，超时应由业务层处理
+    // if (is_downstream_timeout()) {
+    //     printf("[SMEMA下游] 警告：等待产品离开超时\n");
+    //     ctx.status.send_timeout_count++;
+    //     write_ba_signal(false);
+    //     transition_downstream_state(DOWNSTREAM_IDLE);
+    // }
 }
 
 /* ============================================================
@@ -578,13 +580,9 @@ bool smema_can_receive_board(void) {
     return false;
 }
 
-void smema_confirm_board_received(void) {}
-
 bool smema_can_send_board(void) {
     return false;
 }
-
-void smema_confirm_board_sent(void) {}
 
 void smema_set_mr_manual(bool state) {
     (void)state;

@@ -47,6 +47,7 @@ typedef struct {
     bool smema_uba;              // M535 SMEMA上游有板待发 (Upstream Board Available)
     // 下游握手（发送板子）
     bool smema_dbr;              // M536 SMEMA下游要板信号 (Downstream Board Ready)
+    bool smema_dbr_test;         // M537 SMEMA下游要板测试信号 (OR合并至smema_dbr)
 } DI_Interface;
 
 // DO 输出信号接口定义

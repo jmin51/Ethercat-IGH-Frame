@@ -368,9 +368,9 @@ void EthercatNode::init_axes(ec_master_t* master) {
     servo_axes_.push_back(std::move(axis1_2));
     // 创建雷赛双轴驱动器 - 从站2
     auto axis2_1 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_1);
+        DriveBrand::LEISAI, "axis2_1", 1, AxisType::AXIS1, LEISAI_PRODUCT_CODE_3);
     auto axis2_2 = ServoAxisFactory::create_servo_axis(
-        DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_1);
+        DriveBrand::LEISAI, "axis2_2", 1, AxisType::AXIS2, LEISAI_PRODUCT_CODE_3);
 
     servo_axes_.push_back(std::move(axis2_1));
     servo_axes_.push_back(std::move(axis2_2));
@@ -924,7 +924,8 @@ void EthercatNode::publish_io_status() {
     ss << "DI21:" << (di.gear_cylinder2_extend ? "1" : "0") << ","; // 齿轮对接气缸2伸出到位
     ss << "DI22:" << (di.gear_cylinder2_retract ? "1" : "0") << ","; // 齿轮对接气缸2缩回到位
     ss << "DI23:" << (di.smema_uba ? "1" : "0") << ",";             // SMEMA上游有板待发
-    ss << "DI24:" << (di.smema_dbr ? "1" : "0");                    // SMEMA下游要板
+    ss << "DI24:" << (di.smema_dbr ? "1" : "0") << ",";             // SMEMA下游要板(OR结果)
+    ss << "DI25:" << (di.smema_dbr_test ? "1" : "0");               // SMEMA下游要板测试信号
 
     ss << " | DO状态: ";
     
