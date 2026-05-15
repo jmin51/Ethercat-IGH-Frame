@@ -200,9 +200,9 @@ struct PauseStateRecord {
   - `/pause_state_command` (C++ → Python)：发送记录/恢复命令
   - `/pause_state_report` (Python → C++)：报告当前业务状态
 
-#### 3. Python 端实现 (business_logic_processor.py)
-- **状态报告**：`report_current_pause_state()` → 将 `warehouse_state`/`outbound_state` 序列化为字符串
-- **状态恢复**：`handle_resume_command()` → 解析命令 → `restore_warehouse_state()` / `restore_outbound_state()`
+#### 3. Python 端实现 (pause_resume_manager.py)
+- **状态报告**：`PauseResumeManager.report_current_pause_state()` → 将 `warehouse_state`/`outbound_state` 序列化为字符串
+- **状态恢复**：`PauseResumeManager.handle_resume_command()` → 解析命令 → `restore_warehouse_state()` / `restore_outbound_state()`
 - **状态映射**：根据状态值恢复到对应步骤，确保业务逻辑继续执行
 
 ### 状态恢复映射表
@@ -270,7 +270,7 @@ global_node->publish_pause_state_resume_request();
 
 1. **main.cpp**：`pause_motors_only()` 和 `resume_from_short_pause()` 函数
 2. **ethercat_node.cpp**：发布器和订阅器的创建，以及命令处理
-3. **business_logic_processor.py**：`pause_state_command_callback()` 和相关恢复函数
+3. **business_logic_processor.py**：`pause_state_command_callback()` 和相关恢复函数（委托给 `PauseResumeManager`）
 
 ---
 
@@ -576,7 +576,7 @@ def main_loop(self):
 3. **ethercat_node.cpp**：
    - 初始化SMEMA处理器，IO循环中调用`smema_process_cycle()`
    - `/io_status`话题发布SMEMA信号：DI23/DI24/DO14/DO15
-4. **business_logic_processor.py**：业务层通过`/smema/product_in_position`话题驱动握手
+4. **business_logic_processor.py**：业务层通过`/smema/product_in_position`话题驱动握手（IO/SMEMA逻辑委托给 `IoSignalHandler`）
 5. **硬件接线**：
    - 上游握手：DI模块M535接上游BA，DO模块M814接上游MR
    - 下游握手：DI模块M536接下游MR，DO模块M815接下游BA
@@ -603,5 +603,139 @@ def main_loop(self):
 
 ---
 
-*文档最后更新：2026-04-14*
-*对应架构版本：v2.6（SMEMA双向握手支持）*
+## 接驳台速度控制架构
+
+### 设计哲学
+- **层号驱动调速**：映射后层号决定接驳台速度，远离中心层越远越快
+- **中性区间保持**：-7~+7层保持默认速度，消除无意义的速度波动
+- **线性插值**：距离中性区间越远速度线性递增，最高300mm/s
+- **意图驱动归位**：回到层1是空跑归位，不按层号调速，强制使用远层速度(300mm/s)
+
+### 速度映射规则
+
+| 映射后层号 | 速度 (mm/s) | 说明 |
+|-----------|-------------|------|
+| -7 ~ +7 | 150 (默认) | 中性区间，速度不变 |
+| < -7 | 150 → 300 | 线性递增，最远-15层≈300mm/s |
+| > +7 | 150 → 300 | 线性递增，最远+28层≈300mm/s |
+| 归位层1 | 300 (强制) | 空跑归位，`fast_return=True` |
+
+### 层号映射（上游协议 → 内部层号）
+- 原始层号1-15 → 映射到 -15 ~ -1
+- 原始层号16-41 → 映射到 +3 ~ +28
+
+### 核心组件
+
+#### Python端 (business_logic_processor.py + io_signal_handler.py + process_handlers.py + pause_resume_manager.py + models.py)
+- **calculate_conveyor_speed(mapped_layer)**: 层号→速度映射函数（在 `business_logic_processor.py` 中）
+- **adjust_conveyor_speed_by_layer(mapped_layer)**: 发布速度指令到axis1_1/axis1_2（在 `business_logic_processor.py` 中）
+- **send_layer_command(layer)**: 层指令发送时自动触发调速（在 `business_logic_processor.py` 中）
+
+#### C++端 (ethercat_node.cpp)
+- **/jog_speed_command** 话题：接收速度设置命令，格式 `"axis_name:speed"`
+- **handle_jog_speed_command()**: 解析并设置轴点动速度
+
+### 话题链路
+```
+byte_multiarray_parser (层号映射) → /layer_command → LayerCommandProcessor
+                                                         ↓
+business_logic_processor.send_layer_command()
+    → /layer_command (层指令)
+    → /jog_speed_command (速度指令: axis1_1:speed; axis1_2:speed)
+                                                         ↓
+ethercat_node.handle_layer_command() + handle_jog_speed_command()
+```
+
+### 配置参数
+```python
+CONVEYOR_BASE_SPEED = 150.0    # 默认接驳台速度 (mm/s)
+CONVEYOR_MIN_SPEED = 50.0      # 最小速度 (mm/s)
+CONVEYOR_SPEED_NEUTRAL_RANGE = 7  # 中性区间半径
+CONVEYOR_SPEED_AXIS_NAMES = ["axis1_1", "axis1_2"]  # 接驳台轴名
+```
+
+---
+
+## Python 业务逻辑模块架构 (business_logic_py)
+
+### 模块结构
+
+```
+business_logic_py/business_logic_py/
+├── __init__.py                       # 包导出
+├── models.py                         # 枚举 + 数据类（无状态，无副作用）
+├── io_signal_handler.py              # IO信号解析、SMEMA协议、产品到位检测
+├── pause_resume_manager.py           # 暂停状态记录、恢复命令解析、状态还原
+├── process_handlers.py               # 入库/出库/放行三大业务状态机
+├── business_logic_processor.py       # ROS2 Node壳子：发布/订阅、定时器、调度
+└── byte_multiarray_parser.py         # 字节数组解析器
+```
+
+### 设计哲学
+
+- **单一职责**：每个文件一个业务领域，状态机完整逻辑不跨文件
+- **反向引用**：子模块通过 `self.proc` 引用处理器，子模块之间零依赖
+- **Node壳子**：`BusinessLogicProcessor` 仅管理ROS2生命周期和调度，业务逻辑全权委托
+
+### 模块职责
+
+| 文件 | 职责 | 核心类 |
+|------|------|--------|
+| `models.py` | 枚举(WarehouseState/OutboundState/PassThroughState/CommandType/FaultCode) + 数据类(ControlAction) | 无类，纯定义 |
+| `io_signal_handler.py` | IO解析、信号映射、SMEMA握手、产品到位状态机 | `IoSignalHandler` |
+| `pause_resume_manager.py` | 暂停记录、恢复命令解析、状态还原、待执行调度 | `PauseResumeManager` |
+| `process_handlers.py` | 入库/出库/放行三大业务流程状态机 | `ProcessHandlers` |
+| `business_logic_processor.py` | ROS2 Node、发布/订阅器、定时器、命令发送、调度 | `BusinessLogicProcessor` |
+
+### 委托关系
+
+```
+BusinessLogicProcessor (Node壳子)
+  ├── io_handler = IoSignalHandler(self)
+  ├── pause_resume_mgr = PauseResumeManager(self)
+  └── process_handlers = ProcessHandlers(self)
+
+process_logic() 每周期调用:
+  io_handler.process_product_arrival_logic()
+  io_handler.update_product_position()
+  io_handler.check_smema_handshake()
+  process_handlers.process_warehouse_logic()
+  process_handlers.process_outbound_logic()
+  process_handlers.process_release_logic()
+```
+
+---
+
+*文档最后更新：2026-05-13*
+*对应架构版本：v2.9（手动模式层移动支持）*
+
+### 变更日志
+
+#### v2.9 (2026-05-13): 手动模式层移动支持
+- **问题**：手动模式下 axis5 无法接收层移动指令，因双重门控阻断
+- **门控1**：`LayerCommandProcessor::process_layer_command()` 中 `g_auto_mode_initialized` 强制门控，手动模式下永远为false
+- **门控2**：`HuichuanServoAxis::handle_huichuan_manual_operation()` 只处理点动(jog)，不处理位移指令(displacement_updated_)
+- **修复策略**：
+  - **LayerCommandProcessor**：移除对 `g_auto_mode_initialized` 的强制依赖，层指令在任何运行模式(手动/自动)下均可立即执行
+  - **HuichuanServoAxis 手动模式状态机**：增加对 `displacement_updated_` 的处理，有位移指令时优先执行逐步逼近到位，无位移指令时退回点动控制
+- **设计原则**：手动模式的本质是"操作者直接控制"，不应排斥程序化的精确到位；位移指令与点动互斥，位移执行期间暂停点动
+
+#### v2.9.1 (2026-05-13): 手动/自动模式切换与运动安全性修复
+- **隐患1（已修复）：位移→点动中断时目标丢失** — 点动请求打断层移动时，`target_pulses_` 被覆盖，位移目标永久丢失且无告警
+  - 修复：新增 `saved_displacement_target_` / `has_saved_displacement_` 保护变量，点动中断位移时保存目标，点动结束后自动恢复
+- **隐患2（已修复）：`joint_position_` 与实际位置漂移** — `joint_position_` 是纯软件模型，仅在初始化时从 `current_pos` 同步，长时间运行后漂移
+  - 修复：轴静止时每周期用 `current_pos` 修正 `joint_position_`，消除累积误差
+- **隐患3（已修复）：`stop()` 跨线程写运动变量** — `stop()` 从ROS2订阅者线程直接写 `target_pulses_`/`joint_position_`，与cyclic thread竞争，`volatile` 不保证原子性
+  - 修复：`stop()` 只设请求标志（`stop_requested_`），运动变量清理移至cyclic thread的状态机中执行
+- **隐患4（已消除）：位移→到位检测双重执行** — `gradual_approach()` 内部已检测到位，外部重复检测冗余
+  - 修复：移除 `handle_huichuan_manual_operation` 中的重复到位检测
+- **安全保证**：所有 PDO 写入（`EC_WRITE_S32`）均经过步长限制（`gradual_approach` 或 `MAX_STEP`），任何模式切换/指令切换均不会导致电机位置跳变
+
+#### v2.9.2 (2026-05-14): 新增0x011E通知移动/0x011F移动结果协议
+- **协议格式**：与0x0101/0x0102一致 — 0x011E payload: [宽度2B + 层号2B + 区域1B]，0x011F payload: [命令码2B + 故障码2B]
+- **数据流**：PC→0x011E→byte_multiarray_parser→/layer_move_start→business_logic_processor→send_layer_command()→C++层移动→/layer_motion_completed→business_logic_processor(双重确认)→/layer_move_completed→byte_multiarray_parser→0x011F→PC
+- **层号映射**：与0x0101完全一致（1-41→-15~28）
+- **完成判断**：`layer_motion_completed` 信号 + `current_layer_float` 与目标层容差0.5层双重确认
+- **超时检测**：30秒，超时回包0x011F带故障码0x5002
+- **故障回包**：故障时自动回包0x011F（`_send_pending_response_with_fault` 新增分支）
+- **设计原则**：层移动是"纯移动"流程，不涉及入库/出库IO操作，移动中不支持点动中断

@@ -21,6 +21,8 @@ class CommandType(Enum):
     CLEAR_AXIS_FAULT = 0x011B     # 清除轴故障 /control_command
     NOTIFY_RELEASE = 0x011C       # 通知放行（PC->PLC）
     RELEASE_RESULT = 0x011D       # 放行结果（PLC->PC）
+    NOTIFY_LAYER_MOVE = 0x011E   # 通知移动（PC->PLC）
+    LAYER_MOVE_RESULT = 0x011F   # 移动结果（PLC->PC）
 
     # 原有的指令码定义（不在图片中的）
     SYSTEM_CONTROL = 0x01
@@ -42,6 +44,7 @@ class FaultCode(Enum):
     """
     NO_FAULT = 0x0000              # 无故障
     BOARD_WIDTH_TIMEOUT = 0x5001   # 板宽调整超时 (0x5000 | 0x0000 | 0x01)
+    LAYER_MOVE_TIMEOUT = 0x5002    # 层移动超时 (0x5000 | 0x0000 | 0x02)
     
 class ByteMultiArrayParser(Node):
     def __init__(self):
@@ -77,6 +80,15 @@ class ByteMultiArrayParser(Node):
             self.outbound_completed_callback,
             10
         )
+        
+        # 新增：订阅放行完成状态话题
+        self.release_completed_sub = self.create_subscription(
+            Bool,
+            '/release_completed',
+            self.release_completed_callback,
+            10
+        )
+        
         self.product_arrival_sub = self.create_subscription(
             Bool,
             '/product_arrival',
@@ -118,6 +130,15 @@ class ByteMultiArrayParser(Node):
         
         # 新增：创建开始作业信号发布器（用于通知business_logic_processor启动产品到位周期）
         self.start_operation_signal_pub = self.create_publisher(Bool, '/start_operation_signal', 10)
+        
+        # 新增：层移动指令发布器/完成状态订阅
+        self.layer_move_start_pub = self.create_publisher(Int8, '/layer_move_start', 10)
+        self.layer_move_completed_sub = self.create_subscription(
+            Bool,
+            '/layer_move_completed',
+            self.layer_move_completed_callback,
+            10
+        )
         
         # 新增：订阅板宽调整状态话题
         self.board_width_status_sub = self.create_subscription(
@@ -166,12 +187,18 @@ class ByteMultiArrayParser(Node):
         self.pending_command = None  # 当前待响应的命令: 0x0101/0x0103/0x0105
         self.pending_response_sent = False  # 标记是否已发送故障响应
         
+        # 新增：层移动状态追踪
+        self.pending_layer_move = False  # 是否有待响应的层移动命令(0x011E)
+        self.layer_move_start_time = None  # 层移动开始时间
+        self.LAYER_MOVE_TIMEOUT_SEC = 30.0  # 层移动超时时间
+        
         # +++ 新增：等待轴自动模式就绪后再下发板宽命令 +++
         self.auto_mode_initializing = False  # 自动模式正在初始化
         self.pending_board_width = None  # 缓存的板宽值
         self.board_width_axes_ready = {'axis3': False, 'axis4': False}  # 轴就绪状态
         self.AUTO_MODE_INIT_TIMEOUT = 5.0  # 自动模式初始化超时5秒
         self.auto_mode_init_start_time = None  # 初始化开始时间
+        self.cached_axis_states = {}  # 缓存轴状态，用于105收到时判断是否已在AUTO_MODE
         
         self.get_logger().info('ByteMultiArray解析器已启动（支持统一IO状态发布和业务完成状态发布）')
 
@@ -267,6 +294,9 @@ class ByteMultiArrayParser(Node):
             import json
             axis_states = json.loads(msg.data)
             
+            # 缓存轴状态，供process_start_operation判断用
+            self.cached_axis_states = axis_states
+            
             # 获取所有轴列表（与C++端servo_axes_保持一致）
             all_axis_names = ['axis1_1', 'axis1_2', 'axis2_1', 'axis2_2', 'axis3', 'axis4', 'axis5']
             
@@ -311,19 +341,25 @@ class ByteMultiArrayParser(Node):
         except Exception as e:
             self.get_logger().error(f'轴状态处理错误: {e}')
 
+    # 板宽机械对齐补偿(mm): 物理轨道比设定值窄，下发时分别补偿
+    AXIS3_WIDTH_COMPENSATION_CM = 0.10  # 1.0mm = 0.10cm
+    AXIS4_WIDTH_COMPENSATION_CM = 0.20  # 2.0mm = 0.20cm
+
     def _publish_board_width_commands(self, width_cm):
-        """实际下发板宽命令到axis3和axis4"""
+        """实际下发板宽命令到axis3和axis4（含机械对齐补偿）"""
         # 1. 下发 axis4 板宽控制话题
+        axis4_width = width_cm + self.AXIS4_WIDTH_COMPENSATION_CM
         width_msg_axis4 = Float64()
-        width_msg_axis4.data = width_cm
+        width_msg_axis4.data = axis4_width
         self.board_width_pub.publish(width_msg_axis4)
-        self.get_logger().info(f'已下发axis4板宽命令: {width_cm}cm')
+        self.get_logger().info(f'已下发axis4板宽命令: {width_cm}cm + {self.AXIS4_WIDTH_COMPENSATION_CM}cm = {axis4_width}cm')
 
         # 2. 下发 axis3 板宽控制话题
+        axis3_width = width_cm + self.AXIS3_WIDTH_COMPENSATION_CM
         width_msg_axis3 = Float64()
-        width_msg_axis3.data = width_cm
+        width_msg_axis3.data = axis3_width
         self.axis3_width_pub.publish(width_msg_axis3)
-        self.get_logger().info(f'已下发axis3板宽命令: {width_cm}cm')
+        self.get_logger().info(f'已下发axis3板宽命令: {width_cm}cm + {self.AXIS3_WIDTH_COMPENSATION_CM}cm = {axis3_width}cm')
 
     def check_and_publish_start_result(self):
         """检查两个轴是否都完成，如果是则发布0x0106响应"""
@@ -356,6 +392,18 @@ class ByteMultiArrayParser(Node):
             # 重置完成标志
             self.axis4_width_completed = False
             self.axis3_width_completed = False
+        
+        # 检查层移动(0x011E)是否超时
+        if self.pending_layer_move and self.layer_move_start_time is not None:
+            elapsed_layer = time.time() - self.layer_move_start_time
+            if elapsed_layer > self.LAYER_MOVE_TIMEOUT_SEC:
+                fault_code = FaultCode.LAYER_MOVE_TIMEOUT.value
+                self.get_logger().warn(
+                    f'层移动等待超时({elapsed_layer:.1f}秒>{self.LAYER_MOVE_TIMEOUT_SEC}秒)，'
+                    f'发布0x011F响应，故障码=0x{fault_code:04X}')
+                self.publish_command_response(0x011F, fault_code)
+                self.pending_layer_move = False
+                self.layer_move_start_time = None
 
     def fault_callback(self, msg):
         """处理故障码话题回调，存储当前故障码状态"""
@@ -433,6 +481,13 @@ class ByteMultiArrayParser(Node):
                 self.axis3_width_adjusting = False
                 self.axis4_width_completed = False
                 self.axis3_width_completed = False
+            
+            # 情况4: 有待处理的层移动命令(11E)未回11F
+            elif self.pending_layer_move:
+                self.get_logger().warn(f'故障时回包11F(移动结果)，故障码=0x{fault_code:04X}')
+                self.publish_command_response(0x011F, fault_code)
+                self.pending_layer_move = False
+                self.layer_move_start_time = None
                 
         except Exception as e:
             self.get_logger().error(f'故障时回包失败: {e}')
@@ -524,6 +579,21 @@ class ByteMultiArrayParser(Node):
                     self.pending_response_sent = False
         except Exception as e:
             self.get_logger().error(f'出库完成状态处理错误: {e}')
+    
+    def release_completed_callback(self, msg):
+        """处理放行完成状态回调"""
+        try:
+            current_state = msg.data
+            # 检测状态变化（从False变为True）
+            if current_state:
+                # 正常完成，回包0x011D（放行结果，异常码=0）
+                self.publish_release_result(0x0000)
+                self.get_logger().info('检测到放行流程完成，发布0x011D响应(正常)')
+                # 重置待处理放行命令状态
+                if hasattr(self, 'pending_release_command'):
+                    self.pending_release_command = False
+        except Exception as e:
+            self.get_logger().error(f'放行完成状态处理错误: {e}')
             
     # 添加新的回调函数
     def product_arrival_callback(self, msg):
@@ -849,6 +919,8 @@ class ByteMultiArrayParser(Node):
                 self.process_clear_axis_fault(payload)
             elif command_code == CommandType.NOTIFY_RELEASE.value:  # 通知放行
                 self.process_notify_release(payload)
+            elif command_code == CommandType.NOTIFY_LAYER_MOVE.value:  # 通知移动
+                self.process_notify_layer_move(payload)
             # 原有的指令码处理
             elif command_code == CommandType.SYSTEM_CONTROL.value:
                 self.process_system_control(payload)
@@ -910,9 +982,26 @@ class ByteMultiArrayParser(Node):
         self.start_result_wait_start_time = time.time()
         
         self.pending_board_width = actual_width_cm
-        self.auto_mode_initializing = True
-        self.auto_mode_init_start_time = time.time()
         self.board_width_axes_ready = {'axis3': False, 'axis4': False}
+        
+        # === 快速路径：如果所有轴已在AUTO_MODE，立即下发板宽命令 ===
+        # 避免等axis_states_callback下一轮回调，缩短105→106响应时间
+        all_axis_names = ['axis1_1', 'axis1_2', 'axis2_1', 'axis2_2', 'axis3', 'axis4', 'axis5']
+        all_already_auto = all(
+            self.cached_axis_states.get(name) == 'AUTO_MODE' 
+            for name in all_axis_names
+        )
+        
+        if all_already_auto:
+            self.auto_mode_initializing = False
+            self.auto_mode_init_start_time = None
+            self.get_logger().info('所有轴已在AUTO_MODE，立即下发板宽命令')
+            self._publish_board_width_commands(self.pending_board_width)
+            self.pending_board_width = None
+        else:
+            self.auto_mode_initializing = True
+            self.auto_mode_init_start_time = time.time()
+            self.get_logger().info('等待轴进入AUTO_MODE后下发板宽命令')
         
         # 记录详细信息
         self.get_logger().info(
@@ -976,7 +1065,7 @@ class ByteMultiArrayParser(Node):
             
             self.integrated_pub.publish(msg)
             
-            cmd_name = {0x0102: '入库完成(102)', 0x0104: '出库完成(104)', 0x0106: '开始作业响应(106)'}.get(command_code, f'未知(0x{command_code:04X})')
+            cmd_name = {0x0102: '入库完成(102)', 0x0104: '出库完成(104)', 0x0106: '开始作业响应(106)', 0x011F: '移动完成(11F)'}.get(command_code, f'未知(0x{command_code:04X})')
             self.get_logger().info(f'发布命令响应: {cmd_name}, 异常码=0x{error_code:04X}')
             
         except Exception as e:
@@ -1150,6 +1239,10 @@ class ByteMultiArrayParser(Node):
             f'库位={original_layer}->{mapped_layer}, '
             f'出库区域={outbound_area}'
         )
+        
+        # 追踪命令：标记有待响应的103命令
+        self.pending_command = 0x0103
+        self.pending_response_sent = False
 
     def process_end_operation(self, payload):
         """处理结束作业命令 (0x0107) - /warehouse_stop /outbound_stop
@@ -1196,8 +1289,22 @@ class ByteMultiArrayParser(Node):
             f'库位={layer_num}, 出库区域={outbound_area}'
         )
 
+    def _is_any_axis_in_auto_mode(self):
+        """检查是否有轴处于自动模式（用于拦截手动操作指令）"""
+        if not self.cached_axis_states:
+            return False
+        return any(state == 'AUTO_MODE' for state in self.cached_axis_states.values())
+
     def process_axis_jog(self, payload):
-        """处理轴点动命令 (0x010D) - /jog_command"""
+        """处理轴点动命令 (0x010D) - /jog_command
+        
+        自动模式下拒绝点动指令：点动与自动流程互斥
+        """
+        # 自动模式下拒绝点动指令
+        if self._is_any_axis_in_auto_mode():
+            self.get_logger().warn('自动模式下不接受轴点动命令(0x010D)')
+            return
+        
         # 检查负载长度：至少需要6字节（轴号2字节 + 方向2字节 + 其他数据）
         if len(payload) < 6:
             self.get_logger().warn('轴点动命令负载长度不足，需要至少6字节')
@@ -1341,6 +1448,69 @@ class ByteMultiArrayParser(Node):
         self.control_pub.publish(msg)
         self.get_logger().info('发布清除轴故障命令')
 
+    def process_notify_layer_move(self, payload):
+        """处理通知移动命令 (0x011E) - /layer_move_start
+        
+        数据格式与0x0101一致：产品宽度2byte + 库位编号2byte + 出库区域1byte
+        """
+        # 检查负载长度：至少需要5字节
+        if len(payload) < 5:
+            self.get_logger().warn(f'通知移动命令负载长度不足: {len(payload)}字节，需要至少5字节')
+            return
+        
+        # 解析产品宽度（前2字节，小端序）
+        width_low = payload[0]
+        width_high = payload[1]
+        product_width = (width_high << 8) | width_low
+        
+        # 解析库位编号（第3-4字节，小端序）— 即目标层号
+        layer_low = payload[2]
+        layer_high = payload[3]
+        original_layer = (layer_high << 8) | layer_low
+        
+        # 解析出库区域（第5字节）
+        outbound_area = payload[4]
+        
+        # 层号映射：与0x0101一致，1-41 映射到 -15 到 28
+        if 1 <= original_layer <= 15:
+            mapped_layer = original_layer - 16
+        elif 16 <= original_layer <= 41:
+            mapped_layer = original_layer - 13
+        else:
+            self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')
+            mapped_layer = original_layer - 13
+        
+        # 发布到/layer_move_start话题
+        msg = Int8()
+        msg.data = mapped_layer
+        self.layer_move_start_pub.publish(msg)
+        
+        # 追踪命令：标记有待响应的层移动命令
+        self.pending_layer_move = True
+        self.layer_move_start_time = time.time()
+        
+        self.get_logger().info(
+            f'移动命令(11E): 产品宽度={product_width}, '
+            f'目标层={original_layer}->{mapped_layer}, '
+            f'出库区域={outbound_area}'
+        )
+    
+    def layer_move_completed_callback(self, msg):
+        """处理层移动完成回调 (/layer_move_completed)"""
+        try:
+            if not self.pending_layer_move:
+                return  # 无待响应的层移动命令，忽略
+            
+            if msg.data:
+                # 层移动完成，发布0x011F（正常，故障码=0）
+                self.publish_command_response(0x011F, 0x0000)
+                self.get_logger().info('层移动完成，发布0x011F响应(正常)')
+                self.pending_layer_move = False
+                self.layer_move_start_time = None
+            
+        except Exception as e:
+            self.get_logger().error(f'层移动完成回调处理错误: {e}')
+
     def process_notify_release(self, payload):
         """处理通知放行命令 (0x011C) - PC->PLC
 
@@ -1382,11 +1552,11 @@ class ByteMultiArrayParser(Node):
             
             self.release_start_pub.publish(release_start_msg)
             
-            # 存储待响应的放行命令
+            # 存储待响应的放行命令（等待流程完成后回包）
             self.pending_release_command = True
             
-            # 立即回包 0x011D 放行结果（正常完成，异常码=0）
-            self.publish_release_result(0x0000)
+            # 不立即回包，等待 PassThroughState.COMPLETED 后再回包 0x011D
+            self.get_logger().info('放行命令已接收，等待流程完成后回包0x011D')
             
         except Exception as e:
             self.get_logger().error(f'处理通知放行命令失败: {e}')

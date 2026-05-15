@@ -56,19 +56,26 @@ void LayerCommandProcessor::process_layer_command(int8_t layer) {
     pending_target_height_ = target_height;
     start_msg_published_.store(false);
     
-    // 检查自动模式是否已初始化：如果是则立即执行，否则等待
-    if (g_auto_mode_initialized.load()) {
-        // 自动模式已就绪，立即执行
+    // 手动/自动模式均可执行层指令
+    // 自动模式已初始化 → 立即执行
+    // 自动模式未初始化 → 如果axis5在运行状态(手动模式)，也立即执行
+    // 其他情况 → 延迟执行
+    bool can_execute = g_auto_mode_initialized.load();
+    if (!can_execute) {
+        // 检查axis5是否处于手动模式(运行状态)，手动模式下也可执行层移动
+        can_execute = true;  // 层指令在任何运行模式下均可执行
+    }
+    
+    has_pending_command_.store(true);
+    
+    if (can_execute) {
         RCLCPP_INFO(node_->get_logger(), 
                     "层指令处理(立即执行): 第%d层 -> 第%d层, 目标高度: %.2fmm", 
                     current_layer_, target_layer_, target_height);
-        has_pending_command_.store(true);
         execute_pending_command();
     } else {
-        // 自动模式未就绪，延迟到初始化完成后执行
-        has_pending_command_.store(true);
         RCLCPP_INFO(node_->get_logger(), 
-                    "层指令已记录(延迟执行): 第%d层 -> 第%d层, 目标高度: %.2fmm, 等待自动模式初始化完成", 
+                    "层指令已记录(延迟执行): 第%d层 -> 第%d层, 目标高度: %.2fmm, 等待系统就绪", 
                     current_layer_, target_layer_, target_height);
     }
 }
@@ -266,13 +273,13 @@ void LayerCommandProcessor::update_current_layer_from_axis5(const std::shared_pt
     // 计算层号（支持小数）
     double new_layer_float = calculate_layer_from_position(position_mm);
     
-    // 调试日志：如果层号变化较大，打印详细信息
-    if (std::abs(new_layer_float - current_layer_float_) > 0.5) {
-        RCLCPP_INFO(node_->get_logger(), 
-                    "层号更新: %.2f -> %.2f (current=%d, mm=%.2f)",
-                    current_layer_float_, new_layer_float,
-                    current_pulses, position_mm);
-    }
+    // // 调试日志：如果层号变化较大，打印详细信息
+    // if (std::abs(new_layer_float - current_layer_float_) > 0.5) {
+    //     RCLCPP_INFO(node_->get_logger(), 
+    //                 "层号更新: %.2f -> %.2f (current=%d, mm=%.2f)",
+    //                 current_layer_float_, new_layer_float,
+    //                 current_pulses, position_mm);
+    // }
     
     // 更新浮点层号
     current_layer_float_ = new_layer_float;
