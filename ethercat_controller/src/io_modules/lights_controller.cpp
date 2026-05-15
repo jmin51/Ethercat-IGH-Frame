@@ -233,7 +233,7 @@ void update_tricolor_lights() {
             red_should_on = false;
             yellow_should_on = g_blink_state;
             green_should_on = false;
-            buzzer_should_on = true;  // 黄灯闪烁时蜂鸣器响
+            buzzer_should_on = g_blink_state;  // 蜂鸣器随黄灯同步间歇响
             break;
         case LIGHT_GREEN_BLINK:
             red_should_on = false;

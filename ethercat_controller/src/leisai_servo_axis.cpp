@@ -349,16 +349,19 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
             jog_forward_requested_ = false;
             jog_reverse_requested_ = false;
 
-            // 检查是否可以回到READY状态
-            // if (read_status_word == 0x1637 && !global_data_blocked.load()) {
-            if (read_status_word == 0x1637 ) {
+            // 检查驱动器是否已完成 Shutdown 序列，回到可重新初始化的状态
+            // 0x0633 = Ready to switch on, 0x0637 = Switched on(部分驱动器),
+            // 0x0631/0x0731 = Switch on disabled
+            // 持续发0x0006，驱动器会从0x1637逐步降到这些状态，不可能回到0x1637
+            if (read_status_word == 0x0633 || read_status_word == 0x0637 ||
+                read_status_word == 0x0631 || read_status_word == 0x0731) {
                 current_state_ = AxisState::INITIALIZING;
                 // +++ 关键修复：状态转换前再次确认运动状态已清理 +++
                 displacement_updated_ = false;
                 target_pulses_ = current_pos;
                 joint_position_ = current_pos;
                 position_initialized_ = false;  // 重新进入时需要重新初始化位置
-                printf("轴 %s 从停止状态回到就绪状态\n", axis_name_.c_str());
+                printf("轴 %s 从停止状态回到初始化(状态字: 0x%04X)\n", axis_name_.c_str(), read_status_word);
             }
             break;
             
@@ -635,15 +638,14 @@ AxisState LeisaiServoAxis::get_current_state() const {
     return current_state_;
 }
 
-// 根据轴名返回最大步长：axis3(板宽调整)限速，其他轴(点动轴)不限速
+// 最大步长 = jog_speed_ × PERIOD 转换为脉冲数
+// jog_speed_ 可通过 /jog_speed_command 动态设置，实现运行时调速
 int32_t LeisaiServoAxis::get_max_step() const {
-    // axis3 是板宽调整轴，需要限制速度(MAX_STEP=40)
-    // axis1_1, axis1_2, axis2_1, axis2_2 是点动轴，使用较大步长(不限速)
-    int32_t max_step = 40; // 默认值
-    if (axis_name_ == "axis3") {
-        max_step = 40;  // 板宽调整轴限速
-    } else {
-        max_step = 200; // 点动轴使用较大步长(实际不限速)
+    double current_speed;
+    {
+        std::lock_guard<std::mutex> lock(speed_mutex_);
+        current_speed = jog_speed_;
     }
-    return max_step;
+    int32_t step = displacement_to_pulses(current_speed * PERIOD);
+    return (step > 0) ? step : 1;
 }

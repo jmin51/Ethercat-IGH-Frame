@@ -180,6 +180,7 @@ private:
     // 板宽控制参数 (axis4 - 保持不变)
     double screw_lead_;                   // 丝杠导程10mm
     double gear_ratio_;                   // 减速比9.0
+    double axis4_offset_mm_;              // axis4机械零点偏移(mm)，两点标定校准
     int pulses_per_rev_;                  // 每转脉冲数10000
     double current_board_width_;           // 当前板宽（cm）
     double target_board_width_;           // 目标板宽（cm）
@@ -223,6 +224,8 @@ private:
     
     // +++ 新增：根据实际位置校正板宽 +++
     void calibrate_board_width_from_position();
+    // +++ 实时同步：决策前从轴位置刷新板宽模型 +++
+    void sync_axis3_current_width_from_position();
 
 public:
     /* ============================================

@@ -38,7 +38,7 @@ public:
     // 添加产品号获取函数
     uint32_t get_product_code() const override { return product_code_; }
     
-    // 重写最大步长：axis3板宽调整限制速度，其他轴不限速（使用较大步长）
+    // 重写最大步长：基于 jog_speed_ 动态计算，支持运行时调速
     int32_t get_max_step() const override;
 
 private:

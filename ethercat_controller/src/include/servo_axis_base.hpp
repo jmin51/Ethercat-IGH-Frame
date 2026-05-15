@@ -97,7 +97,7 @@ public:
         return jog_forward_requested_ || jog_reverse_requested_;
     }
     // 最新移动从protected
-    virtual int32_t displacement_to_pulses(double displacement_mm);
+    virtual int32_t displacement_to_pulses(double displacement_mm) const;
     bool check_target_reached_flag();   // 检查目标到达标志（一次性读取，读取后自动清除）
     bool is_target_reached() const;     // 检查是否到达目标位置（持续状态）
     // 添加点动速度设置方法
@@ -165,7 +165,7 @@ protected:
 
     // 速度限制参数
     const double MIN_JOG_SPEED = 1.0;    // 最小点动速度 (mm/s)
-    const double MAX_JOG_SPEED = 200.0;  // 最大点动速度 (mm/s)
+    const double MAX_JOG_SPEED = 350.0;  // 最大点动速度 (mm/s)，axis5远层需300mm/s
     const double DEFAULT_JOG_SPEED = 20.0; // 现在1s走10mm需要1ms走0.01mm，默认点动速度 0.262mm/s 或者是 50rpm/min 0.314
 											//	现在是每秒20000	对应两圈，一分?120rpm
     
@@ -177,6 +177,10 @@ protected:
     int32_t target_offset_;           // 目标偏移量
     int direction_flag_;              // 0: 无方向 1: 正转 -1: 反转
     int32_t new_target_;              // 新目标位置
+    
+    // 位移中断保护：点动中断位移时保存目标，点动结束后自动恢复
+    int32_t saved_displacement_target_;  // 被点动中断的位移目标脉冲
+    bool has_saved_displacement_;        // 是否有被中断的位移目标
     
     void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd);
     

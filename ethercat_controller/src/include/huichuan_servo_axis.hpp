@@ -34,7 +34,7 @@ public:
     // 获取产品号
     uint32_t get_product_code() const override { return HUICHUAN_PRODUCT_CODE; }
     
-    // 重写最大步长：axis4(板宽调整)限速，axis5使用较大步长
+    // 重写最大步长：基于 jog_speed_ 动态计算，支持运行时调速
     int32_t get_max_step() const override;
 
 private:

@@ -223,7 +223,19 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 // 发送停止指令：保持当前位置
                 EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
                 EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
-                
+                // 在循环线程中清理运动状态（线程安全）
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                displacement_updated_ = false;
+                has_saved_displacement_ = false;
+                jog_forward_requested_ = false;
+                jog_reverse_requested_ = false;
+                jog_stop_requested_ = false;
+                target_reached_ = false;
+                {
+                    std::lock_guard<std::mutex> lock(flag_mutex_);
+                    target_reached_flag_ = false;
+                }
                 stop_requested_ = false;
                 current_state_ = AxisState::STOPPED;
                 printf("轴 %s 收到停止请求，进入停止状态\n", axis_name_.c_str());
@@ -257,7 +269,16 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 // 发送停止指令：保持当前位置
                 EC_WRITE_S32(domain1_pd + off_target_position_, current_pos);
                 EC_WRITE_U16(domain1_pd + control_word_, 0x000F);
-                
+                // 在循环线程中清理运动状态（线程安全）
+                target_pulses_ = current_pos;
+                joint_position_ = current_pos;
+                displacement_updated_ = false;
+                has_saved_displacement_ = false;
+                target_reached_ = false;
+                {
+                    std::lock_guard<std::mutex> lock(flag_mutex_);
+                    target_reached_flag_ = false;
+                }
                 stop_requested_ = false;
                 current_state_ = AxisState::STOPPED;
                 printf("轴 %s 收到停止请求，进入停止状态\n", axis_name_.c_str());
@@ -372,7 +393,66 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
         position_initialized_ = true;
     }
     
-    // 获取当前点动速度（线程安全）
+    // === 位置漂移修正：每周期用实际位置修正 joint_position_ ===
+    // joint_position_ 是软件模型，长时间运行会与驱动器实际位置漂移
+    // 策略：当轴静止时（无运动指令），同步到实际位置
+    if (!displacement_updated_ && !jog_forward_requested_ && !jog_reverse_requested_ 
+        && !has_saved_displacement_ && abs(target_pulses_ - joint_position_) <= 50) {
+        joint_position_ = current_pos;
+        target_pulses_ = current_pos;
+    }
+    
+    // === 手动模式下位移指令处理（层移动等） ===
+    if (displacement_updated_) {
+        displacement_updated_ = false;
+        target_reached_ = false;
+        {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = false;
+        }
+        // 绝对位置模式：直接计算目标脉冲
+        target_pulses_ = displacement_to_pulses(target_displacement_);
+        // 新位移指令覆盖已保存的中断目标
+        has_saved_displacement_ = false;
+        // 中断正在进行的点动
+        jog_forward_requested_ = false;
+        jog_reverse_requested_ = false;
+        printf("轴 %s 手动模式位移更新: %.3fmm -> 目标脉冲 %d\n", 
+                axis_name_.c_str(), target_displacement_, target_pulses_);
+    }
+    
+    // === 层移动锁：位移执行期间屏蔽点动请求 ===
+    // 层移动(0x011E)是远程调度的确定性行为，优先级高于手动点动
+    // 位移完成/取消后才响应点动
+    bool displacement_in_progress = (target_pulses_ != joint_position_);
+    if (displacement_in_progress && (jog_forward_requested_ || jog_reverse_requested_)) {
+        printf("轴 %s 位移执行中，点动请求被屏蔽\n", axis_name_.c_str());
+        jog_forward_requested_ = false;
+        jog_reverse_requested_ = false;
+    }
+    
+    // === 位移执行中：逐步逼近目标 ===
+    if (displacement_in_progress) {
+        gradual_approach(target_pulses_, domain1_pd);
+        return;  // 位移执行期间，跳过点动控制
+    }
+    
+    // === 已到达目标位置：确保标志位被设置 ===
+    // 修复：手动模式下"静止同步"会抢先于 gradual_approach 将 target_pulses_ 同步到 current_pos，
+    // 导致 gradual_approach 不被调用，target_reached_flag_ 永远无法设置。
+    // 此分支与自动模式一致，在位置对齐时持续断言完成标志。
+    if (!jog_forward_requested_ && !jog_reverse_requested_ && !target_reached_) {
+        const int32_t TOLERANCE = 50;
+        int32_t error = target_pulses_ - joint_position_;
+        if (abs(error) <= TOLERANCE) {
+            std::lock_guard<std::mutex> lock(flag_mutex_);
+            target_reached_flag_ = true;
+            target_reached_ = true;
+            printf("轴 %s 已到达目标位置!(汇川手动模式)\n", axis_name_.c_str());
+        }
+    }
+    
+    // === 点动控制（无位移指令时） ===
     double current_jog_speed;
     {
         std::lock_guard<std::mutex> lock(speed_mutex_);
@@ -387,10 +467,6 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
         // 反转：每个周期减少固定脉冲数，基于当前速度
         int32_t speed_pulses = displacement_to_pulses(current_jog_speed * PERIOD);
         target_pulses_ -= speed_pulses;
-    } else if (jog_stop_requested_) {
-        // 停止：保持当前位置
-        target_pulses_ = current_pos;
-        jog_stop_requested_ = false;
     }
     
     // 限制最大速度
@@ -470,15 +546,16 @@ AxisState HuichuanServoAxis::get_current_state() const {
     return current_state_;
 }
 
-// 根据轴名返回最大步长：axis4(板宽调整)限速，axis5使用较大步长
+// 最大步长 = jog_speed_ × PERIOD 转换为脉冲数
+// jog_speed_ 可通过 /jog_speed_command 动态设置，实现运行时调速
 int32_t HuichuanServoAxis::get_max_step() const {
-    // axis4 是板宽调整轴，需要限制速度(MAX_STEP=40)
-    // axis5 使用较大步长(不限速)
-    int32_t max_step = 40;
-    if (axis_name_ == "axis4") {
-        max_step = 100;  // 板宽调整轴限速
-    } else {
-        max_step = 120;  // 默认限速
+    double current_speed;
+    {
+        std::lock_guard<std::mutex> lock(speed_mutex_);
+        current_speed = jog_speed_;
     }
-    return max_step;
+    // 速度→每周期脉冲数，与手动模式计算方式一致
+    int32_t step = displacement_to_pulses(current_speed * PERIOD);
+    // 保底：至少1脉冲，防止卡死
+    return (step > 0) ? step : 1;
 }

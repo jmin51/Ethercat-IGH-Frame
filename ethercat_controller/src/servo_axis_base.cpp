@@ -54,6 +54,10 @@ void ServoAxisBase::initialize_members() {
     direction_flag_ = 0;
     new_target_ = 0;
     
+    // 位移中断保护初始化
+    saved_displacement_target_ = 0;
+    has_saved_displacement_ = false;
+    
     current_error_code_ = 0;
 }
 
@@ -74,21 +78,20 @@ void ServoAxisBase::set_displacement_updated(bool updated) {
 }
 
 void ServoAxisBase::stop() {
-    // 结束作业：先发送停止请求，状态机中处理减速后再跳转
+    // 线程安全：只设置请求标志，不在订阅者线程直接写运动变量
+    // 循环线程在状态机中处理停止逻辑，避免与 cyclic thread 竞争 target_pulses_
     if (current_state_ == AxisState::MANUAL_MODE || current_state_ == AxisState::AUTO_MODE) {
         stop_requested_ = true;
-        // std::cout << "轴 " << axis_name_ << " 停止请求已设置" << std::endl;
+        // 订阅者线程不直接写 target_pulses_ / joint_position_
+        // 清除点动请求标志（bool 写入是原子的）
+        jog_forward_requested_ = false;
+        jog_reverse_requested_ = false;
+        jog_stop_requested_ = false;
+        // 清除位移中断保护
+        has_saved_displacement_ = false;
     }
     
-    // 重置目标位置为当前位置（立即停止运动）
-    target_pulses_ = joint_position_;
-    
-    // 清除点动请求标志
-    jog_forward_requested_ = false;
-    jog_reverse_requested_ = false;
-    jog_stop_requested_ = false;
-    
-    // 重置目标到达标志
+    // 重置目标到达标志（flag_mutex_ 保护）
     target_reached_ = false;
     {
         std::lock_guard<std::mutex> lock(flag_mutex_);
@@ -147,6 +150,9 @@ void ServoAxisBase::reset_motion_state() {
     target_offset_ = 0;
     direction_flag_ = 0;
     new_target_ = 0;
+    // 清除位移中断保护
+    has_saved_displacement_ = false;
+    saved_displacement_target_ = 0;
     std::cout << "轴 " << axis_name_ << " 运动状态已重置，目标位置设为当前位置 " << joint_position_ << std::endl;
 }
 
@@ -172,7 +178,7 @@ int32_t ServoAxisBase::get_initial_position() const { return initial_position_; 
 DriveBrand ServoAxisBase::get_brand() const { return brand_; }
 
 // 保护方法实现
-int32_t ServoAxisBase::displacement_to_pulses(double displacement_mm) {
+int32_t ServoAxisBase::displacement_to_pulses(double displacement_mm) const{
     const double SCREW_LEAD = 10.0;  // 丝杠导程10mm
     const int PULSES_PER_REV = 10000;  // 每转脉冲数
     
