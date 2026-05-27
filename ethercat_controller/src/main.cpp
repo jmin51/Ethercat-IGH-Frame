@@ -549,11 +549,31 @@ int main(int argc, char **argv) {
             
             if (all_axes_auto_initialized) {
                 g_auto_mode_initialized.store(true);
-                printf("[恢复运行] 所有轴自动模式位置初始化完成\n");
-                // 关键修复：自动模式初始化完成后校正层号
-                global_node->calibrate_layer_after_auto_init();
-                // 所有轴自动模式初始化完成，绿灯常亮
-                notify_all_axes_ready();
+                
+                // 复位回原完成后 → 安全关闭（释放EtherCAT，不改变灯光，不发布初始化完成信号）
+                if (g_reset_homing_shutdown_pending.load()) {
+                    printf("[复位回原] 所有轴自动模式位置初始化完成，安全关闭释放EtherCAT资源...\n");
+                    g_reset_homing_shutdown_pending.store(false);
+                    // 复位完成，黄灯闪烁 → 绿灯闪烁，熄灭复位灯与蜂鸣器
+                    notify_system_ready();
+                    // 重置标志，确保重启后重新发布初始化完成信号
+                    g_auto_mode_initialized.store(false);
+                    if (global_node) {
+                        global_node->reset_auto_mode_init_published();
+                    }
+                    // 安全关闭：释放EtherCAT资源，保持灯光和ROS2
+                    g_system_running.store(false);
+                    g_reset_button_pressed.store(false);
+                    safe_shutdown(true);
+                    printf("[复位回原] 安全关闭完成，按启动按钮重新启动\n");
+                } else {
+                    // 正常流程：发布自动模式初始化完成信号
+                    printf("[恢复运行] 所有轴自动模式位置初始化完成\n");
+                    // 关键修复：自动模式初始化完成后校正层号
+                    global_node->calibrate_layer_after_auto_init();
+                    // 所有轴自动模式初始化完成，绿灯常亮
+                    notify_all_axes_ready();
+                }
             }
         }
         
@@ -590,6 +610,11 @@ int main(int argc, char **argv) {
             g_start_button_pressed.store(false);
             // 清除暂停标志，防止实时线程立即退出
             g_pause_button_pressed.store(false);
+            // 重置自动模式初始化标志（确保重新等待轴就绪）
+            g_auto_mode_initialized.store(false);
+            if (global_node) {
+                global_node->reset_auto_mode_init_published();
+            }
             
             // 重新初始化EtherCAT资源
             if (!master) {
@@ -660,6 +685,8 @@ int main(int argc, char **argv) {
             if (global_node) {
                 global_node->reset_auto_mode_init_published();
             }
+            // 标记复位回原完成后需要安全关闭（释放EtherCAT资源，保持灯光不变）
+            g_reset_homing_shutdown_pending.store(true);
             
             // 重新初始化EtherCAT资源
             if (!master) {

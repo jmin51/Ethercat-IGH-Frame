@@ -169,6 +169,17 @@ class BusinessLogicProcessor(Node):
         self.CONVEYOR_SPEED_NEUTRAL_RANGE = 7
         self.CONVEYOR_SPEED_AXIS_NAMES = ["axis5"]
 
+        # ========== 轴默认点动速度（与C++端初始化同步） ==========
+        self.DEFAULT_JOG_SPEEDS = {
+            "axis1_1": 280.0,   # 接驳台输送轴
+            "axis1_2": 280.0,   # 接驳台输送轴
+            "axis2_1": 230.0,   # 内部输送轴
+            "axis2_2": 230.0,   # 内部输送轴
+            "axis3":   40.0,    # 板宽调整轴
+            "axis4":   20.0,    # 板宽调整轴
+            "axis5":   120.0,   # 接驳台升降轴
+        }
+
         # ========== 超时检测 ==========
         self.WAREHOUSE_PROCESS_TIMEOUT = 60.0
         self.OUTBOUND_PROCESS_TIMEOUT = 40.0
@@ -280,7 +291,8 @@ class BusinessLogicProcessor(Node):
         elif '自动模式初始化完成' in status_text:
             if not self.auto_mode_initialized:
                 self.auto_mode_initialized = True
-                self.get_logger().info('检测到自动模式初始化完成，轴已就绪')
+                self.restore_default_jog_speeds()
+                self.get_logger().info('检测到自动模式初始化完成，轴已就绪，已恢复默认速度')
                 if self.pending_resume_state is not None:
                     self.pause_resume_mgr.execute_pending_resume()
             if not self.auto_mode_enabled:
@@ -646,6 +658,26 @@ class BusinessLogicProcessor(Node):
         self.get_logger().info(
             f'生成控制命令: 类型={action.type.name}, 轴={action.axis_name}, '
             f'值={action.command_value}, 描述={action.description}')
+
+    def send_axis_speed(self, axis_name: str, speed: float):
+        """发送轴点动速度命令"""
+        msg = String()
+        msg.data = f'{axis_name}:{speed}'
+        self.jog_speed_pub.publish(msg)
+
+    def restore_default_jog_speeds(self):
+        """恢复轴默认点动速度（自动模式初始化完成时调用）
+        
+        axis5由接驳台调速策略管理，此处不干预
+        """
+        restored = {}
+        for axis_name, speed in self.DEFAULT_JOG_SPEEDS.items():
+            if axis_name == "axis5":
+                continue
+            self.send_axis_speed(axis_name, speed)
+            restored[axis_name] = speed
+        self.get_logger().info(
+            f'已恢复轴默认点动速度(排除axis5): {restored}')
 
     def execute_pending_commands(self):
         """执行待处理命令"""

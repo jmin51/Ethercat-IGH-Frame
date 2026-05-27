@@ -98,6 +98,8 @@ class IoSignalHandler:
                 self.proc.product_arrival_state = "CONVEYOR_RUNNING"
                 if not conveyor_occupied:
                     # 输送带空闲，启动输送带
+                    self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
+                    self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
                     self.proc.add_command(ControlAction(
                         CommandType.JOG, "axis1_1", "reverse",
                         description="进料：启动轴1_1反转"

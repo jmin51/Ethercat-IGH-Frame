@@ -32,6 +32,9 @@ std::atomic<bool> g_resume_auto_mode(false);            // true=自动模式, fa
 // 自动模式初始化完成标志（用于业务逻辑恢复时等待轴就绪）
 std::atomic<bool> g_auto_mode_initialized(false);       // 所有轴自动模式位置初始化完成
 
+// 复位回原完成后待安全关闭标志
+std::atomic<bool> g_reset_homing_shutdown_pending(false);
+
 // 暂停状态记录全局变量定义
 PauseStateRecord g_pause_state_record;
 
@@ -393,12 +396,11 @@ void EthercatNode::init_axes(ec_master_t* master) {
             axis->set_jog_speed(20.0); // 将 axis4 的点动速度初始化为 20 mm/s
             RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 20.0 mm/s", name.c_str());
         } else if (name == "axis1_1" || name == "axis1_2") {
-            // 示例：为 axis1_1 和 axis1_2 设置其他速度
-            axis->set_jog_speed(200.0);
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 200.0 mm/s", name.c_str());
+            axis->set_jog_speed(280.0); // 接驳台输送轴
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 280.0 mm/s", name.c_str());
         } else if (name == "axis2_1" || name == "axis2_2") {
-            axis->set_jog_speed(200.0);
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 200.0 mm/s", name.c_str());
+            axis->set_jog_speed(230.0); // 内部输送轴
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 230.0 mm/s", name.c_str());
         } else if (name == "axis5") {
             axis->set_jog_speed(120.0); // 接驳台升降轴，近层默认速度
             RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 120.0 mm/s", name.c_str());
@@ -1419,6 +1421,9 @@ void EthercatNode::handle_board_width_command(const std_msgs::msg::Float64::Shar
     double target_width = msg->data;
     RCLCPP_INFO(this->get_logger(), "收到板宽设定命令: %.2fcm", target_width);
     
+    // +++ 实时同步当前板宽：从轴实际位置计算，防止手动模式点动后模型陈旧 +++
+    sync_axis4_current_width_from_position();
+    
     // 验证板宽范围
     if (!validate_board_width(target_width)) {
         std::stringstream err_ss;
@@ -1523,6 +1528,7 @@ void EthercatNode::calibrate_board_width_from_position() {
     double calculated_axis3_width = 15.0 - axis3_displacement_mm / 10.0;
     
     // axis4: 位移(mm) = (target_width - 15.0) * 10.0  →  反向: width = 15.0 + displacement/10.0
+    // 注意: axis4_displacement_mm 已含机械偏移，无需再加
     double calculated_axis4_width = 15.0 + axis4_displacement_mm / 10.0;
     
     // 限制在有效范围内
@@ -1565,6 +1571,31 @@ void EthercatNode::sync_axis3_current_width_from_position() {
                     axis3_current_width_, calculated_width, actual_pos);
     }
     axis3_current_width_ = calculated_width;
+}
+
+// +++ 实时同步：从axis4实际位置计算当前板宽 +++
+// 解决手动模式点动后 current_board_width_ 模型陈旧的问题
+void EthercatNode::sync_axis4_current_width_from_position() {
+    int idx = find_axis4_index();
+    if (idx == -1) return;
+    
+    int32_t actual_pos = servo_axes_[idx]->get_actual_position();
+    const double PULSES_PER_REV = 10000.0;
+    const double SCREW_LEAD = 10.0;
+    double axis4_gear_ratio = 7.37;
+    
+    double displacement_mm = (static_cast<double>(actual_pos) / PULSES_PER_REV) / axis4_gear_ratio * SCREW_LEAD;
+    double calculated_width = 15.0 + displacement_mm / 10.0;
+    
+    // 限制在有效范围
+    calculated_width = std::max(min_board_width_, std::min(max_board_width_, calculated_width));
+    
+    if (fabs(calculated_width - current_board_width_) > board_width_resolution_) {
+        RCLCPP_INFO(this->get_logger(), 
+                    "[Axis4] 板宽模型同步: %.2fcm -> %.2fcm (实际位置%d脉冲)",
+                    current_board_width_, calculated_width, actual_pos);
+    }
+    current_board_width_ = calculated_width;
 }
 
 int EthercatNode::find_axis4_index() {

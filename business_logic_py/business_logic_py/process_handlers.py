@@ -79,6 +79,9 @@ class ProcessHandlers:
                 self.proc.warehouse_state = WarehouseState.CONVEYOR_MOVING
                 self.proc.get_logger().info(
                     f'检测到入库条件，当前层={self.proc.current_layer_float:.2f}，开始输送')
+                # 恢复输送带默认速度（外部命令可能改过速度）
+                self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
+                self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
                 self.proc.add_command(ControlAction(
                     CommandType.JOG, "axis1_1", "reverse",
                     description="启动轴1_1正转"))
@@ -157,6 +160,9 @@ class ProcessHandlers:
             if self.proc.post_lift_delay_start is None:
                 self.proc.get_logger().info('入库流程：层移动完成，继续执行后续操作')
                 self.proc.send_do_control_once("812", True)
+                # 恢复内部输送轴默认速度
+                self.proc.send_axis_speed("axis2_1", self.proc.DEFAULT_JOG_SPEEDS["axis2_1"])
+                self.proc.send_axis_speed("axis2_2", self.proc.DEFAULT_JOG_SPEEDS["axis2_2"])
                 self.proc.add_command(ControlAction(
                     CommandType.JOG, "axis2_1", "forward", description="启动轴2_1正转"))
                 self.proc.add_command(ControlAction(
@@ -323,6 +329,9 @@ class ProcessHandlers:
             self.proc._outbound_waiting_layer_motion_printed = False
 
             self.proc.send_do_control_once("813", True)
+            # 恢复内部输送轴默认速度
+            self.proc.send_axis_speed("axis2_1", self.proc.DEFAULT_JOG_SPEEDS["axis2_1"])
+            self.proc.send_axis_speed("axis2_2", self.proc.DEFAULT_JOG_SPEEDS["axis2_2"])
             self.proc.add_command(ControlAction(
                 CommandType.JOG, "axis2_1", "reverse",
                 description="启动轴2_1反转（出库）"))
@@ -545,6 +554,9 @@ class ProcessHandlers:
                 if buffer_out and not self.proc.product_arrival_published_in_cycle:
                     self.proc.get_logger().info(
                         '放行流程：事件标志已丢失，通过buffer_out物理信号回退启动')
+                # 恢复输送带默认速度
+                self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
+                self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
                 self.proc.add_command(ControlAction(
                     CommandType.JOG, "axis1_1", "reverse",
                     description="启动轴1_1反转（放行）"))

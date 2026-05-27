@@ -226,6 +226,7 @@ private:
     void calibrate_board_width_from_position();
     // +++ 实时同步：决策前从轴位置刷新板宽模型 +++
     void sync_axis3_current_width_from_position();
+    void sync_axis4_current_width_from_position();
 
 public:
     /* ============================================
