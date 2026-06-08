@@ -35,6 +35,9 @@ std::atomic<bool> g_auto_mode_initialized(false);       // 所有轴自动模式
 // 复位回原完成后待安全关闭标志
 std::atomic<bool> g_reset_homing_shutdown_pending(false);
 
+// 复位按钮3秒确认后：急停完成，待执行回原流程
+std::atomic<bool> g_reset_pending_after_estop(false);
+
 // 暂停状态记录全局变量定义
 PauseStateRecord g_pause_state_record;
 
@@ -125,12 +128,13 @@ void EthercatNode::initialize_node() {
         });
     RCLCPP_INFO(this->get_logger(), "已订阅Python层业务逻辑故障话题 /business_logic_fault");
 
-    // +++ 新增：创建并启动 10ms 周期定时器 +++
+    // +++ IO状态与关节状态发布定时器 +++
+    // 20ms周期：加速IO信号感知，将buffer_out停轴延迟从~200ms降至~150ms
     periodic_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(100), // 100ms 周期
+        std::chrono::milliseconds(20),
         std::bind(&EthercatNode::periodic_timer_callback, this)
     );
-    RCLCPP_INFO(this->get_logger(), "10ms 周期定时器已创建并启动");
+    RCLCPP_INFO(this->get_logger(), "20ms IO发布定时器已创建并启动");
 
     // 初始化IO互斥锁
     pthread_mutex_init(&io_mutex_, nullptr);
@@ -393,8 +397,8 @@ void EthercatNode::init_axes(ec_master_t* master) {
     for (auto& axis : servo_axes_) {
         std::string name = axis->get_name();
         if (name == "axis4") {
-            axis->set_jog_speed(20.0); // 将 axis4 的点动速度初始化为 20 mm/s
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 20.0 mm/s", name.c_str());
+            axis->set_jog_speed(35.0); // 将 axis4 的点动速度初始化为 35 mm/s
+            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 35.0 mm/s", name.c_str());
         } else if (name == "axis1_1" || name == "axis1_2") {
             axis->set_jog_speed(280.0); // 接驳台输送轴
             RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 280.0 mm/s", name.c_str());

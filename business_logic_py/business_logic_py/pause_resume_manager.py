@@ -82,6 +82,7 @@ class PauseResumeManager:
                     params.get('outbound_state', 1),
                     params.get('outbound_layer', 1))
 
+            self.proc.pause_state_reported = False
             self.proc.get_logger().info('业务逻辑状态恢复完成，继续执行')
         except Exception as e:
             self.proc.get_logger().error(f'处理恢复命令失败: {e}')

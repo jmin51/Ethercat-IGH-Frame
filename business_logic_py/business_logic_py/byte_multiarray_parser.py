@@ -1166,10 +1166,10 @@ class ByteMultiArrayParser(Node):
         # 解析出库区域（第5字节）
         outbound_area = payload[4]
         
-        # 层号映射：1-41 映射到 -15 到 28
+        # 层号映射：1-43 映射到 -15 到 30
         if 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
-        elif 16 <= original_layer <= 41:
+        elif 16 <= original_layer <= 43:
             mapped_layer = original_layer - 13
         else:
             self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')
@@ -1214,10 +1214,10 @@ class ByteMultiArrayParser(Node):
         # 解析出库区域（第5字节）
         outbound_area = payload[4]
         
-        # 层号映射：1-41 映射到 -15 到 28
+        # 层号映射：1-43 映射到 -15 到 30
         if 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
-        elif 16 <= original_layer <= 41:
+        elif 16 <= original_layer <= 43:
             mapped_layer = original_layer - 13
         else:
             self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')
@@ -1471,10 +1471,10 @@ class ByteMultiArrayParser(Node):
         # 解析出库区域（第5字节）
         outbound_area = payload[4]
         
-        # 层号映射：与0x0101一致，1-41 映射到 -15 到 28
+        # 层号映射：与0x0101一致，1-43 映射到 -15 到 30
         if 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
-        elif 16 <= original_layer <= 41:
+        elif 16 <= original_layer <= 43:
             mapped_layer = original_layer - 13
         else:
             self.get_logger().warn(f'原始层号超出映射范围: {original_layer}')

@@ -147,6 +147,16 @@ class ProcessHandlers:
                     self.proc._waiting_layer_motion_printed = True
                 return
 
+            # 双重确认：信号到达 + 实际层号接近目标，防止暂停恢复时误触发
+            if not self.proc.is_target_layer_reached(self.proc.target_layer):
+                self.proc.get_logger().warn(
+                    f'收到层移动完成信号但当前层({self.proc.current_layer_float:.2f})'
+                    f'未到达目标层({self.proc.target_layer})'
+                    f'(偏差{abs(self.proc.current_layer_float - self.proc.target_layer):.2f}层)，'
+                    f'忽略误信号，继续等待轴到达')
+                self.proc.layer_motion_completed = False
+                return
+
             self.proc.get_logger().info(
                 f'层移动完成，当前层={self.proc.current_layer_float:.2f}，继续执行入库流程')
             self._reset_layer_motion_state()
@@ -172,7 +182,7 @@ class ProcessHandlers:
                 return
 
             elapsed = time.time() - self.proc.post_lift_delay_start
-            if elapsed < 0.5:
+            if elapsed < 0.3:
                 return
 
             self.proc.send_do_control_once("811", True)
@@ -321,6 +331,16 @@ class ProcessHandlers:
                         f'等待层移动完成... 源层={self.proc.source_layer}, '
                         f'当前层={self.proc.current_layer_float:.2f}')
                     self.proc._outbound_waiting_layer_motion_printed = True
+                return
+
+            # 双重确认：信号到达 + 实际层号接近源层，防止暂停恢复时误触发
+            if not self.proc.is_target_layer_reached(self.proc.source_layer):
+                self.proc.get_logger().warn(
+                    f'收到层移动完成信号但当前层({self.proc.current_layer_float:.2f})'
+                    f'未到达源层({self.proc.source_layer})'
+                    f'(偏差{abs(self.proc.current_layer_float - self.proc.source_layer):.2f}层)，'
+                    f'忽略误信号，继续等待轴到达')
+                self.proc.layer_motion_completed = False
                 return
 
             self.proc.get_logger().info(

@@ -617,12 +617,12 @@ def main_loop(self):
 |-----------|-------------|------|
 | -7 ~ +7 | 150 (默认) | 中性区间，速度不变 |
 | < -7 | 150 → 300 | 线性递增，最远-15层≈300mm/s |
-| > +7 | 150 → 300 | 线性递增，最远+28层≈300mm/s |
+| > +7 | 150 → 300 | 线性递增，最远+30层≈300mm/s |
 | 归位层1 | 300 (强制) | 空跑归位，`fast_return=True` |
 
 ### 层号映射（上游协议 → 内部层号）
 - 原始层号1-15 → 映射到 -15 ~ -1
-- 原始层号16-41 → 映射到 +3 ~ +28
+- 原始层号16-43 → 映射到 +3 ~ +30
 
 ### 核心组件
 
@@ -734,7 +734,7 @@ process_logic() 每周期调用:
 #### v2.9.2 (2026-05-14): 新增0x011E通知移动/0x011F移动结果协议
 - **协议格式**：与0x0101/0x0102一致 — 0x011E payload: [宽度2B + 层号2B + 区域1B]，0x011F payload: [命令码2B + 故障码2B]
 - **数据流**：PC→0x011E→byte_multiarray_parser→/layer_move_start→business_logic_processor→send_layer_command()→C++层移动→/layer_motion_completed→business_logic_processor(双重确认)→/layer_move_completed→byte_multiarray_parser→0x011F→PC
-- **层号映射**：与0x0101完全一致（1-41→-15~28）
+- **层号映射**：与0x0101完全一致（1-43→-15~30）
 - **完成判断**：`layer_motion_completed` 信号 + `current_layer_float` 与目标层容差0.5层双重确认
 - **超时检测**：30秒，超时回包0x011F带故障码0x5002
 - **故障回包**：故障时自动回包0x011F（`_send_pending_response_with_fault` 新增分支）

@@ -505,6 +505,9 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
         initial_position_ = current_pos;
         target_pulses_ = initial_position_;
         position_initialized_ = true;
+        // 关键修复：标记已到达，防止else分支误设target_reached_flag_
+        // 进入自动模式时轴静止于初始位置，后续由displacement_updated驱动移动
+        target_reached_ = true;
         printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
     }
     

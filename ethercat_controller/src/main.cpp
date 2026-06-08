@@ -496,7 +496,7 @@ int main(int argc, char **argv) {
             printf("系统已短按暂停，等待启动按钮恢复...\n");
         }
         
-        // 检查完整关闭请求（急停或长按暂停按钮触发）
+        // 检查完整关闭请求（急停或复位触发的急停流程）
         if (g_full_shutdown_requested.load()) {
             printf("检测到完整关闭请求（急停）...\n");
             g_system_running.store(false);
@@ -504,7 +504,15 @@ int main(int argc, char **argv) {
             g_reset_button_pressed.store(false);
             g_full_shutdown_requested.store(false);
             safe_shutdown(true);  // true表示暂停模式
-            printf("系统已完全暂停，等待启动按钮...\n");
+            
+            // 复位触发的急停完成后，衔接复位回原流程
+            if (g_reset_pending_after_estop.load()) {
+                g_reset_pending_after_estop.store(false);
+                g_reset_button_pressed.store(true);
+                printf("[复位] 急停流程完成，衔接复位回原流程...\n");
+            } else {
+                printf("系统已完全暂停，等待启动按钮...\n");
+            }
         }
         
         // 检查恢复后的模式切换请求（轴就绪后再执行模式切换）

@@ -52,6 +52,9 @@ extern std::atomic<bool> g_auto_mode_initialized;       // 所有轴自动模式
 // 复位回原完成后待安全关闭标志（回原完成后释放EtherCAT资源，保持灯光不变）
 extern std::atomic<bool> g_reset_homing_shutdown_pending;
 
+// 复位按钮3秒确认后：急停完成，待执行回原流程
+extern std::atomic<bool> g_reset_pending_after_estop;
+
 /* ============================================
  * 暂停状态记录结构 - 用于保存业务逻辑状态
  * ============================================ */

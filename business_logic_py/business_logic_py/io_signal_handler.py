@@ -80,8 +80,13 @@ class IoSignalHandler:
 
         # ========== 输送带占用状态 ==========
         # 不冻结整个状态机，仅用于决定：是否启动输送带、是否立即发布0x0109
+        # COMPLETED但升降机未归位第1层时仍占用——防止新板推入未归位接驳台
+        warehouse_completed_but_not_home = (
+            self.proc.warehouse_state == WarehouseState.COMPLETED and
+            not self.proc.is_target_layer_reached(1))
         conveyor_occupied_by_warehouse = (
-            self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING)
+            self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING or
+            warehouse_completed_but_not_home)
         conveyor_occupied_by_release = (
             self.proc.release_state == PassThroughState.CONVEYOR_RUNNING)
         conveyor_occupied = conveyor_occupied_by_warehouse or conveyor_occupied_by_release
@@ -96,7 +101,7 @@ class IoSignalHandler:
             if feed_detect and not self.proc.feed_detected:
                 self.proc.feed_detected = True
                 self.proc.product_arrival_state = "CONVEYOR_RUNNING"
-                if not conveyor_occupied:
+                if not conveyor_occupied and not buffer_out:
                     # 输送带空闲，启动输送带
                     self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
                     self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
@@ -120,6 +125,26 @@ class IoSignalHandler:
 
         # === CONVEYOR_RUNNING ===
         elif self.proc.product_arrival_state == "CONVEYOR_RUNNING":
+            # 补启输送带：仅处理"从未启动"的场景
+            # buffer_in是电平信号，作为重启条件会导致100ms风暴
+            need_restart = (
+                not conveyor_occupied and not buffer_out and
+                not self.proc.conveyor_started_for_arrival)
+            if need_restart:
+                self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
+                self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_1", "reverse",
+                    description="进料：补启轴1_1反转"
+                ))
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_2", "forward",
+                    description="进料：补启轴1_2正转"
+                ))
+                self.proc.conveyor_started_for_arrival = True
+                self.proc.get_logger().info(
+                    '产品到位检测：输送带已释放，补启输送带')
+
             if buffer_in and not self.proc.buffer_in_detected:
                 self.proc.buffer_in_detected = True
                 self.proc.product_arrival_state = "WAITING_BUFFER_OUT"
@@ -128,13 +153,35 @@ class IoSignalHandler:
 
         # === WAITING_BUFFER_OUT ===
         elif self.proc.product_arrival_state == "WAITING_BUFFER_OUT":
+            # 补启输送带：仅处理"从未启动"的场景
+            # buffer_in是电平信号，作为重启条件会导致100ms风暴
+            need_restart = (
+                not conveyor_occupied and not buffer_out and
+                not self.proc.conveyor_started_for_arrival)
+            if need_restart:
+                self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
+                self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_1", "reverse",
+                    description="进料：补启轴1_1反转(等待buffer_out)"
+                ))
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_2", "forward",
+                    description="进料：补启轴1_2正转(等待buffer_out)"
+                ))
+                self.proc.conveyor_started_for_arrival = True
+                self.proc.get_logger().info(
+                    '产品到位检测：输送带已释放，补启输送带(等待buffer_out)')
+
             if buffer_out:
+                # 产品到达buffer_out → 立即停轴，无论输送带是否占用
+                # 停轴是物理安全需求，发布0x0109才是流程协调需求
+                self._stop_arrival_conveyor()
                 if not conveyor_occupied:
-                    # 输送带空闲：停止输送带，立即发布0x0109
-                    self._stop_arrival_conveyor()
+                    # 输送带空闲：立即发布0x0109
                     self._publish_arrival()
                 else:
-                    # 输送带被占用：不停输送带，延迟发布
+                    # 输送带被占用：延迟发布
                     self.proc.product_arrival_state = "PENDING_PUBLISH"
                     self.proc.get_logger().info(
                         '产品到位检测：PCB已到达buffer_out，'
@@ -143,15 +190,14 @@ class IoSignalHandler:
         # === PENDING_PUBLISH ===
         elif self.proc.product_arrival_state == "PENDING_PUBLISH":
             if not conveyor_occupied:
-                # 输送带已释放：停止输送带（若由我们启动），发布0x0109
-                self._stop_arrival_conveyor()
+                # 输送带已释放：轴已在WAITING_BUFFER_OUT阶段停止，直接发布0x0109
                 self._publish_arrival()
                 self.proc.get_logger().info(
                     '产品到位检测：输送带已释放，发布延迟的0x0109')
 
         # === COMPLETED ===
         elif self.proc.product_arrival_state == "COMPLETED":
-            if not feed_detect:
+            if not feed_detect or not buffer_out:
                 self.proc.product_arrival_state = "IDLE"
                 self.proc.feed_detected = False
                 self.proc.buffer_in_detected = False
@@ -167,16 +213,11 @@ class IoSignalHandler:
                 self.proc.get_logger().info('产品到位检测：重置状态机，等待下一轮')
 
     def _stop_arrival_conveyor(self):
-        """停止由产品到位检测启动的输送带"""
+        """停止由产品到位检测启动的输送带（立即发送，绕过命令队列）"""
         if self.proc.conveyor_started_for_arrival:
-            self.proc.add_command(ControlAction(
-                CommandType.JOG, "axis1_1", "stop",
-                description="进料：停止轴1_1"
-            ))
-            self.proc.add_command(ControlAction(
-                CommandType.JOG, "axis1_2", "stop",
-                description="进料：停止轴1_2"
-            ))
+            self.proc.send_jog_command("axis1_1:stop")
+            self.proc.send_jog_command("axis1_2:stop")
+            self.proc.get_logger().info('进料：立即停止轴1_1和轴1_2（绕过队列）')
             self.proc.conveyor_started_for_arrival = False
 
     def _publish_arrival(self):

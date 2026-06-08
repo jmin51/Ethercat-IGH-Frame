@@ -55,6 +55,7 @@ extern std::atomic<bool> g_system_running;
 extern std::atomic<bool> g_short_pause_requested;
 extern std::atomic<bool> g_short_pause_active;     // 短按暂停激活状态
 extern std::atomic<bool> g_full_shutdown_requested; // 完整关闭请求
+extern std::atomic<bool> g_reset_pending_after_estop; // 复位触发的急停后待执行回原
 
 // ============================================================================
 // 内部辅助函数
@@ -141,13 +142,15 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - g_reset_press_start_time).count();
         if (elapsed >= RESET_CONFIRM_MS && !g_reset_light_on) {
-            // 满3秒，触发复位
+            // 满3秒，先触发急停逻辑，再由main.cpp衔接复位回原流程
             g_reset_light_on = true;
             g_start_light_on = false;
             g_pause_light_on = false;
             g_tricolor_state = LIGHT_YELLOW_BLINK;
-            g_reset_button_pressed.store(true);
-            printf("[Lights] 复位按钮确认（3秒），复位灯亮起，黄灯闪烁，蜂鸣器响\n");
+            g_full_shutdown_requested.store(true);   // 触发急停关闭流程
+            g_pause_button_pressed.store(true);      // 急停暂停标志
+            g_reset_pending_after_estop.store(true); // 标记急停后待执行复位回原
+            printf("[Lights] 复位按钮确认（3秒），先触发急停流程，再执行回原\n");
         }
     }
     
@@ -189,6 +192,8 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
         g_short_pause_active.store(false);
         // 取消复位计时（如果正在进行）
         g_reset_button_held = false;
+        // 物理急停激活时，取消复位回原流程
+        g_reset_pending_after_estop.store(false);
     }
     last_emergency_active = any_emergency_active;
     

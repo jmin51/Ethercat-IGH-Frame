@@ -29,7 +29,7 @@ void LayerCommandProcessor::initialize_default_layer_heights() {
     layer_heights_.clear();
 
         // 默认配置：每层25mm间距，第1层为0mm
-    for (int8_t layer = -20; layer <= 28; ++layer) {
+    for (int8_t layer = -20; layer <= 30; ++layer) {
         layer_heights_[layer] = (layer - 1) * 25.0;
     }
     RCLCPP_INFO(node_->get_logger(), "初始化默认层高配置，范围: -20到+30，共%d层", static_cast<int>(layer_heights_.size()));
@@ -207,16 +207,18 @@ bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoA
         // 使用 freshly 计算的层号
         current_layer_float_ = fresh_layer_float;
         
-        // 验证实际位置是否接近目标层（容差0.5层）
+        // 验证实际位置是否接近目标层（容差0.1层）
         double target_layer_float = static_cast<double>(target_layer_);
         double layer_diff = std::abs(current_layer_float_ - target_layer_float);
         
         if (layer_diff > 0.1) {
             // 实际位置与目标层偏差较大，警告但继续完成
             RCLCPP_WARN(node_->get_logger(), 
-                        "层移动完成警告: 目标层=%.1f, 实际层=%.2f, 偏差=%.2f层 (current=%d, mm=%.2f)",
+                        "层移动完成拒绝: 目标层=%.1f, 实际层=%.2f, 偏差=%.2f层 (current=%d, mm=%.2f) - 继续等待轴到达",
                         target_layer_float, current_layer_float_, layer_diff,
                         current_pulses, position_mm);
+            // 不设置is_moving_=false，循环线程下一周期继续等待真正的到达
+            return false;
         }
         
         // 使用实际位置计算的层号作为当前层（四舍五入）
@@ -224,7 +226,7 @@ bool LayerCommandProcessor::check_motion_completion(const std::shared_ptr<ServoA
         
         // 限制在有效范围
         if (current_layer_ < 1) current_layer_ = 1;
-        if (current_layer_ > 28) current_layer_ = 28;
+        if (current_layer_ > 30) current_layer_ = 30;
         
         is_moving_ = false;
         
@@ -289,7 +291,7 @@ void LayerCommandProcessor::update_current_layer_from_axis5(const std::shared_pt
     
     // 限制在有效范围内
     if (current_layer_ < 1) current_layer_ = 1;
-    if (current_layer_ > 28) current_layer_ = 28;
+    if (current_layer_ > 30) current_layer_ = 30;
 }
 
 // 新增：校正层号（自动模式初始化完成后调用）

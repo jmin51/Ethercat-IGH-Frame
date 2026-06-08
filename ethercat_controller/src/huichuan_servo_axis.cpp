@@ -397,7 +397,9 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
     // joint_position_ 是软件模型，长时间运行会与驱动器实际位置漂移
     // 策略：当轴静止时（无运动指令），同步到实际位置
     if (!displacement_updated_ && !jog_forward_requested_ && !jog_reverse_requested_ 
-        && !has_saved_displacement_ && abs(target_pulses_ - joint_position_) <= 50) {
+        && !has_saved_displacement_
+        && abs(target_pulses_ - joint_position_) <= 50
+        && abs(current_pos - target_pulses_) <= 100) {
         joint_position_ = current_pos;
         target_pulses_ = current_pos;
     }
@@ -486,6 +488,9 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
         initial_position_ = current_pos; //current_pos;
         target_pulses_ = initial_position_;
         position_initialized_ = true;
+        // 关键修复：标记已到达，防止else分支误设target_reached_flag_
+        // 进入自动模式时轴静止于初始位置，后续由displacement_updated驱动移动
+        target_reached_ = true;
         printf("轴 %s 自动模式位置初始化完成\n", axis_name_.c_str());
     }
 

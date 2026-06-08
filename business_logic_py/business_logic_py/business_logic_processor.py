@@ -171,12 +171,12 @@ class BusinessLogicProcessor(Node):
 
         # ========== 轴默认点动速度（与C++端初始化同步） ==========
         self.DEFAULT_JOG_SPEEDS = {
-            "axis1_1": 280.0,   # 接驳台输送轴
-            "axis1_2": 280.0,   # 接驳台输送轴
+            "axis1_1": 230.0,   # 接驳台输送轴
+            "axis1_2": 230.0,   # 接驳台输送轴
             "axis2_1": 230.0,   # 内部输送轴
             "axis2_2": 230.0,   # 内部输送轴
             "axis3":   40.0,    # 板宽调整轴
-            "axis4":   20.0,    # 板宽调整轴
+            "axis4":   35.0,    # 板宽调整轴
             "axis5":   120.0,   # 接驳台升降轴
         }
 
@@ -207,6 +207,7 @@ class BusinessLogicProcessor(Node):
         # ========== 层移动指令追踪(0x011E) ==========
         self.layer_move_active = False        # 是否有0x011E触发的层移动在执行中
         self.layer_move_target_layer = None   # 0x011E触发的目标层号
+        self.layer_move_manual_speed = False   # 手动层移动固定150mm/s标志
 
         # ================================================================
         # ROS2 发布器
@@ -310,6 +311,10 @@ class BusinessLogicProcessor(Node):
 
     def warehouse_start_callback(self, msg):
         """处理入库启动命令"""
+        # 暂停期间拒绝新启动命令，主机会在超时后重发
+        if self.pause_state_reported:
+            self.get_logger().warn('系统暂停中，拒绝入库启动命令，等待恢复后重试')
+            return
         if not self.auto_mode_enabled:
             self.get_logger().warn('自动模式未启用，忽略入库启动命令')
             return
@@ -344,6 +349,10 @@ class BusinessLogicProcessor(Node):
 
     def outbound_start_callback(self, msg):
         """处理出库启动命令"""
+        # 暂停期间拒绝新启动命令，主机会在超时后重发
+        if self.pause_state_reported:
+            self.get_logger().warn('系统暂停中，拒绝出库启动命令，等待恢复后重试')
+            return
         if not self.auto_mode_enabled:
             self.get_logger().warn('自动模式未启用，忽略出库启动命令')
             return
@@ -447,6 +456,8 @@ class BusinessLogicProcessor(Node):
         self.layer_move_active = True
         self.layer_move_target_layer = target_layer
         self.layer_motion_completed = False
+        # 标记手动层移动：固定150mm/s，阻断动态调速(150/300)介入
+        self.layer_move_manual_speed = True
         # 重置边沿检测基准：确保后续的 false→true 边沿能被捕获
         self.previous_layer_completion_state = False
         
@@ -456,7 +467,9 @@ class BusinessLogicProcessor(Node):
         
         # 发送层指令到C++层
         self.send_layer_command(target_layer)
-        self.get_logger().info(f'已发送层移动指令: 第{target_layer}层')
+        # 手动层移动：覆盖动态调速，固定150mm/s
+        self.send_axis_speed("axis5", 150.0)
+        self.get_logger().info(f'已发送层移动指令: 第{target_layer}层, 固定速度: 150.0mm/s')
 
     # ================================================================
     # 主调度逻辑
@@ -496,7 +509,8 @@ class BusinessLogicProcessor(Node):
         )
         if io_changed:
             self.get_logger().info(
-                f'IO信号状态变化: buffer_in={self.current_io_signals["buffer_in_position"]}, '
+                f'IO信号状态变化: feed_detect={self.current_io_signals["feed_product_detect"]}, '
+                f'buffer_in={self.current_io_signals["buffer_in_position"]}, '
                 f'buffer_out={self.current_io_signals["buffer_out_position"]}, '
                 f'conveyor_in={self.current_io_signals["conveyor_in_position"]}, '
                 f'conveyor_out={self.current_io_signals["conveyor_out_position"]}, '
@@ -623,10 +637,18 @@ class BusinessLogicProcessor(Node):
             f'层移动(0x011E)完成: 目标层={self.layer_move_target_layer}, '
             f'当前层={self.current_layer_float:.2f}, 自动模式={self.auto_mode_enabled}')
         
+        # 恢复axis5默认点动速度，避免层移动调速残留影响后续点动
+        self.send_axis_speed("axis5", self.DEFAULT_JOG_SPEEDS["axis5"])
+        
         # 重置追踪状态
         self.layer_move_active = False
         self.layer_move_target_layer = None
         self.layer_motion_completed = False
+        self.layer_move_manual_speed = False
+        # 重置层指令状态，阻断 _check_return_speed_transition() 继续覆盖速度
+        self.layer_command_sent = False
+        self.last_layer_command = None
+        self._last_return_speed = None
 
     def reset_process_timeout(self, process_type: str):
         """重置流程超时状态"""
@@ -704,7 +726,7 @@ class BusinessLogicProcessor(Node):
             distance = mapped_layer - self.CONVEYOR_SPEED_NEUTRAL_RANGE
         max_distance = max(
             abs(-15 - (-self.CONVEYOR_SPEED_NEUTRAL_RANGE)),
-            abs(28 - self.CONVEYOR_SPEED_NEUTRAL_RANGE))
+            abs(30 - self.CONVEYOR_SPEED_NEUTRAL_RANGE))
         speed_range = self.CONVEYOR_SPEED_FAR - self.CONVEYOR_SPEED_NEAR
         ratio = min(distance / max_distance, 1.0)
         speed = self.CONVEYOR_SPEED_NEAR + speed_range * ratio
@@ -758,6 +780,9 @@ class BusinessLogicProcessor(Node):
 
     def _check_return_speed_transition(self):
         """归位运动中动态调速：接近目标层7层时从300降速到150"""
+        # 手动层移动(0x011E)固定150mm/s，不参与归位动态调速
+        if getattr(self, 'layer_move_manual_speed', False):
+            return
         # 仅在归位运动且层指令已发出时生效
         if not self.layer_command_sent or self.last_layer_command is None:
             return
@@ -866,6 +891,7 @@ class BusinessLogicProcessor(Node):
         # 重置层移动(0x011E)追踪状态
         self.layer_move_active = False
         self.layer_move_target_layer = None
+        self.layer_move_manual_speed = False
         self.reset_do_command_state()
         self.warehouse_completion_published = False
         self.outbound_completion_published = False
