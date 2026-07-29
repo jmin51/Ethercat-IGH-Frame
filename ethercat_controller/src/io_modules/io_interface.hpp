@@ -48,6 +48,8 @@ typedef struct {
     // 下游握手（发送板子）
     bool smema_dbr;              // M536 SMEMA下游要板信号 (Downstream Board Ready)
     bool smema_dbr_test;         // M537 SMEMA下游要板测试信号 (OR合并至smema_dbr)
+    bool conveyor_exit_gap_detect;   // M540 接驳台出料检测（缝隙）
+    bool conveyor_entry_gap_detect;  // M541 接驳台入料检测（缝隙）
 } DI_Interface;
 
 // DO 输出信号接口定义

@@ -106,16 +106,20 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
     bool any_emergency_active = !emergency_stop1 || !emergency_stop2;
     
     // 启动按钮：点亮启动灯，熄灭其他灯，绿灯闪烁+蜂鸣器，等待轴就绪
-    // 急停激活时禁止启动
+    // 急停激活时禁止启动；系统已运行时忽略重复按下
     if (start_rising && !any_emergency_active) {
-        g_start_light_on = true;
-        g_reset_light_on = false;
-        g_pause_light_on = false;
-        g_tricolor_state = LIGHT_GREEN_BLINK;  // 绿灯闪烁（等待轴就绪）
-        g_start_button_pressed.store(true);
-        // 取消复位计时（如果正在进行）
-        g_reset_button_held = false;
-        printf("[Lights] 启动按钮触发，启动灯亮起，绿灯闪烁，蜂鸣器响，等待轴就绪...\n");
+        if (g_system_running.load()) {
+            printf("[Lights] 启动按钮按下，系统已在运行，忽略重复启动\n");
+        } else {
+            g_start_light_on = true;
+            g_reset_light_on = false;
+            g_pause_light_on = false;
+            g_tricolor_state = LIGHT_GREEN_BLINK;  // 绿灯闪烁（等待轴就绪）
+            g_start_button_pressed.store(true);
+            // 取消复位计时（如果正在进行）
+            g_reset_button_held = false;
+            printf("[Lights] 启动按钮触发，启动灯亮起，绿灯闪烁，蜂鸣器响，等待轴就绪...\n");
+        }
     }
     
     // 复位按钮：按住3秒确认，点亮复位灯，启动黄灯闪烁+蜂鸣器

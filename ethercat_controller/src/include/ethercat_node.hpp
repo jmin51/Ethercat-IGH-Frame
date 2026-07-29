@@ -148,11 +148,27 @@ private:
     DI_Interface current_di_status_;
     DO_Interface current_do_control_;
     pthread_mutex_t io_mutex_;
+
+    // ================================================================
+    // M540/M541 缝隙信号非对称下降沿防抖
+    // 上升沿(板子到达)立即响应, 下降沿(板子离开)需持续3周期(300ms)确认
+    // 确保 PCB 完全通过缝隙后才判定信号消失, 避免板子卡缝时升降机误动
+    // 红线: 仅缝隙传感器防抖, 急停M516/M517绝对禁止防抖
+    // ================================================================
+    struct GapDetectDebouncer {
+        bool m541_filtered{false};       // M541 防抖后输出
+        int  m541_falling_counter{0};    // M541 下降沿持续计数
+        bool m540_filtered{false};       // M540 防抖后输出
+        int  m540_falling_counter{0};    // M540 下降沿持续计数
+    };
+    GapDetectDebouncer gap_debounce_;
+    static constexpr int GAP_DEBOUNCE_CYCLES = 3;  // 3周期 = 300ms @ 100ms周期
+    void debounce_gap_signals(DI_Interface& di);
     
     // 状态变化检测（避免日志洪泛）
     bool last_all_axes_ready_ = false;  // 上次所有轴就绪状态
     bool last_manual_auto_state_ = false;  // 上次手自动状态
-    bool auto_mode_init_published_ = false;  // 自动模式初始化完成状态是否已发布
+    bool auto_mode_edge_triggered_ = false;  // 自动模式初始化完成边沿是否已触发（一次性副作用）
     
     // 命令去重防抖（防止重复命令洪泛）
     std::string last_command_;              // 上次执行的命令
@@ -236,13 +252,15 @@ public:
     void publish_pause_state_record_request();
     // 发布暂停状态恢复请求（携带记录的状态）
     void publish_pause_state_resume_request();
+    // 发布系统状态消息（供main.cpp急停等场景通知Python层）
+    void publish_system_status(const std::string& status);
     // 获取暂停状态记录发布器
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr get_pause_state_pub() { return pause_state_pub_; }
     // 处理Python端的状态报告
     void handle_pause_state_report(const std_msgs::msg::String::SharedPtr msg);
     
-    // 重置自动模式初始化发布标志（用于暂停后恢复）
-    void reset_auto_mode_init_published() { auto_mode_init_published_ = false; }
+    // +++ 自动模式就绪状态周期性广播（真相驱动，替代一次性事件通知）+++
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr auto_mode_status_pub_;
 
 private:
     // 暂停状态话题发布器
@@ -269,7 +287,7 @@ extern std::atomic<bool> g_reset_button_pressed;  // 新增：复位按钮状态
 
 // 全局函数声明
 void signal_handler(int signum);
-void safe_shutdown(bool is_pause);
+void safe_shutdown(bool is_pause = false, bool silent = false);
 void* rt_task_wrapper(void* arg);
 void* io_monitor_thread(void* arg);  // 新增IO监控线程
 

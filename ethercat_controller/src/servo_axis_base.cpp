@@ -1,5 +1,6 @@
 #include "servo_axis_base.hpp"
 #include <iostream>
+#include <cstdint>
 
 ServoAxisBase::ServoAxisBase(const std::string& name, uint16_t position, 
                            AxisType axis_type, DriveBrand brand, uint32_t product_code, double gear_ratio)
@@ -153,6 +154,8 @@ void ServoAxisBase::reset_motion_state() {
     // 清除位移中断保护
     has_saved_displacement_ = false;
     saved_displacement_target_ = 0;
+    // 重置速度斜坡
+    ramp_.reset();
     std::cout << "轴 " << axis_name_ << " 运动状态已重置，目标位置设为当前位置 " << joint_position_ << std::endl;
 }
 
@@ -291,50 +294,140 @@ bool ServoAxisBase::is_target_reached() const {
     return target_reached_flag_;
 }
 
-// 在逐步逼近函数中设置标志位
+// ============================================
+// 逐步逼近 —— T 型速度斜坡版
+// 斜坡禁用(accel_per_cycle_=0)时与原逻辑完全等价
+// ============================================
 void ServoAxisBase::gradual_approach(int32_t target_pulses, uint8_t* domain1_pd) {
     const int32_t TOLERANCE = 50;
     int32_t error = target_pulses - joint_position_;
-    int32_t max_step = 0;  // 声明在函数顶部
-    int32_t step = 0;      // 声明在函数顶部
-    
-    // 速度打印计数器（每1000次打印一次，约1秒）
-    static std::map<std::string, int> print_counters;
-    static std::map<std::string, int32_t> last_positions;
-    int& counter = print_counters[axis_name_];
-    int32_t& last_pos = last_positions[axis_name_];
-    
+    int32_t max_step = get_max_step();
+
+    // === 到达目标: 对齐 + 重置斜坡 ===
     if (abs(error) <= TOLERANCE) {
+        ramp_.reset();
         if (!target_reached_) {
-            // 第一次到达目标位置
             std::lock_guard<std::mutex> lock(flag_mutex_);
             target_reached_flag_ = true;
             target_reached_ = true;
             printf("轴 %s 已到达目标位置!\n", axis_name_.c_str());
         }
-        joint_position_ = target_pulses; // 精确对齐
-    } else {
-        // 使用虚函数获取最大步长，支持不同轴不同限速
-        max_step = get_max_step();
-        step = (abs(error) > max_step) ? 
-               ((error > 0) ? max_step : -max_step) : error;
-        joint_position_ += step;
-        target_reached_ = false; // 离开目标位置
-        
-        // 定期打印速度信息（每3000个周期约3000ms）
-        counter++;
-        if (counter >= 3000) {
-            counter = 0;
-            // 计算实际速度: 脉冲差/周期 = 脉冲/s，再转换为mm/s
-            int32_t pos_diff = abs(joint_position_ - last_pos);
-            double speed_mm_per_s = pulses_to_displacement(pos_diff); // 1秒内移动的mm数
-            printf("[速度监控] 轴 %s: 步长=%d脉冲, 当前速度=%.2f mm/s (MAX_STEP=%d, error=%d)\n", 
-                   axis_name_.c_str(), step, speed_mm_per_s, max_step, error);
-            last_pos = joint_position_;
-        }
+        joint_position_ = target_pulses;
+        EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+        return;
     }
-    
+
+    // 速度监控统计
+    static std::map<std::string, int> print_counters;
+    static std::map<std::string, int32_t> last_positions;
+    int& counter = print_counters[axis_name_];
+    int32_t& last_pos = last_positions[axis_name_];
+
+    int32_t step;
+
+    if (ramp_.enabled()) {
+        /* ============================================
+         * 斜坡模式: T 型速度剖面
+         *   加速段: step 每周期 +accel, 直到 max_step
+         *   匀速段: step = max_step
+         *   减速段: step 每周期 -accel, 直到 min_step
+         * 短行程自动退化到三角波 (跳过匀速段)
+         * ============================================ */
+        int32_t abs_err = abs(error);
+
+        // 匀减速运动学: 从步长 v 减到 min_step 所需脉冲数
+        auto decel_needed = [&](int32_t v) -> int32_t {
+            int64_t v2   = static_cast<int64_t>(v) * v;
+            int64_t vm2  = static_cast<int64_t>(ramp_.min_step_) * ramp_.min_step_;
+            int32_t decel = static_cast<int32_t>((v2 - vm2) / (2 * ramp_.accel_per_cycle_));
+            return (decel > 0) ? decel : 0;
+        };
+
+        // -- IDLE → ACCEL: 首次进入运动 --
+        if (ramp_.phase == RampState::IDLE) {
+            ramp_.phase = RampState::ACCEL;
+            ramp_.current_step_ = ramp_.min_step_;
+        }
+
+        // -- ACCEL --
+        if (ramp_.phase == RampState::ACCEL) {
+            ramp_.current_step_ += ramp_.accel_per_cycle_;
+            if (ramp_.current_step_ >= max_step) {
+                ramp_.current_step_ = max_step;
+                ramp_.phase = RampState::CONSTANT;
+            }
+            // 短行程: 未到匀速就需开始减速
+            if (abs_err <= decel_needed(ramp_.current_step_)) {
+                ramp_.phase = RampState::DECEL;
+            }
+        }
+
+        // -- CONSTANT --
+        if (ramp_.phase == RampState::CONSTANT) {
+            ramp_.current_step_ = max_step;
+            if (abs_err <= decel_needed(max_step)) {
+                ramp_.phase = RampState::DECEL;
+            }
+        }
+
+        // -- DECEL --
+        if (ramp_.phase == RampState::DECEL) {
+            ramp_.current_step_ -= ramp_.accel_per_cycle_;
+            if (ramp_.current_step_ < ramp_.min_step_) {
+                ramp_.current_step_ = ramp_.min_step_;
+            }
+            // 减速过头(可能因 max_step 运行时变化): 重新进入 ACCEL
+            if (abs_err > decel_needed(ramp_.current_step_) + max_step) {
+                ramp_.phase = RampState::ACCEL;
+            }
+        }
+
+        step = (error > 0) ? ramp_.current_step_ : -ramp_.current_step_;
+
+    } else {
+        /* ============================================
+         * 原有模式: 恒速步进 (accel_per_cycle_=0)
+         * 未配置 ramp 的轴与原行为完全一致
+         * ============================================ */
+        step = (abs(error) > max_step)
+               ? ((error > 0) ? max_step : -max_step)
+               : error;
+    }
+
+    joint_position_ += step;
+    target_reached_ = false;
+
+    // 定期速度监控 (每 3000 周期 ≈ 3s) -- 已禁用
+    counter++;
+    if (counter >= 3000) {
+        counter = 0;
+        // int32_t pos_diff = abs(joint_position_ - last_pos);
+        // double speed_mm_per_s = pulses_to_displacement(pos_diff);
+        // if (ramp_.enabled()) {
+        //     printf("[速度监控] 轴 %s: 步长=%d脉冲, 速度=%.2f mm/s, phase=%d"
+        //            " (MAX_STEP=%d, error=%d)\n",
+        //            axis_name_.c_str(), step, speed_mm_per_s,
+        //            static_cast<int>(ramp_.phase), max_step, error);
+        // } else {
+        //     printf("[速度监控] 轴 %s: 步长=%d脉冲, 当前速度=%.2f mm/s"
+        //            " (MAX_STEP=%d, error=%d)\n",
+        //            axis_name_.c_str(), step, speed_mm_per_s, max_step, error);
+        // }
+        // last_pos = joint_position_;
+    }
+
     EC_WRITE_S32(domain1_pd + off_target_position_, joint_position_);
+}
+
+// ============================================
+// 斜坡参数配置
+// ============================================
+void ServoAxisBase::configure_ramp(int32_t accel_per_cycle, int32_t min_step) {
+    ramp_.accel_per_cycle_ = accel_per_cycle;
+    ramp_.min_step_        = min_step;
+    ramp_.reset();
+    printf("轴 %s 斜坡已配置: accel=%d pulses/cycle^2, min_step=%d pulses\n",
+           axis_name_.c_str(), accel_per_cycle, min_step);
 }
 
 bool ServoAxisBase::set_jog_speed(double speed) {
@@ -354,6 +447,6 @@ bool ServoAxisBase::set_jog_speed(double speed) {
     // }
     
     jog_speed_ = speed;
-    std::cout << "轴 " << axis_name_ << " 点动速度设置为: " << jog_speed_ << " mm/s" << std::endl;
+    // std::cout << "轴 " << axis_name_ << " 点动速度设置为: " << jog_speed_ << " mm/s" << std::endl;
     return true;
 }

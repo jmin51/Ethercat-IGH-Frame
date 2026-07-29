@@ -7,6 +7,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Int8, Empty, Bool, Float64
+import json
 import time
 
 from .models import (
@@ -41,7 +42,8 @@ class BusinessLogicProcessor(Node):
         self.previous_io_signals = {
             'buffer_in_position': False, 'buffer_out_position': False,
             'conveyor_in_position': False, 'conveyor_out_position': False,
-            'buffer_sensor_2': False
+            'buffer_sensor_2': False,
+            'conveyor_entry_gap_detect': False, 'conveyor_exit_gap_detect': False,
         }
         self.state_change_counter = 0
 
@@ -72,6 +74,7 @@ class BusinessLogicProcessor(Node):
 
         # ========== 运行状态 ==========
         self.auto_mode_enabled = False
+        self.job_started = False          # 0x0105到达后置true, 急停发布0x9113的前置门控
         self.enabled = True
         self.initialized = False
 
@@ -79,7 +82,7 @@ class BusinessLogicProcessor(Node):
         self.delay_started = False
         self.delay_counter = 0
         self.delay_condition_triggered = False
-        self.conveyor_in_detected = False
+        self.conveyor_in_detected = False  # 入库: M541(conveyor_entry_gap_detect) 信号曾出现标志
         self.buffer_sensor_2_detected = False
 
         # ========== 延迟控制 - 出库 ==========
@@ -128,6 +131,10 @@ class BusinessLogicProcessor(Node):
         self.product_arrival_cycle_active = False
         self.product_arrival_published_in_cycle = False
         self.product_arrival_phase = "idle"
+        # 板已确认送走闸门: 由入库/放行流程在物理确认点置位,
+        # 作为 COMPLETED->IDLE 重置的前置门, 杜绝毛刺击穿与幽灵补发.
+        # 事件语义(单调不可伪造), 不同于 conveyor_occupied 的状态语义.
+        self.board_dispatched = False
 
         # 产品到位信号跟踪
         self.feed_detect_was_true = False
@@ -136,9 +143,11 @@ class BusinessLogicProcessor(Node):
         self.conveyor_in_completed_for_arrival = False
 
         # ========== 常量 ==========
-        self.DELAY_BEFORE_STOP_MS = 400
+        # C++层M541防抖(300ms)修复axis5误动后, 板子姿态正常, 停稳延迟可缩短
+        self.DELAY_BEFORE_STOP_MS = 200
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
-        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 300
+        # M540防抖(300ms)已确认板子完全离开, 业务延迟仅需最小余量
+        self.OUTBOUND_DELAY_BEFORE_STOP_MS = 100
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
 
         # ========== 数据 ==========
@@ -149,7 +158,8 @@ class BusinessLogicProcessor(Node):
             'buffer_in_position': False, 'buffer_out_position': False,
             'conveyor_in_position': False, 'conveyor_out_position': False,
             'buffer_sensor_2': False, 'feed_product_detect': False,
-            'smema_uba': False, 'smema_dbr': False
+            'smema_uba': False, 'smema_dbr': False,
+            'conveyor_entry_gap_detect': False, 'conveyor_exit_gap_detect': False,
         }
 
         # 产品到位检测状态机
@@ -165,7 +175,7 @@ class BusinessLogicProcessor(Node):
         # ========== 常量 - 接驳台速度控制 ==========
         # 近层(-7~+7)慢速精定位，远层快速节省时间
         self.CONVEYOR_SPEED_NEAR = 150.0    # 近层速度 (mm/s)
-        self.CONVEYOR_SPEED_FAR = 300.0     # 远层速度 (mm/s)
+        self.CONVEYOR_SPEED_FAR = 230.0     # 远层速度 (mm/s)
         self.CONVEYOR_SPEED_NEUTRAL_RANGE = 7
         self.CONVEYOR_SPEED_AXIS_NAMES = ["axis5"]
 
@@ -223,6 +233,7 @@ class BusinessLogicProcessor(Node):
         self.fault_code_pub = self.create_publisher(String, '/business_logic_fault', 10)
         self.pause_state_report_pub = self.create_publisher(String, '/pause_state_report', 10)
         self.layer_move_completed_pub = self.create_publisher(Bool, '/layer_move_completed', 10)
+        self.emergency_stop_snapshot_pub = self.create_publisher(String, '/emergency_stop_snapshot', 10)
 
         if self.ENABLE_SMEMA:
             self.product_position_pub = self.create_publisher(
@@ -260,6 +271,12 @@ class BusinessLogicProcessor(Node):
         # 新增：层移动指令(0x011E)订阅
         self.create_subscription(Int8, '/layer_move_start',
                                  self.layer_move_start_callback, 10)
+        # +++ 新增：自动模式就绪状态周期性广播订阅（真相驱动，替代一次性String通知）+++
+        self.create_subscription(Bool, '/auto_mode_status',
+                                 self.auto_mode_status_callback, 10)
+        # 结束作业信号(0x0107) → 关闭产品到位检测周期
+        self.create_subscription(Empty, '/end_operation_signal',
+                                 self.end_operation_signal_callback, 10)
 
         # ================================================================
         # 子模块初始化
@@ -278,27 +295,55 @@ class BusinessLogicProcessor(Node):
     # 订阅回调
     # ================================================================
     def system_status_callback(self, msg):
-        """处理系统状态消息，检测自动模式"""
+        """处理系统状态消息，检测自动模式启停"""
         status_text = msg.data
         if '执行命令: start_auto' in status_text:
+            had_pause_residue = self.pause_state_reported
             if not self.auto_mode_enabled:
                 self.auto_mode_enabled = True
                 self.get_logger().info('检测到自动模式启动命令，业务逻辑处理器进入自动模式')
+            # start_auto 表示新的自动运行周期开始，清除任何可能残留的暂停状态
+            if had_pause_residue:
+                self._clear_pause_state()
+                self.get_logger().warn('自动模式启动时检测到暂停状态残留，已强制清除')
+        elif '执行命令: emergency_stop' in status_text:
+            # 急停: auto_mode_enabled先置False冻结process_logic
+            # 再快照流程状态完成上报, 最后reset_business_logic安全注销
+            if self.auto_mode_enabled:
+                self.auto_mode_enabled = False
+                self._emergency_stop_snapshot_and_report()
+                self.reset_business_logic()
+                self.get_logger().info('检测到急停命令，已完成流程结果上报并退出自动模式')
         elif '执行命令: stop' in status_text:
             if self.auto_mode_enabled:
                 self.auto_mode_enabled = False
                 self.reset_business_logic()
                 self.get_logger().info('检测到停止命令，业务逻辑处理器退出自动模式')
-        elif '自动模式初始化完成' in status_text:
-            if not self.auto_mode_initialized:
-                self.auto_mode_initialized = True
-                self.restore_default_jog_speeds()
-                self.get_logger().info('检测到自动模式初始化完成，轴已就绪，已恢复默认速度')
-                if self.pending_resume_state is not None:
-                    self.pause_resume_mgr.execute_pending_resume()
+
+    # ================================================================
+    # 自动模式就绪状态周期性回调（真相驱动，替代一次性事件通知）
+    # ================================================================
+    def auto_mode_status_callback(self, msg):
+        """接收 C++ 周期性广播的自动模式就绪状态
+
+        Level: 直接更新 auto_mode_initialized，任何时候都是最新事实
+        Edge: 仅在 False→True 边沿执行一次性副作用
+        """
+        was_init = self.auto_mode_initialized
+        self.auto_mode_initialized = msg.data
+
+        if self.auto_mode_initialized and not was_init:
+            # 一次性副作用：恢复速度 + 消费待办 + 清除暂停残留
+            self.restore_default_jog_speeds()
+            self.get_logger().info('自动模式初始化完成（周期性检测），轴已就绪，已恢复默认速度')
+            if self.pending_resume_state is not None:
+                self.pause_resume_mgr.execute_pending_resume()
             if not self.auto_mode_enabled:
                 self.auto_mode_enabled = True
                 self.get_logger().info('IO控制模式下，检测到轴自动模式就绪，业务逻辑处理器进入自动模式')
+            if self.pause_state_reported:
+                self._clear_pause_state()
+                self.get_logger().warn('自动模式初始化完成时发现暂停状态残留，已强制清除')
 
     def io_status_callback(self, msg):
         """处理IO状态更新"""
@@ -330,22 +375,38 @@ class BusinessLogicProcessor(Node):
         self.get_logger().info(f'收到入库流程启动请求，目标层: {self.target_layer}')
 
     def warehouse_stop_callback(self, msg):
-        """处理入库停止命令"""
+        """处理入库停止命令
+
+        物理资源释放统一由 end_operation_signal_callback->_shutdown_all_operations 负责,
+        此处仅设置流程停止标志位。
+        """
         if self.pause_state_reported:
             self.operation_ended_during_pause = True
             self.get_logger().info('暂停期间收到入库停止请求，标记结束作业')
-        self._reset_key_do_signals()
         self.warehouse_process_stop_requested = True
         self.get_logger().info('收到入库流程停止请求')
 
     def start_operation_signal_callback(self, msg):
         """处理开始作业信号"""
         if msg.data:
+            if self.pause_state_reported:
+                self.get_logger().warn('系统暂停中，拒绝开始作业信号(0x0105)')
+                return
             self.get_logger().info('收到开始作业信号(0x0105)，启动产品到位发布周期')
+            self.job_started = True  # 建立作业上下文，后续急停发布0x9113才有意义
+            self._reset_all_process_counters()
             self.product_arrival_cycle_active = True
             self.product_arrival_published_in_cycle = False
             self.product_arrival_phase = "pre_warehouse"
             self.io_handler.reset_product_arrival_state_machine()
+
+    def end_operation_signal_callback(self, msg):
+        """处理结束作业信号(0x0107) — 系统安全归零，释放所有物理资源"""
+        self._shutdown_all_operations()
+        if self.product_arrival_cycle_active:
+            self.product_arrival_cycle_active = False
+            self.io_handler.reset_product_arrival_state_machine()
+        self.get_logger().info('收到结束作业信号(0x0107)，系统已安全归零')
 
     def outbound_start_callback(self, msg):
         """处理出库启动命令"""
@@ -366,11 +427,14 @@ class BusinessLogicProcessor(Node):
         self.get_logger().info(f'收到出库流程启动请求，源层: {self.source_layer}')
 
     def outbound_stop_callback(self, msg):
-        """处理出库停止命令"""
+        """处理出库停止命令
+
+        物理资源释放统一由 end_operation_signal_callback->_shutdown_all_operations 负责,
+        此处仅设置流程停止标志位。
+        """
         if self.pause_state_reported:
             self.operation_ended_during_pause = True
             self.get_logger().info('暂停期间收到出库停止请求，标记结束作业')
-        self._reset_key_do_signals()
         self.outbound_process_stop_requested = True
         self.get_logger().info('收到出库流程停止请求')
 
@@ -393,11 +457,14 @@ class BusinessLogicProcessor(Node):
         self.get_logger().info('收到放行流程启动请求，进入等待产品到位状态')
 
     def release_stop_callback(self, msg):
-        """处理放行停止命令"""
+        """处理放行停止命令
+
+        物理资源释放统一由 end_operation_signal_callback->_shutdown_all_operations 负责,
+        此处仅设置流程停止标志位。
+        """
         if self.pause_state_reported:
             self.operation_ended_during_pause = True
             self.get_logger().info('暂停期间收到放行停止请求，标记结束作业')
-        self._reset_key_do_signals()
         self.release_process_stop_requested = True
         self.get_logger().info('收到放行流程停止请求')
 
@@ -479,7 +546,12 @@ class BusinessLogicProcessor(Node):
         # 层移动(0x011E)是独立流程，手动/自动模式均可运行
         self._check_layer_move_completion()
 
-        if not self.auto_mode_enabled or not self.enabled:
+        # 暂停期间冻结所有自动化逻辑:
+        #   - 产品到位检测 → 停, 不误检板子
+        #   - SMEMA要板信号(UBA/DBR) → 停, 上位机停止送板
+        #   - 三大流程状态机 + axis1_1/1_2 JOG → 停, 输送带不转
+        # 层移动(0x011E)不受影响, 暂停期间手动调层可用
+        if not self.auto_mode_enabled or not self.enabled or self.pause_state_reported:
             return
 
         self.io_handler.process_product_arrival_logic()
@@ -514,7 +586,9 @@ class BusinessLogicProcessor(Node):
                 f'buffer_out={self.current_io_signals["buffer_out_position"]}, '
                 f'conveyor_in={self.current_io_signals["conveyor_in_position"]}, '
                 f'conveyor_out={self.current_io_signals["conveyor_out_position"]}, '
-                f'buffer_sensor_2={self.current_io_signals["buffer_sensor_2"]}')
+                f'buffer_sensor_2={self.current_io_signals["buffer_sensor_2"]}, '
+                f'conveyor_entry_gap(M541)={self.current_io_signals["conveyor_entry_gap_detect"]}, '
+                f'conveyor_exit_gap(M540)={self.current_io_signals["conveyor_exit_gap_detect"]}')
         self.previous_io_signals = self.current_io_signals.copy()
 
     # ================================================================
@@ -533,7 +607,6 @@ class BusinessLogicProcessor(Node):
                     f'入库流程超时({elapsed:.1f}秒>{self.WAREHOUSE_PROCESS_TIMEOUT}秒)，'
                     f'发布故障码=0x{fault_code:04X}')
                 self.publish_fault_code(fault_code)
-                self.warehouse_timeout_reported = True
 
         if (self.outbound_state != OutboundState.IDLE and
                 self.outbound_process_start_time is not None and
@@ -545,12 +618,19 @@ class BusinessLogicProcessor(Node):
                     f'出库流程超时({elapsed:.1f}秒>{self.OUTBOUND_PROCESS_TIMEOUT}秒)，'
                     f'发布故障码=0x{fault_code:04X}')
                 self.publish_fault_code(fault_code)
-                self.outbound_timeout_reported = True
 
     def publish_fault_code(self, fault_code: int):
-        """发布故障码"""
+        """发布故障码 — 非零故障自动触发全量清理(等效于 0x0107)"""
         if fault_code == self.last_published_fault_code:
             return
+
+        # 非零故障码 → 关闭产品到位检测周期，停止要板
+        if fault_code != 0 and self.product_arrival_cycle_active:
+            self.product_arrival_cycle_active = False
+            self.io_handler.reset_product_arrival_state_machine()
+            self.get_logger().error(
+                f'故障码 0x{fault_code:04X}，关闭产品到位检测周期')
+
         self.last_published_fault_code = fault_code
         msg = String()
         if fault_code == 0:
@@ -559,6 +639,11 @@ class BusinessLogicProcessor(Node):
             msg.data = f'business_logic:0x{fault_code:04X}'
         self.fault_code_pub.publish(msg)
         self.get_logger().warn(f'发布故障码到/fault_code: {msg.data}')
+
+        # 非零故障 → 停轴 + 复位DO + 状态机归零(与 0x0107 相同)
+        # publish_fault_code(0) 是递归入口, fault_code==0 路径不进入, 无死循环
+        if fault_code != 0:
+            self._shutdown_all_operations()
 
     def check_gear_cylinder_position(self):
         """检查齿轮对接气缸到位状态"""
@@ -592,7 +677,6 @@ class BusinessLogicProcessor(Node):
                         f'齿轮对接气缸伸出超时({elapsed:.1f}秒>{self.GEAR_CYLINDER_TIMEOUT_SEC}秒) '
                         f'M531气缸1:{s1}, M533气缸2:{s2}，发布故障码=0x{fault_code:04X}')
                     self.publish_fault_code(fault_code)
-                    self.gear_cylinder_811_timeout_reported = True
 
     def _is_gear_cylinder_implicitly_arrived(self):
         """判断气缸是否隐式到位"""
@@ -835,6 +919,105 @@ class BusinessLogicProcessor(Node):
             self.do_command_sent[do_address] = False
             self.get_logger().info(f'重置DO命令发送状态: {do_address}')
 
+    def _reset_all_process_counters(self):
+        """开始新作业时清空所有流程计数器和状态机，确保历史残留不污染新周期"""
+        # ---- 状态机复位到IDLE ----
+        self.warehouse_state = WarehouseState.IDLE
+        self.warehouse_process_requested = False
+        self.warehouse_process_stop_requested = False
+        self.outbound_state = OutboundState.IDLE
+        self.outbound_process_requested = False
+        self.outbound_process_stop_requested = False
+        # ---- 入库延迟/检测 ----
+        self.delay_started = False
+        self.delay_counter = 0
+        self.delay_condition_triggered = False
+        self.conveyor_in_then_out_delay_started = False
+        self.conveyor_in_then_out_delay_counter = 0
+        self.state_change_counter = 0
+        self.conveyor_in_detected = False
+        self.buffer_sensor_2_detected = False
+        self.post_lift_delay_start = None
+        self.completed_reset_command_sent = False
+        self._waiting_layer_motion_printed = False
+        # ---- 出库延迟/检测 ----
+        self.outbound_delay_started = False
+        self.outbound_delay_counter = 0
+        self.outbound_delay_condition_triggered = False
+        self.outbound_conveyor_in_then_out_delay_started = False
+        self.outbound_conveyor_in_then_out_delay_counter = 0
+        self.outbound_completion_delay_started = False
+        self.outbound_completion_delay_counter = 0
+        self.outbound_conveyor_in_detected = False
+        self._outbound_conveyor_out_was_true = False
+        # ---- 超时标志 ----
+        self.warehouse_timeout_reported = False
+        self.outbound_timeout_reported = False
+        self.post_lift_timeout_reported = False
+        self.post_lift_process_start_time = None
+        self.warehouse_process_start_time = None
+        self.outbound_process_start_time = None
+        # ---- 齿轮气缸检测 ----
+        self.gear_cylinder_811_checking = False
+        self.gear_cylinder_811_sent_time = None
+        self.gear_cylinder_811_timeout_reported = False
+        # ---- 放行 ----
+        self.release_state = PassThroughState.IDLE
+        self.release_process_requested = False
+        self.release_process_stop_requested = False
+        self.release_conveyor_out_delay_started = False
+        self.release_conveyor_out_delay_counter = 0
+        self.get_logger().info('已清空所有流程计数器，为新作业周期准备')
+
+    def _shutdown_all_operations(self):
+        """结束作业统一清理: 停轴 + 复位DO + 清故障码 + 状态机归零
+
+        所有回到IDLE的出口走同一个边界,释放全部物理资源,确保系统回到可接受新作业的安全初始态。
+        """
+        # 1. 停止所有运动轴(点动)
+        self.add_command(ControlAction(
+            CommandType.JOG, "axis2_1", "stop",
+            description="结束作业:停止轴2_1"))
+        self.add_command(ControlAction(
+            CommandType.JOG, "axis2_2", "stop",
+            description="结束作业:停止轴2_2"))
+        self.add_command(ControlAction(
+            CommandType.JOG, "axis5", "stop",
+            description="结束作业:停止轴5(升降)"))
+
+        # 2. 复位所有关键DO
+        self._reset_key_do_signals()
+
+        # 3. 清除故障码(C++层fault_map_ + Python层last_published)
+        self.publish_fault_code(0)
+
+        # 4. 状态机全部归零
+        self.warehouse_state = WarehouseState.IDLE
+        self.warehouse_process_requested = False
+        self.warehouse_process_stop_requested = False
+        self.outbound_state = OutboundState.IDLE
+        self.outbound_process_requested = False
+        self.outbound_process_stop_requested = False
+        self.release_state = PassThroughState.IDLE
+        self.release_process_requested = False
+        self.release_process_stop_requested = False
+
+        # 5. 清除所有超时标志
+        self.warehouse_timeout_reported = False
+        self.outbound_timeout_reported = False
+        self.post_lift_timeout_reported = False
+        self.post_lift_process_start_time = None
+        self.warehouse_process_start_time = None
+        self.outbound_process_start_time = None
+
+        # 6. 清除齿轮气缸检测状态
+        self.gear_cylinder_811_checking = False
+        self.gear_cylinder_811_sent_time = None
+        self.gear_cylinder_811_timeout_reported = False
+
+        self.get_logger().info(
+            '_shutdown_all_operations: 轴已停, DO已复位, 故障码已清, 状态机归零')
+
     def _reset_key_do_signals(self):
         """重置关键DO信号"""
         self.send_do_control_once("811", False)
@@ -842,8 +1025,89 @@ class BusinessLogicProcessor(Node):
         self.send_do_control_once("813", False)
         self.get_logger().info('已发送关键DO信号复位命令 (M810-M813 -> 0)')
 
+    def _clear_pause_state(self):
+        """清除暂停相关状态，防止状态切换后残留
+
+        在 stop / start_auto / 自动模式初始化完成 等状态切换关键点调用，
+        确保 pause_state_reported 不会跨越自动模式生命周期残留，
+        避免已恢复运行的系统仍拒绝新的入库/出库启动命令。
+        """
+        self.pause_state_reported = False
+        self.operation_ended_during_pause = False
+        self.resuming_from_pause = False
+        self.pending_resume_state = None
+        self.saved_warehouse_state = None
+        self.saved_outbound_state = None
+        self.saved_target_layer = 1
+        self.saved_source_layer = 1
+
+    # ================================================================
+    # 急停快照与上报
+    # ================================================================
+    def _emergency_stop_snapshot_and_report(self):
+        """急停时快照流程状态并上报结果
+
+        时序保证:
+        - 调用前 auto_mode_enabled 已设为 False, process_logic 已冻结
+        - 上报完成后才调用 reset_business_logic()
+
+        门控: 仅当 0x0105 已到达(job_started=True)才发布故障码
+        - 无作业上下文时急停无意义, 静默重置即可
+        """
+        ESTOP_FAULT = 0x9113
+
+        # 门控: 上位机未下发开始作业, 急停无上下文, 跳过故障码发布
+        if not self.job_started:
+            self.get_logger().info('急停但无作业上下文(job_started=False), 跳过0x9113发布')
+            return
+
+        # Phase 1: 快照流程激活状态
+        # COMPLETED 视为已完成, 不需要回异常结果
+        snapshot = {
+            'warehouse_active': self.warehouse_state not in (
+                WarehouseState.IDLE, WarehouseState.COMPLETED
+            ),
+            'outbound_active': self.outbound_state not in (
+                OutboundState.IDLE, OutboundState.COMPLETED
+            ),
+            'release_active': self.release_state not in (
+                PassThroughState.IDLE, PassThroughState.COMPLETED
+            ),
+        }
+
+        self.get_logger().warn(
+            f'急停快照: 入库={snapshot["warehouse_active"]}, '
+            f'出库={snapshot["outbound_active"]}, '
+            f'放行={snapshot["release_active"]}'
+        )
+
+        # Phase 2: 发布急停故障码到 /business_logic_fault
+        # 走现有链路: fault_manager -> /fault_code -> parser publish_fault_status
+        self._publish_estop_fault(ESTOP_FAULT)
+
+        # Phase 3: 发布快照到 parser, 由 parser 按需回 0x102/0x104/0x11D
+        snapshot_msg = String()
+        snapshot_msg.data = json.dumps(snapshot)
+        self.emergency_stop_snapshot_pub.publish(snapshot_msg)
+        self.get_logger().warn('急停快照已发布到 /emergency_stop_snapshot')
+
+    def _publish_estop_fault(self, fault_code: int):
+        """发布急停故障码到 /business_logic_fault 话题
+
+        与 publish_fault_code 的区别:
+        - 不检查去重: 急停是事件, 每次都要发
+        - 不关闭 product_arrival_cycle: 急停后 reset_business_logic 会全量清
+        """
+        msg = String()
+        msg.data = f'business_logic:0x{fault_code:04X}'
+        self.fault_code_pub.publish(msg)
+        self.get_logger().warn(
+            f'急停: 发布故障码 0x{fault_code:04X} 到 /business_logic_fault'
+        )
+
     def reset_business_logic(self):
         """重置业务逻辑状态"""
+        self.job_started = False  # 清除作业上下文，下次急停不再发布0x9113
         self.warehouse_state = WarehouseState.IDLE
         self.warehouse_process_requested = False
         self.warehouse_process_stop_requested = False
@@ -866,6 +1130,7 @@ class BusinessLogicProcessor(Node):
         self.conveyor_in_detected = False
         self.buffer_sensor_2_detected = False
         self.outbound_conveyor_in_detected = False
+        self._outbound_conveyor_out_was_true = False  # M540 出料检测跟踪标志
         self.outbound_delay_started = False
         self.outbound_delay_condition_triggered = False
         self.outbound_delay_counter = 0
@@ -881,7 +1146,7 @@ class BusinessLogicProcessor(Node):
             if hasattr(self, '_last_dbr'):
                 self._last_dbr = False
         self.auto_mode_initialized = False
-        self.pending_resume_state = None
+        self._clear_pause_state()
         self.layer_command_sent = False
         self.last_layer_command = None
         self._last_return_speed = None
@@ -906,6 +1171,7 @@ class BusinessLogicProcessor(Node):
         self.feed_detected = False
         self.buffer_in_detected = False
         self.conveyor_started_for_arrival = False
+        self.board_dispatched = False
         self.feed_detect_was_true = False
         self.buffer_out_was_true_for_arrival = False
         self.conveyor_in_was_true_for_arrival = False

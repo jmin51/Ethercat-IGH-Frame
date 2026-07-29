@@ -34,6 +34,170 @@ ethercat_controller/
 └── package.xml
 ```
 
+## 设备物理结构
+
+### 设计哲学
+- **基准层暂存**：缓存架第1层（buffer_out位）作为暂存位，板子在此等位，空出后可提前要板
+- **路径不重叠**：新板路径（上游→基准层）与出库板路径（缓存架→接驳台下游）物理隔离，可并行作业
+- **axis1 共享**：接驳台输送轴同时服务于产品到位检测（进料）与入库传输，通过 conveyor_occupied 互斥
+
+### 物理布局
+
+```
+上游设备
+  │
+  ▼
+feed_detect (DI8) ──────────────── 进料检测
+  │
+  ▼
+buffer_in (DI11) ──────────────── 缓存架入料口
+  │
+  ▼
+buffer_out (DI12) ─────────────── 基准层（暂存位，缓存架第1层）
+  │ ════════════════════════════════════════════
+  │   以上: 新板进料路径 (产品到位检测 axis1 驱动)
+  ══════════════════════════════════════════════
+  │   以下: 接驳台区 (axis1 下游段, 升降机 axis5 可移动)
+  │ ════════════════════════════════════════════
+  │                              ┌──────────────┐
+  ▼                              │  出库板路径   │
+conveyor_in (M541/DI29) ──────── │  (从缓存架    │
+  │   接驳台入料检测(缝隙)       │   经axis2     │
+  ▼                              │   进入此段)   │
+[接驳台 axis1 下游段 + DO813]    │              │
+  │                              │  DO813 控制   │
+  ▼                              │  板子往下游   │
+conveyor_out (DI14) ──────────── │  释放         │
+conveyor_exit_gap (M540/DI28)    └──────────────┘
+  │   接驳台出料检测(缝隙)
+  ▼
+下游设备
+  │
+  ▲
+  │ ════════════════════════════════════════════
+  │   缓存架内部: axis2 驱动, axis5 升降选层
+  │ ════════════════════════════════════════════
+  │
+[缓存架各层] ← axis2_1 + axis2_2 内部输送
+  │
+  ▲
+  │
+buffer_sensor_2 (DI10) ──────── 缓存架传感器2（板子进入缓存架检测）
+```
+
+### DI 信号定义
+
+| 信号 | DI编号 | Modbus地址 | 信号名 | 位置 | 用途 |
+|------|--------|-----------|--------|------|------|
+| feed_detect | DI8 | M528 | feed_product_detect | 进料口 | 上游来板检测，触发产品到位状态机 |
+| buffer_in | DI11 | M531 | buffer_in_position | 缓存架入料口 | 新板进入基准层区域 |
+| buffer_out | DI12 | M532 | buffer_out_position | 基准层 | 板子到达暂存位，触发0x0109发布 |
+| buffer_sensor_2 | DI10 | M530 | buffer_sensor_2 | 缓存架内部 | 板子进入缓存架目标层检测 |
+| conveyor_in | DI13 | M533 | conveyor_in_position | 接驳台入料 | 入库板子进入接驳台 |
+| conveyor_out | DI14 | M534 | conveyor_out_position | 接驳台出料 | 入库板子到达接驳台末端 |
+| conveyor_entry_gap | DI29 | M541 | conveyor_entry_gap_detect | 接驳台入料缝隙 | 出库板子进入接驳台检测(M541) |
+| conveyor_exit_gap | DI28 | M540 | conveyor_exit_gap_detect | 接驳台出料缝隙 | 出库板子离开接驳台检测(M540) |
+| smema_uba | DI23 | M535 | smema_uba | SMEMA上游 | 上游有板待发 |
+| smema_dbr | DI24 | M536 | smema_dbr | SMEMA下游 | 下游要板 |
+
+### DO 信号定义
+
+| 信号 | DO编号 | Modbus地址 | 用途 |
+|------|--------|-----------|------|
+| DO811 | DO811 | M811 | 齿轮对接气缸伸出（入库/出库时连接 axis1 与 axis2） |
+| DO812 | DO812 | M812 | 内部输送机构控制（入库 POST_LIFT 时激活） |
+| DO813 | DO813 | M813 | 接驳台释放机构（入库/出库 CONVEYOR_MOVING 时激活，控制板子往下游运动） |
+| MR | DO14 | M814 | SMEMA 本机要板信号（上游握手） |
+| BA | DO15 | M815 | SMEMA 本机有板信号（下游握手） |
+
+### 轴定义
+
+| 轴名 | 类型 | 物理位置 | 用途 |
+|------|------|---------|------|
+| axis1_1 | 输送轴 | 接驳台上游段 | 进料/入库传输（reverse: 板子往下游方向） |
+| axis1_2 | 输送轴 | 接驳台下游段 | 进料/入库传输（forward: 板子往下游方向） |
+| axis2_1 | 输送轴 | 缓存架内部 | 入库推板（forward）/ 出库取板（reverse） |
+| axis2_2 | 输送轴 | 缓存架内部 | 入库推板（reverse）/ 出库取板（forward） |
+| axis3 | 调整轴 | 板宽调整 | 板宽调节 |
+| axis4 | 调整轴 | 板宽调整 | 板宽调节 |
+| axis5 | 升降轴 | 接驳台升降 | 层选择（层号→高度映射） |
+
+### PCB 流动路径
+
+#### 产品到位检测（新板从上游到基准层）
+```
+上游 → feed_detect → buffer_in → buffer_out（基准层暂存）
+      │ axis1_1(reverse) + axis1_2(forward) 驱动 │
+      │ 产品到位状态机: IDLE→CONVEYOR_RUNNING→WAITING_BUFFER_OUT→COMPLETED │
+      │ 到达 buffer_out → 发布 0x0109 → 停 axis1 │
+```
+
+#### 入库（基准层 → 缓存架目标层）
+```
+buffer_out（基准层）
+  → axis1 传输 → conveyor_in → conveyor_out（接驳台末端）
+  → axis5 升降到目标层
+  → DO812 + axis2 推板 → buffer_sensor_2（进入缓存架）
+  → axis5 归位第1层
+```
+
+#### 出库（缓存架源层 → 下游）
+```
+缓存架源层
+  → axis5 升降到源层
+  → axis2 取板 → conveyor_in_gap(M541)（进入接驳台）
+  → axis5 归位第1层
+  → DO813 释放 → conveyor_exit_gap(M540) → 下游
+  ※ 出库板路径: conveyor_in → conveyor_out, 不经过 buffer_out（基准层）
+```
+
+#### 放行（基准层 → 下游，不进缓存架）
+```
+buffer_out（基准层）
+  → axis1 传输 → conveyor_in_gap → conveyor_exit_gap(M540) → 下游
+  → 0x0109 已发布, 放行流程直接启动
+```
+
+### 要板信号（MR）设计原则
+
+#### 核心设计：以 0x0109 的 IDLE 状态为唯一要板门控
+
+```
+MR=ON 条件（全部满足）:
+  1. product_arrival_cycle_active = True（作业进行中）
+  2. product_arrival_state == "IDLE"（0x0109状态机空闲）
+  3. feed_detect = False（无板在进料位）
+  4. buffer_in = False（无板在入料口）
+  5. buffer_out = False（基准层空）
+  6. warehouse_state != CONVEYOR_MOVING（入库传输未占用axis1）
+  7. release_state 不在 (CONVEYOR_RUNNING, WAIT_FOR_CONVEYOR_OUT)（放行未占用axis1）
+
+MR=OFF 条件（任一满足）:
+  - product_arrival_cycle_active = False（未开始/报错/结束作业）
+  - product_arrival_state != "IDLE"（板子在路上或基准层）
+  - 任何物理信号有板（feed_detect/buffer_in/buffer_out）
+  - 入库/放行占用 axis1
+```
+
+#### 出库期间允许要板
+
+出库板路径（`conveyor_in → conveyor_out`）不经过基准层（`buffer_out`），与新板进料路径（`feed_detect → buffer_out`）物理不重叠。出库期间 MR=ON 安全，可并行作业。
+
+#### COMPLETED → IDLE 的安全门控
+
+```
+COMPLETED → IDLE 条件:
+  not feed_detect and not buffer_out and board_dispatched
+
+board_dispatched 置位时机:
+  - 入库 COMPLETED（升降机归位第1层）→ axis1 上板子已送走
+  - 放行 CONVEYOR_RUNNING（板子完全进入输送带）→ 板子已在往下游走
+
+→ COMPLETED → IDLE 时, 接驳台必定空闲, MR=ON 安全
+```
+
+---
+
 ## 故障管理系统架构
 
 ### 设计哲学
@@ -648,11 +812,96 @@ ethercat_node.handle_layer_command() + handle_jog_speed_command()
 
 ### 配置参数
 ```python
-CONVEYOR_BASE_SPEED = 150.0    # 默认接驳台速度 (mm/s)
-CONVEYOR_MIN_SPEED = 50.0      # 最小速度 (mm/s)
+CONVEYOR_SPEED_NEAR = 150.0      # 近层速度 (mm/s)
+CONVEYOR_SPEED_FAR  = 300.0      # 远层速度 (mm/s)
 CONVEYOR_SPEED_NEUTRAL_RANGE = 7  # 中性区间半径
-CONVEYOR_SPEED_AXIS_NAMES = ["axis1_1", "axis1_2"]  # 接驳台轴名
+CONVEYOR_SPEED_AXIS_NAMES = ["axis5"]  # 升降轴
 ```
+
+---
+
+## T 型速度斜坡控制架构 (RampProfile)
+
+### 设计哲学
+- **软起动 / 软停止**：用加速度斜坡替代阶跃式启停，消除母线电压过压
+- **向后兼容**：`accel_per_cycle_=0` 时完全退化为原恒速步进逻辑，不影响未配置的轴
+- **职责正交**：`get_max_step()` 回答"允许多快"（硬件限速），`RampState` 回答"如何优雅变速"（软件剖面）
+- **消除特殊情况**：通过配置而非类型判断实现差异化——哪个轴需要斜坡就配置它，无需 `if (axis5)` 分支
+
+### 核心组件
+
+#### 1. 斜坡状态机 (servo_axis_base.hpp)
+```cpp
+struct RampState {
+    enum Phase { ACCEL, CONSTANT, DECEL, IDLE };
+
+    Phase   phase{IDLE};
+    int32_t current_step_{0};           // 当前周期步长 (pulses)
+    int32_t min_step_{5};               // 启 / 停点步长, 防零速抖动
+    int32_t accel_per_cycle_{0};        // 加速度 (pulses/cycle^2), 0=禁用
+
+    void reset() { phase = IDLE; current_step_ = 0; }
+    bool enabled() const { return accel_per_cycle_ > 0; }
+};
+```
+
+#### 2. 斜坡控制 (servo_axis_base.cpp - gradual_approach)
+```
+新运动 → ACCEL:  step 每周期 +accel, 直到 max_step
+          ↓
+       CONSTANT:  step = max_step (匀速)
+          ↓
+          DECEL:  step 每周期 -accel, 直到 min_step
+          ↓
+          IDLE:   到达目标, 精确对齐
+```
+
+- **减速点计算**：匀减速运动学 — `decel_needed = (v² - v_min²) / (2a)`
+- **短行程三角波**：总距离 < 2×加速距离时自动跳过 CONSTANT 段，加速到峰值即减速
+- **运行时调速兼容**：Python 调速（`_check_return_speed_transition`）改变 `get_max_step()` 上限，斜坡自动适配
+
+#### 3. 配置接口 (ServoAxisBase)
+```cpp
+void configure_ramp(int32_t accel_per_cycle, int32_t min_step);
+void reset_motion_ramp();  // 新位移指令到达时调用
+```
+
+#### 4. axis5 配置 (ethercat_node.cpp)
+```cpp
+axis->configure_ramp(2, 5);  // accel=2 pulses/cycle^2, min_step=5
+```
+
+### 运动参数推导
+
+| jog_speed | max_step | 加速时间 | 减速距离 |
+|-----------|----------|----------|----------|
+| 150 mm/s | 450 | 222 ms | ~5,600 pulses |
+| 200 mm/s | 600 | 297 ms | ~10,100 pulses |
+| 300 mm/s | 900 | 447 ms | ~20,200 pulses |
+
+### 文件改动范围
+- **servo_axis_base.hpp**: RampState 结构体 + ramp_ 成员 + configure_ramp/public API
+- **servo_axis_base.cpp**: gradual_approach() 重构 + configure_ramp() 实现
+- **huichuan_servo_axis.cpp**: manual/auto 位移动处理中加入 ramp_.reset()
+- **leisai_servo_axis.cpp**: auto 位移动处理中加入 ramp_.reset()
+- **ethercat_node.cpp**: axis5 初始化时 configure_ramp(2, 5)
+
+### 设计决策记录 (Ramp)
+
+11. **为何在 gradual_approach() 内部实现而非独立控制器** (2026-07-08):
+    - **问题**：axis5 升降轴在层移动（远层 300mm/s）启停时产生母线电压过压故障
+    - **根因**：阶跃式启停（步长瞬时 0→900→0），动能全部转化为再生能量
+    - **设计**：在 `gradual_approach()` 内置 T 型速度剖面，通过 `accel_per_cycle_` 控制加速度
+    - **优势**：
+      - 零定义死代码：`motion_acceleration_` 概念通过 `configure_ramp()` 落地
+      - 向后兼容：`accel_per_cycle_=0` 时原逻辑不变
+      - 职责分离：`get_max_step()` 不变，ramp 层作为软保护叠加
+    - **关键洞察**：母线过压不是速度问题（300mm/s），是速度变化率问题（d²x/dt²=∞）
+
+12. **为何 ramp_.reset() 放在位移指令处理而非 gradual_approach 内部** (2026-07-08):
+    - 斜坡状态（IDLE/ACCEL/CONSTANT/DECEL）与一次完整的运动绑定
+    - 新位移指令代表新运动开始 → 在指令生产者处重置更符合语义
+    - gradual_approach 内部已有 "DECEL 过头回 ACCEL" 的容错逻辑，处理运行时调速场景
 
 ---
 
@@ -706,10 +955,157 @@ process_logic() 每周期调用:
 
 ---
 
-*文档最后更新：2026-05-13*
-*对应架构版本：v2.9（手动模式层移动支持）*
+## 缝隙信号防抖架构 (GapDetectDebouncer)
+
+### 设计哲学
+- **信号语义与物理现实割裂**：缝隙传感器（M540/M541）安装在两个物理区域交界处，信号消失只代表"板子后端通过传感器光束"，不代表"板子完全进入目标区域"。两者之间存在物理差量：$\Delta t = d / v$
+- **非对称防抖**：上升沿（板子到达）立即响应，下降沿（板子离开）延迟确认。消抖与确认合一
+- **防抖归硬件层**：信号稳定性是硬件关注点，防抖后的信号被所有上层统一消费，消除业务层重复防抖
+
+### 核心组件
+
+#### 1. 防抖状态结构 (ethercat_node.hpp)
+```cpp
+struct GapDetectDebouncer {
+    bool m541_filtered{false};       // M541 防抖后输出
+    int  m541_falling_counter{0};    // M541 下降沿持续计数
+    bool m540_filtered{false};       // M540 防抖后输出
+    int  m540_falling_counter{0};    // M540 下降沿持续计数
+};
+static constexpr int GAP_DEBOUNCE_CYCLES = 3;  // 3周期 = 300ms @ 100ms周期
+```
+
+#### 2. 防抖逻辑 (ethercat_node.cpp - debounce_gap_signals)
+```
+原始信号 = 1 → 输出立即 = 1，计数器清零
+原始信号 = 0 → 计数器递增
+             → 计数器 >= 3 → 输出 = 0（确认消失）
+             → 计数器 < 3  → 输出保持上一个值（延迟消失）
+```
+
+#### 3. 调用位置
+- `handle_io_signals()` 入口处调用 `debounce_gap_signals(di)`
+- IO监控线程固定100ms周期，防抖时间 = `GAP_DEBOUNCE_CYCLES × 100ms`
+- 防抖后信号通过 `/io_status` 话题发布给Python业务层
+
+### 防抖参数推导（日志驱动）
+| 指标 | 值 | 来源 |
+|------|-----|------|
+| M541首次假消失持续 | 111ms | 实测日志：板子后端通过传感器后的抖动 |
+| 板子通过M541时间 | 218ms | 实测日志：M541亮起持续时间 |
+| 2倍安全余量 | 222ms | 111ms × 2 |
+| **防抖时间** | **300ms** | max(222, 218)取整，3周期 |
+
+### IO 防抖红线
+
+| 信号类别 | 防抖策略 | 原因 |
+|---------|---------|------|
+| **缝隙传感器** M540/M541 | 下降沿300ms防抖 | 物理缝隙特殊性，信号消失≠板子完全通过 |
+| **急停** M516/M517 | **绝对禁止** | 低电平有效，下降沿=急停触发，防抖=延迟急停=致命 |
+| **安全门** M518/M519 | **绝对禁止** | 安全要求立即响应 |
+| **气缸到位** M527-M534 | **绝对禁止** | 瞬态事件信号，防抖破坏互斥时序 |
+| **板位检测** M520/M523/M524/M525/M526 | 不需要 | 安装位置安全，无缝隙问题 |
+| **按钮** M512-M514 | 不需要 | 已有业务层防抖 |
+| **SMEMA** M535/M536 | 已有独立防抖 | smema_handler.cpp 50ms |
+
+**禁止扩展为通用DI防抖框架**：六类信号六种需求，通用框架让致命错误（急停防抖）成为可能。
+
+### 防抖影响的逻辑点
+
+#### M541 下降沿防抖（5个逻辑点）
+| # | 流程 | 状态 | 效果 |
+|---|------|------|------|
+| 1 | 入库 | IDLE | 启动门控延迟300ms（确保接驳台空闲） |
+| **2** | **入库** | **CONVEYOR_MOVING** | **axis5移动延迟300ms（防止PCB损坏）** |
+| 3 | 入库 | DELAY_PROCESSING | "板子入缓存架"判断延迟300ms（更安全） |
+| **4** | **出库** | **POST_LIFT_PROCESSING** | **axis5移动延迟300ms（防止PCB损坏）** |
+| 5 | 放行 | CONVEYOR_RUNNING | board_dispatched延迟→要板延迟300ms |
+
+#### M540 下降沿防抖（2个逻辑点）
+| # | 流程 | 状态 | 效果 |
+|---|------|------|------|
+| 6 | 出库 | COMPLETED | 关DO813延迟300ms（确保板子离开） |
+| 7 | 放行 | CONVEYOR_RUNNING | 停axis1延迟300ms（确保板子离开） |
+
+### 配合的业务层延迟精简
+C++层防抖300ms后，Python业务层的冗余延迟被精简：
+| 参数 | 改前 | 改后 | 理由 |
+|------|------|------|------|
+| 入库/出库条件二延迟 | counter>=1（0ms实延迟） | 移除 | 防抖已确保信号稳定，延迟逻辑冗余 |
+| `DELAY_BEFORE_STOP_MS` | 400ms | 200ms | 防抖修复axis5误动，板子姿态正常，停稳余量可减 |
+| `OUTBOUND_DELAY_BEFORE_STOP_MS` | 300ms | 100ms | M540防抖已确认板子离开，仅需最小余量 |
+| 放行`WAIT_FOR_CONVEYOR_OUT`延迟 | 3周期(300ms) | 1周期(100ms) | M540防抖已确认板子离开 |
+
+### 设计决策记录
+
+13. **为何防抖放在C++ IO层而非Python业务层** (2026-07-28)：
+    - **单一真相源**：防抖后信号被所有上层统一消费，消除各处重复防抖
+    - **硬件隔离**：信号稳定性是硬件层关注点，不应泄漏到业务层
+    - **先例**：SMEMA已在C++层做防抖（smema_handler.cpp）
+    - **零侵入**：Python业务层无需修改即可消费防抖后信号
+
+14. **为何用非对称防抖而非对称防抖** (2026-07-28)：
+    - **上升沿（板子到达）需立即响应**：检测灵敏度要求高
+    - **下降沿（板子离开）需延迟确认**：确保板子完全通过缝隙
+    - **对比SMEMA**：SMEMA用对称50ms防抖（握手协议要求双向稳定）；缝隙传感器只需单向（下降沿）防抖
+
+15. **为何防抖时间设为300ms** (2026-07-28)：
+    - **日志驱动**：实测M541首次假消失111ms，板子通过时间218ms
+    - **2倍余量**：max(111×2, 218) = 222ms，取整300ms（3周期）
+    - **因果链切断**：有防抖后axis5不会在板子跨缝隙时移动，后续抖动（548ms）不会发生，300ms足以覆盖首次假消失
+
+---
+
+*文档最后更新：2026-07-28*
+*对应架构版本：v3.4（M540/M541缝隙信号防抖 + 业务层延迟精简）*
 
 ### 变更日志
+
+#### v3.4 (2026-07-28): M540/M541缝隙信号防抖 + 业务层延迟精简
+- **问题**：板子在缓存架与接驳台缝隙中时，M541信号短暂消失（111ms假消失）触发`conveyor_in_then_out`，导致axis5在板子跨缝隙时移动，PCB损坏
+- **根因**：M541缝隙传感器的信号消失≠板子完全通过缝隙，存在物理差量。代码用点传感器的下降沿推断空间区域状态，信号语义过载
+- **修复策略**：
+  - **C++ IO层**：`handle_io_signals()`入口新增`debounce_gap_signals()`，对M540/M541做非对称下降沿防抖（300ms确认消失）
+  - **Python业务层**：移除入库/出库条件二延迟逻辑（防抖已冗余）；`DELAY_BEFORE_STOP_MS` 400→200ms；`OUTBOUND_DELAY_BEFORE_STOP_MS` 300→100ms；放行停轴延迟 3周期→1周期
+- **设计原则**：防抖归硬件层（单一真相源），业务层只消费稳定信号。非对称防抖——上升沿立即响应，下降沿延迟确认。防抖是缝隙传感器的专属药，不扩展为通用框架
+
+#### v3.3 (2026-07-28): 要板信号配合0x0109周期 + 设备物理结构文档化
+- **新增**：设备物理结构章节（物理布局图、DI/DO信号定义表、轴定义表、PCB流动路径、要板信号设计原则）
+- **问题**：COMPLETED/PENDING_PUBLISH 状态下仍允许要板，导致基准层有板时上游继续送板，板子卡在 buffer_in 位置
+- **根因**：`update_product_position()` 的 `no_board_reasons` 豁免了 COMPLETED 和 PENDING_PUBLISH 状态，认为"基准层有板也可以要板"
+- **修复策略（方案A）**：
+  - 收紧 `product_arrival_state` 判断为 `!= "IDLE"`（去掉 COMPLETED/PENDING_PUBLISH 豁免）
+  - MR=ON 的唯一门控：`product_arrival_state == "IDLE"`
+  - COMPLETED→IDLE 的 `board_dispatched` 门控已保证接驳台空闲，不需要在 MR 层重复判断入库状态
+- **出库期间允许要板**：出库板路径（conveyor_in→conveyor_out）不经过基准层（buffer_out），与新板进料路径物理不重叠，可并行作业
+- **设计原则**：让 MR 跟着 0x0109 状态机周期走。IDLE=基准层空+接驳台空闲→可以要板；非IDLE=板子在路上或基准层→不要板。0x0109状态机自身的 `board_dispatched` 门控是安全性的单一真相源
+
+#### v3.2 (2026-07-21): 0x9113事件型故障不入fault_map
+- **问题**：急停恢复后，新作业的 `0x0106` 响应携带异常码 `0x9113` 而非 `0x0000`
+- **根因**：`0x9113` 是事件型故障（急停发生一次），却被 `handle_business_logic_fault` 写入了 C++ `fault_map_`（持久化容器），系统重启后未清除，导致 Python parser 的 `current_fault_code` 持续为 `0x9113`，`publish_start_result()` 取到残留值
+- **修复策略（方案 F）**：在 `handle_business_logic_fault()` 中，`0x9113` 直接发布到 `/fault_code` 话题通知 parser，但不加入 `fault_map_`。事件型故障不入持久化容器，系统恢复后自然失效
+- **设计原则**：事件型故障（急停）与状态型故障（轴通讯错误、超时）的生命周期根本不同。事件发生→通知→结束，不应持久化。`fault_map_` 的语义是"当前系统存在哪些持续故障"，急停不在此列
+
+#### v3.1 (2026-07-09): 产品到位检测生命周期管理
+- **问题**：`product_arrival_cycle_active` 只开不关（0x0105 打开，仅下一个 0x0105 通过 reset 间接关闭），报错和 0x0107 不关断，导致：
+  - 报错后状态机继续运行，条件满足时继续向后要板
+  - 结束作业后状态机继续运行，SMEMA 继续握手要板
+- **修复策略**：
+  - **publish_fault_code()**：非零故障码 → `product_arrival_cycle_active=False` + `reset_product_arrival_state_machine()` → 状态机回 IDLE + 停输送带
+  - **新增 /end_operation_signal**：`process_end_operation(0x0107)` 发布 Empty → `end_operation_signal_callback` → 关断周期
+  - **update_product_position()**：取消注释 `product_arrival_cycle_active` guard，恢复 SMEMA 要板保护
+  - **IDLE 状态智能恢复**：新增 `buffer_out` 感知——报错 reset 后若出料口已有板，直接跳 PENDING_PUBLISH 补发 0x0109，避免板丢失
+- **新增话题**：`/end_operation_signal` (std_msgs/msg/Empty)，由 byte_multiarray_parser 发布，BusinessLogicProcessor 订阅
+- **设计原则**：`product_arrival_cycle_active` 是产品到位检测的单一真相源，同时控制状态机运行和 SMEMA 要板
+- **问题**：axis5 升降轴层移动（远层 300mm/s, 400mm 行程）启停阶段阶跃变速，产生母线电压过压故障（状态字 0x1638）
+- **根因**：`gradual_approach()` 使用恒定步长 `get_max_step()`，启动和到达目标时 step 瞬时跳变，重载动能全部回馈为再生能量
+- **修复策略**：
+  - **ServoAxisBase**：新增 `RampState` 结构体 + `configure_ramp()` / `reset_motion_ramp()` 接口
+  - **gradual_approach()** 重构：`accel_per_cycle_>0` 时启用 T 型速度剖面（ACCEL → CONSTANT → DECEL）
+  - **HuichuanServoAxis / LeisaiServoAxis**：位移指令到达时调用 `ramp_.reset()`
+  - **ethercat_node.cpp**：axis5 初始化 `configure_ramp(2, 5)`
+- **运动学**：减速段 `step` 从 max (900) 线性递减到 min (5)，减速段约 450ms，再生能量均匀分散到 450 个周期
+- **设计原则**：向后兼容——未调用 `configure_ramp()` 的轴行为完全不变；通过配置而非类型判断实现差异化
 
 #### v2.9 (2026-05-13): 手动模式层移动支持
 - **问题**：手动模式下 axis5 无法接收层移动指令，因双重门控阻断

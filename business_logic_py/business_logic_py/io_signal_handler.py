@@ -54,6 +54,8 @@ class IoSignalHandler:
             12: 'buffer_out_position',
             13: 'conveyor_in_position',
             14: 'conveyor_out_position',
+            28: 'conveyor_exit_gap_detect',   # M540 接驳台出料检测(缝隙)
+            29: 'conveyor_entry_gap_detect',  # M541 接驳台入料检测(缝隙)
             19: 'gear_cylinder_1_in_position',
             21: 'gear_cylinder_2_in_position',
             23: 'smema_uba',
@@ -98,7 +100,12 @@ class IoSignalHandler:
 
         # === IDLE ===
         if self.proc.product_arrival_state == "IDLE":
-            if feed_detect and not self.proc.feed_detected:
+            # 报错/结束作业恢复：buffer_out已有板 → 直接跳PENDING_PUBLISH补发0x0109
+            if buffer_out:
+                self.proc.product_arrival_state = "PENDING_PUBLISH"
+                self.proc.get_logger().info(
+                    '产品到位检测：IDLE检测到buffer_out已有板，跳转PENDING_PUBLISH')
+            elif feed_detect and not self.proc.feed_detected:
                 self.proc.feed_detected = True
                 self.proc.product_arrival_state = "CONVEYOR_RUNNING"
                 if not conveyor_occupied and not buffer_out:
@@ -190,26 +197,32 @@ class IoSignalHandler:
         # === PENDING_PUBLISH ===
         elif self.proc.product_arrival_state == "PENDING_PUBLISH":
             if not conveyor_occupied:
-                # 输送带已释放：轴已在WAITING_BUFFER_OUT阶段停止，直接发布0x0109
-                self._publish_arrival()
-                self.proc.get_logger().info(
-                    '产品到位检测：输送带已释放，发布延迟的0x0109')
+                if buffer_out:
+                    # 输送带已释放且板子仍在buffer_out: 发布0x0109
+                    self._publish_arrival()
+                    self.proc.get_logger().info(
+                        '产品到位检测：输送带已释放，发布延迟的0x0109')
+                else:
+                    # 板子已离开buffer_out — 取消发布, 回IDLE等下一块板
+                    self.proc.product_arrival_state = "IDLE"
+                    self.proc.feed_detected = False
+                    self.proc.buffer_in_detected = False
+                    self.proc.get_logger().info(
+                        '产品到位检测：PENDING_PUBLISH期间板子已离开buffer_out, 取消发布')
 
         # === COMPLETED ===
         elif self.proc.product_arrival_state == "COMPLETED":
-            if not feed_detect or not buffer_out:
+            # 三重前置门: 信号归零 + 板已被物理确认送走(事件闸门)
+            # 仅 not feed_detect and not buffer_out 会被毛刺击穿,
+            # board_dispatched 是流程完成时回传的单调事件, 不可伪造, 杜绝幽灵补发.
+            if not feed_detect and not buffer_out and self.proc.board_dispatched:
                 self.proc.product_arrival_state = "IDLE"
                 self.proc.feed_detected = False
                 self.proc.buffer_in_detected = False
-                if self.proc.product_arrival_published_in_cycle:
-                    warehouse_busy = (self.proc.warehouse_state not in
-                                      [WarehouseState.IDLE, WarehouseState.COMPLETED])
-                    release_busy = (self.proc.release_state !=
-                                    PassThroughState.IDLE)
-                    if not warehouse_busy and not release_busy:
-                        self.proc.product_arrival_published_in_cycle = False
-                        self.proc.get_logger().info(
-                            '产品到位检测：feed_detect消失，清除到位标志，准备下一轮')
+                # 原则：发布者不清除事件标志，消费者负责清除
+                # product_arrival_published_in_cycle 由入库/放行流程消费后清除
+                # 不再在此处判断"是否被使用"并清除，避免竞态窗口
+                self.proc.board_dispatched = False   # 消费闸门, 准备下一轮
                 self.proc.get_logger().info('产品到位检测：重置状态机，等待下一轮')
 
     def _stop_arrival_conveyor(self):
@@ -222,6 +235,13 @@ class IoSignalHandler:
 
     def _publish_arrival(self):
         """发布产品到位信号0x0109"""
+        # 幂等兜底: 本轮已发布则拒绝重复发布.
+        # 第一道防线是 board_dispatched 闸门锁死 COMPLETED->IDLE,
+        # 此处为纵深防御, 防止任何路径绕过闸门二次触发.
+        if self.proc.product_arrival_published_in_cycle:
+            self.proc.get_logger().warn(
+                '产品到位检测：本轮0x0109已发布，拒绝重复发布')
+            return
         from std_msgs.msg import Bool
         arrival_msg = Bool()
         arrival_msg.data = True
@@ -296,6 +316,16 @@ class IoSignalHandler:
         if not self.proc.ENABLE_SMEMA:
             return
 
+        # 未收到0x0105开始作业 / 报错 / 结束作业 → 禁止要板
+        # product_in_position=True → C++ smema_set_product_in_position(True)
+        # → SMEMA状态机: product_in_position=true → MR=OFF → 不要板
+        if not self.proc.product_arrival_cycle_active:
+            from std_msgs.msg import Bool
+            msg = Bool()
+            msg.data = True
+            self.proc.product_position_pub.publish(msg)
+            return
+
         di = self.proc.current_io_signals
         feed_detect = di['feed_product_detect']
         buffer_in = di['buffer_in_position']
@@ -313,7 +343,18 @@ class IoSignalHandler:
             if not buffer_out and self.proc.buffer_out_was_true_for_arrival:
                 self.proc.conveyor_in_completed_for_arrival = True
 
-        # 判断是否不要板
+        # ================================================================
+        # 要板信号判定 — 配合 0x0109 周期, 以 IDLE 为唯一要板门控
+        #
+        # 设计原则:
+        #   MR=ON 的唯一条件: product_arrival_state == "IDLE"
+        #   COMPLETED/PENDING_PUBLISH 表示板子在基准层, 禁止要板
+        #   COMPLETED->IDLE 的 board_dispatched 门控已保证接驳台空闲
+        #
+        # 出库期间允许要板: 出库板路径(conveyor_in->conveyor_out)不经过
+        # 基准层(buffer_out), 新板(feed_detect->buffer_out)与出库板物理路径
+        # 不重叠, 可并行作业
+        # ================================================================
         no_board_reasons = []
         if feed_detect:
             no_board_reasons.append("进料检测中")
@@ -321,16 +362,15 @@ class IoSignalHandler:
             no_board_reasons.append("缓存架入料口有板")
         if buffer_out:
             no_board_reasons.append("缓存架出料口有板")
-        if (self.proc.product_arrival_state != "IDLE" and
-                self.proc.product_arrival_state != "COMPLETED" and
-                self.proc.product_arrival_state != "PENDING_PUBLISH"):
-            no_board_reasons.append(f"产品到位检测中({self.proc.product_arrival_state})")
+        if self.proc.product_arrival_state != "IDLE":
+            no_board_reasons.append(
+                f"产品到位状态非IDLE({self.proc.product_arrival_state})")
         if self.proc.product_arrival_published_in_cycle:
             no_board_reasons.append("产品在缓存架基准层")
         if self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING:
             no_board_reasons.append("入库传输中")
-        if (self.proc.release_state == PassThroughState.CONVEYOR_RUNNING and
-                not self.proc.release_conveyor_in_completed):
+        if self.proc.release_state in (PassThroughState.CONVEYOR_RUNNING,
+                                        PassThroughState.WAIT_FOR_CONVEYOR_OUT):
             no_board_reasons.append("放行传输中")
 
         product_in_position = len(no_board_reasons) > 0

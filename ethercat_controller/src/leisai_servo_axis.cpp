@@ -183,7 +183,10 @@ void LeisaiServoAxis::handle_state_machine(uint8_t* domain1_pd) {
 
                 // 特殊处理：0x821b错误代码完全忽略，继续初始化
                 if (leisai_error_code == 0x821b || leisai_error_code == 0x0000) {
-                    printf("轴 %s -----", axis_name_.c_str());
+                    static int ignore_counter = 0;
+                    if (ignore_counter++ % 500 == 0) {
+                        printf("轴 %s 0x821b通讯故障，继续等待恢复...\n", axis_name_.c_str());
+                    }
                     // 不改变current_state_，继续执行初始化序列
                 } else {
                     // 其他错误代码正常进入故障模式
@@ -528,6 +531,7 @@ void LeisaiServoAxis::handle_leisai_auto_operation(uint8_t* domain1_pd, int32_t 
     
     if (displacement_updated_) {
         displacement_updated_ = false;
+        ramp_.reset();                  // 新位移指令, 重置速度剖面
         target_reached_ = false;
         {
             std::lock_guard<std::mutex> lock(flag_mutex_);

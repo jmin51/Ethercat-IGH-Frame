@@ -25,8 +25,8 @@ class ProcessHandlers:
         di = self.proc.current_io_signals
         buffer_in = di['buffer_in_position']
         buffer_out = di['buffer_out_position']
-        conveyor_in = di['conveyor_in_position']
-        conveyor_out = di['conveyor_out_position']
+        conveyor_in_gap = di['conveyor_entry_gap_detect']   # M541 替代 conveyor_in
+        conveyor_out = di['conveyor_out_position']           # 保留原信号
         buffer_sensor_2 = di['buffer_sensor_2']
         feed_detect = di['feed_product_detect']
 
@@ -49,7 +49,7 @@ class ProcessHandlers:
         # === IDLE ===
         if self.proc.warehouse_state == WarehouseState.IDLE:
             if (self.proc.warehouse_process_requested and
-                    not conveyor_in and not conveyor_out):
+                    not conveyor_in_gap and not conveyor_out):
                 self.proc._reset_key_do_signals()
                 self.proc.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
                 self.proc.warehouse_process_requested = False
@@ -77,8 +77,10 @@ class ProcessHandlers:
                     self.proc.send_layer_command(1)
                     return
                 self.proc.warehouse_state = WarehouseState.CONVEYOR_MOVING
+                self.proc.product_arrival_published_in_cycle = False
                 self.proc.get_logger().info(
-                    f'检测到入库条件，当前层={self.proc.current_layer_float:.2f}，开始输送')
+                    f'检测到入库条件，当前层={self.proc.current_layer_float:.2f}，开始输送'
+                    f'（消费产品到位标志）')
                 # 恢复输送带默认速度（外部命令可能改过速度）
                 self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
                 self.proc.send_axis_speed("axis1_2", self.proc.DEFAULT_JOG_SPEEDS["axis1_2"])
@@ -94,27 +96,14 @@ class ProcessHandlers:
             if buffer_out:
                 self.proc.send_do_control_once("813", True)
 
-            if conveyor_in and not self.proc.conveyor_in_detected:
+            if conveyor_in_gap and not self.proc.conveyor_in_detected:
                 self.proc.conveyor_in_detected = True
 
             conveyor_out_detected = conveyor_out
-            conveyor_in_then_out = (self.proc.conveyor_in_detected and not conveyor_in)
+            conveyor_in_then_out = (self.proc.conveyor_in_detected and not conveyor_in_gap)
 
-            if conveyor_in_then_out and not self.proc.conveyor_in_then_out_delay_started:
-                self.proc.conveyor_in_then_out_delay_started = True
-                self.proc.conveyor_in_then_out_delay_counter = 0
-                self.proc.get_logger().info('检测到条件二（conveyor_in变化），开始0.2秒延迟')
-
-            if self.proc.conveyor_in_then_out_delay_started:
-                self.proc.conveyor_in_then_out_delay_counter += 1
-                if self.proc.conveyor_in_then_out_delay_counter >= 1:
-                    board_in_position = True
-                    self.proc.conveyor_in_then_out_delay_started = False
-                    self.proc.get_logger().info('条件二延迟结束，认为板子到位')
-                else:
-                    board_in_position = False
-            else:
-                board_in_position = conveyor_out_detected
+            # C++层M541防抖(300ms)已确保信号稳定消失, 无需业务层重复延迟
+            board_in_position = conveyor_in_then_out or conveyor_out_detected
 
             if board_in_position:
                 trigger_condition = []
@@ -206,7 +195,7 @@ class ProcessHandlers:
                         self.proc.buffer_sensor_2_detected = True
                         self.proc.get_logger().info('检测到货物进入缓存架(buffer_sensor_2=1)')
                 elif (self.proc.buffer_sensor_2_detected and
-                      not conveyor_in and not buffer_sensor_2):
+                      not conveyor_in_gap and not buffer_sensor_2):
                     self.proc.delay_condition_triggered = True
                     self.proc.delay_started = True
                     self.proc.delay_counter = 0
@@ -258,11 +247,11 @@ class ProcessHandlers:
                 if self.proc.product_arrival_cycle_active:
                     self.proc.product_arrival_published_in_cycle = False
                     self.proc.product_arrival_phase = "post_warehouse"
-                    # 仅在状态机空闲时重置，避免中断正在进行的PCB检测
-                    active_detecting = ("CONVEYOR_RUNNING", "WAITING_BUFFER_OUT",
-                                        "PENDING_PUBLISH")
-                    if self.proc.product_arrival_state not in active_detecting:
-                        self.proc.io_handler.reset_product_arrival_state_machine()
+                    # 不在此处重置状态机: 入库刚发完0x0109, 板子大概率仍在buffer_out,
+                    # reset回IDLE会被IDLE的buffer_out恢复逻辑误判为"作业重启需补发",
+                    # 产生幽灵0x109(入库完成->出库启动的2.6秒误发即此路径)。
+                    # 状态机保持COMPLETED, 由COMPLETED自然流转
+                    # (not feed_detect and not buffer_out) 回IDLE。
 
             if not self.proc.is_target_layer_reached(1):
                 self.proc.state_change_counter += 1
@@ -278,6 +267,9 @@ class ProcessHandlers:
             self.proc.completed_reset_command_sent = False
             self.proc.warehouse_state = WarehouseState.IDLE
             self.proc.clear_process_timeout('warehouse')
+            # 升降机已归位第1层, 下一块板可入库,
+            # 回传事件闸门: 解锁下一轮0x0109发布.
+            self.proc.board_dispatched = True
             self.proc.get_logger().info(
                 f'升降机已回到第1层(当前层={self.proc.current_layer_float:.2f})，流程状态重置为IDLE')
 
@@ -287,8 +279,9 @@ class ProcessHandlers:
     def process_outbound_logic(self):
         """处理出库业务流程"""
         di = self.proc.current_io_signals
-        conveyor_in = di['conveyor_in_position']
-        conveyor_out = di['conveyor_out_position']
+        conveyor_in_gap = di['conveyor_entry_gap_detect']   # M541 替代 conveyor_in
+        conveyor_out = di['conveyor_out_position']           # 保留原信号(POST_LIFT使用)
+        conveyor_out_gap = di['conveyor_exit_gap_detect']    # M540 替代 conveyor_out(COMPLETED使用)
 
         state_changed = (self.proc.outbound_state != self.proc.previous_outbound_state)
         if state_changed:
@@ -318,6 +311,12 @@ class ProcessHandlers:
 
         # === WAIT_FOR_EXIT ===
         elif self.proc.outbound_state == OutboundState.WAIT_FOR_EXIT:
+            # 轴资源互斥: 等待入库归位完成，不抢占正在运动中的提升机
+            if self.proc.warehouse_state != WarehouseState.IDLE:
+                self.proc.get_logger().info(
+                    f'出库等待入库流程完成'
+                    f'(当前入库状态={self.proc.warehouse_state.name})，暂不抢占轴资源')
+                return
             self.proc.get_logger().info('检测到出库条件，开始提升机运行')
             self.proc.send_layer_command(self.proc.source_layer)
             self.proc.outbound_state = OutboundState.LIFT_MOVING
@@ -384,32 +383,17 @@ class ProcessHandlers:
                         f'接驳台入料超时({elapsed:.1f}秒>{self.proc.POST_LIFT_PROCESS_TIMEOUT}秒)，'
                         f'发布故障码=0x{fault_code:04X}')
                     self.proc.publish_fault_code(fault_code)
-                    self.proc.post_lift_timeout_reported = True
                     return
 
-            if conveyor_in and not self.proc.outbound_conveyor_in_detected:
+            if conveyor_in_gap and not self.proc.outbound_conveyor_in_detected:
                 self.proc.outbound_conveyor_in_detected = True
-                self.proc.get_logger().info('检测到货物进入接驳台(conveyor_in=1)')
+                self.proc.get_logger().info('检测到货物进入接驳台(conveyor_in_gap=1)')
 
             conveyor_out_detected = conveyor_out
-            conveyor_in_then_out = (self.proc.outbound_conveyor_in_detected and not conveyor_in)
+            conveyor_in_then_out = (self.proc.outbound_conveyor_in_detected and not conveyor_in_gap)
 
-            if (conveyor_in_then_out and
-                    not self.proc.outbound_conveyor_in_then_out_delay_started):
-                self.proc.outbound_conveyor_in_then_out_delay_started = True
-                self.proc.outbound_conveyor_in_then_out_delay_counter = 0
-                self.proc.get_logger().info('检测到出库条件二（conveyor_in变化），开始1秒延迟')
-
-            if self.proc.outbound_conveyor_in_then_out_delay_started:
-                self.proc.outbound_conveyor_in_then_out_delay_counter += 1
-                if self.proc.outbound_conveyor_in_then_out_delay_counter >= 1:
-                    board_in_position = True
-                    self.proc.outbound_conveyor_in_then_out_delay_started = False
-                    self.proc.get_logger().info('出库条件二延迟结束，认为板子到位')
-                else:
-                    board_in_position = False
-            else:
-                board_in_position = conveyor_out_detected
+            # C++层M541防抖(300ms)已确保信号稳定消失, 无需业务层重复延迟
+            board_in_position = conveyor_in_then_out or conveyor_out_detected
 
             if board_in_position:
                 trigger_condition = []
@@ -461,10 +445,10 @@ class ProcessHandlers:
 
         # === COMPLETED ===
         elif self.proc.outbound_state == OutboundState.COMPLETED:
-            if conveyor_out:
+            if conveyor_out_gap:
                 if not getattr(self.proc, '_outbound_conveyor_out_was_true', False):
                     self.proc._outbound_conveyor_out_was_true = True
-                    self.proc.get_logger().info('检测到货物到达出料位，等待货物离开...')
+                    self.proc.get_logger().info('检测到货物到达出料位(M540)，等待货物离开...')
             else:
                 if (getattr(self.proc, '_outbound_conveyor_out_was_true', False) and
                         not self.proc.outbound_delay_started):
@@ -513,8 +497,8 @@ class ProcessHandlers:
     def process_release_logic(self):
         """处理放行业务流程"""
         di = self.proc.current_io_signals
-        conveyor_in = di['conveyor_in_position']
-        conveyor_out = di['conveyor_out_position']
+        conveyor_in_gap = di['conveyor_entry_gap_detect']   # M541 替代 conveyor_in
+        conveyor_out_gap = di['conveyor_exit_gap_detect']    # M540 替代 conveyor_out
         buffer_out = di['buffer_out_position']
 
         state_changed = (self.proc.release_state != self.proc.previous_release_state)
@@ -561,6 +545,9 @@ class ProcessHandlers:
 
         # === RETURNING_TO_LAYER_1 ===
         elif self.proc.release_state == PassThroughState.RETURNING_TO_LAYER_1:
+            # 主动消费 pending_resume_state，不依赖外部事件触发
+            if self.proc.auto_mode_initialized and self.proc.pending_resume_state is not None:
+                self.proc.pause_resume_mgr.execute_pending_resume()
             if self.proc.is_target_layer_reached(1):
                 self.proc.release_state = PassThroughState.WAIT_FOR_PRODUCT_ARRIVAL
                 self.proc.get_logger().info(
@@ -584,30 +571,34 @@ class ProcessHandlers:
                     CommandType.JOG, "axis1_2", "forward",
                     description="启动轴1_2正转（放行）"))
                 self.proc.send_do_control_once("813", True)
+                self.proc.product_arrival_published_in_cycle = False
                 self.proc.release_state = PassThroughState.CONVEYOR_RUNNING
-                self.proc.get_logger().info('产品到位检测完成，输送带已启动（放行）')
+                self.proc.get_logger().info('产品到位检测完成，输送带已启动（放行，消费产品到位标志）')
 
         # === CONVEYOR_RUNNING ===
         elif self.proc.release_state == PassThroughState.CONVEYOR_RUNNING:
             if not self.proc.release_conveyor_in_completed:
-                if conveyor_in:
+                if conveyor_in_gap:
                     if not self.proc.release_conveyor_in_was_true:
                         self.proc.release_conveyor_in_was_true = True
-                        self.proc.get_logger().info('放行流程：检测到货物进入输送带(conveyor_in=1)')
+                        self.proc.get_logger().info('放行流程：检测到货物进入输送带(M541=1)')
                 else:
                     if self.proc.release_conveyor_in_was_true:
                         self.proc.release_conveyor_in_completed = True
+                        # 板子已确认完全进入输送带(M541 无->有->无 完成),
+                        # 回传事件闸门: 接驳台已空, 可接收下一块板的0x0109发布.
+                        self.proc.board_dispatched = True
                         self.proc.get_logger().info(
-                            '放行流程：货物已完全进入输送带(conveyor_in=0)，开始检测conveyor_out')
+                            '放行流程：货物已完全进入输送带(M541=0)，开始检测M540')
 
             if self.proc.release_conveyor_in_completed:
-                if conveyor_out:
+                if conveyor_out_gap:
                     if not self.proc.release_conveyor_out_was_true:
                         self.proc.release_conveyor_out_was_true = True
-                        self.proc.get_logger().info('放行流程：检测到货物到达出料位(conveyor_out=1)')
+                        self.proc.get_logger().info('放行流程：检测到货物到达出料位(M540=1)')
                 else:
                     if self.proc.release_conveyor_out_was_true:
-                        self.proc.get_logger().info('放行流程：检测到货物离开出料位(conveyor_out=0)，开始延迟')
+                        self.proc.get_logger().info('放行流程：检测到货物离开出料位(M540=0)，开始延迟')
                         self.proc.release_conveyor_out_delay_started = True
                         self.proc.release_conveyor_out_delay_counter = 0
                         self.proc.release_state = PassThroughState.WAIT_FOR_CONVEYOR_OUT
@@ -616,7 +607,8 @@ class ProcessHandlers:
         elif self.proc.release_state == PassThroughState.WAIT_FOR_CONVEYOR_OUT:
             if self.proc.release_conveyor_out_delay_started:
                 self.proc.release_conveyor_out_delay_counter += 1
-                if self.proc.release_conveyor_out_delay_counter >= 3:
+                # M540防抖(300ms)已确认板子完全离开, 1周期(100ms)余量足够
+                if self.proc.release_conveyor_out_delay_counter >= 1:
                     self.proc.add_command(ControlAction(
                         CommandType.JOG, "axis1_1", "stop", description="停止轴1_1"))
                     self.proc.add_command(ControlAction(
@@ -643,12 +635,11 @@ class ProcessHandlers:
             self.proc.release_state = PassThroughState.IDLE
             if self.proc.product_arrival_cycle_active:
                 self.proc.product_arrival_published_in_cycle = False
-                # 仅在状态机空闲时重置，避免中断正在进行的PCB检测
-                active_detecting = ("CONVEYOR_RUNNING", "WAITING_BUFFER_OUT",
-                                    "PENDING_PUBLISH")
-                if self.proc.product_arrival_state not in active_detecting:
-                    self.proc.io_handler.reset_product_arrival_state_machine()
-                    self.proc.get_logger().info('放行流程完成，重置产品到位检测状态机，等待下一轮产品到位')
+                # 不在此处重置状态机: 放行刚送走板子, 但buffer_out可能残留/抖动,
+                # reset回IDLE会被IDLE的buffer_out恢复逻辑误判为"需补发",
+                # 或在PENDING_PUBLISH期间板子已离开时产生幽灵0x109。
+                # 状态机保持COMPLETED, 由COMPLETED自然流转
+                # (not feed_detect and not buffer_out) 回IDLE。
 
     # ================================================================
     # 内部辅助

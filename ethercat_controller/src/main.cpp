@@ -95,9 +95,6 @@ void pause_motors_only() {
     
     // 4. 重置自动模式初始化标志（确保下次恢复时重新等待轴就绪）
     g_auto_mode_initialized.store(false);
-    if (global_node) {
-        global_node->reset_auto_mode_init_published();
-    }
     
     // 4. 打印记录的状态信息
     if (g_pause_state_record.has_recorded_state) {
@@ -177,7 +174,9 @@ void resume_from_short_pause() {
 }
 
 // 安全关闭
-void safe_shutdown(bool is_pause = false) {
+// is_pause: true=暂停(通知Python层急停), false=完全退出
+// silent: true=静默释放资源(不通知Python层, 用于复位回原完成后的资源释放)
+void safe_shutdown(bool is_pause, bool silent) {
     static std::atomic<bool> shutdown_in_progress{false};
     
     if (shutdown_in_progress.exchange(true)) {
@@ -197,6 +196,12 @@ void safe_shutdown(bool is_pause = false) {
         write_single_do_signal(812, false);  // 皮带正转启动
         write_single_do_signal(813, false);  // 皮带反转启动
         printf("[暂停] DO信号复位完成\n");
+        
+        // 通知Python层：急停/安全关闭，触发快照上报+reset_business_logic全量清零
+        // 静默模式下跳过，避免复位回原完成后的重复0x9113发布
+        if (global_node && !silent) {
+            global_node->publish_system_status("执行命令: emergency_stop");
+        }
     } else {
         printf("\n开始安全关闭流程...\n");
         g_should_exit.store(true, std::memory_order_release);
@@ -503,7 +508,7 @@ int main(int argc, char **argv) {
             g_start_button_pressed.store(false);
             g_reset_button_pressed.store(false);
             g_full_shutdown_requested.store(false);
-            safe_shutdown(true);  // true表示暂停模式
+            safe_shutdown(true);  // true表示急停模式
             
             // 复位触发的急停完成后，衔接复位回原流程
             if (g_reset_pending_after_estop.load()) {
@@ -566,13 +571,10 @@ int main(int argc, char **argv) {
                     notify_system_ready();
                     // 重置标志，确保重启后重新发布初始化完成信号
                     g_auto_mode_initialized.store(false);
-                    if (global_node) {
-                        global_node->reset_auto_mode_init_published();
-                    }
                     // 安全关闭：释放EtherCAT资源，保持灯光和ROS2
                     g_system_running.store(false);
                     g_reset_button_pressed.store(false);
-                    safe_shutdown(true);
+                    safe_shutdown(true, true);  // silent=true: 静默释放，不重复发emergency_stop
                     printf("[复位回原] 安全关闭完成，按启动按钮重新启动\n");
                 } else {
                     // 正常流程：发布自动模式初始化完成信号
@@ -620,9 +622,6 @@ int main(int argc, char **argv) {
             g_pause_button_pressed.store(false);
             // 重置自动模式初始化标志（确保重新等待轴就绪）
             g_auto_mode_initialized.store(false);
-            if (global_node) {
-                global_node->reset_auto_mode_init_published();
-            }
             
             // 重新初始化EtherCAT资源
             if (!master) {
@@ -690,9 +689,6 @@ int main(int argc, char **argv) {
             g_full_shutdown_requested.store(false);
             // 重置自动模式初始化标志（确保重新等待轴就绪）
             g_auto_mode_initialized.store(false);
-            if (global_node) {
-                global_node->reset_auto_mode_init_published();
-            }
             // 标记复位回原完成后需要安全关闭（释放EtherCAT资源，保持灯光不变）
             g_reset_homing_shutdown_pending.store(true);
             

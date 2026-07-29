@@ -170,6 +170,10 @@ void EthercatNode::initialize_node() {
     pause_state_pub_ = this->create_publisher<std_msgs::msg::String>(
         "/pause_state_command", rclcpp::QoS(10).reliable());
     
+    // +++ 新增：自动模式就绪状态周期性广播（真相驱动，替代一次性事件通知）+++
+    auto_mode_status_pub_ = this->create_publisher<std_msgs::msg::Bool>(
+        "/auto_mode_status", rclcpp::QoS(10).reliable());
+    
     // +++ 新增：订阅Python端的状态报告 +++
     pause_state_report_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/pause_state_report", rclcpp::QoS(10).reliable(),
@@ -213,19 +217,29 @@ void EthercatNode::periodic_timer_callback() {
     // 4. 发布轴状态机状态
     publish_axis_states();
     
-    // 5. 检查并发布自动模式初始化完成状态（用于业务逻辑恢复时同步）
-    if (!auto_mode_init_published_ && g_auto_mode_initialized.load()) {
-        // 先执行待处理的层命令（如果有），确保位移指令在自动模式就绪后发送
-        if (layer_processor_ && layer_processor_->has_pending_command()) {
-            RCLCPP_INFO(this->get_logger(), "自动模式初始化完成，执行待处理的层命令...");
-            layer_processor_->execute_pending_command();
-        }
+    // 5. 周期性广播自动模式就绪状态（真相驱动，替代一次性事件通知）
+    {
+        bool current_auto_init = g_auto_mode_initialized.load();
+        auto auto_status_msg = std_msgs::msg::Bool();
+        auto_status_msg.data = current_auto_init;
+        auto_mode_status_pub_->publish(auto_status_msg);
         
-        auto status_msg = std_msgs::msg::String();
-        status_msg.data = "自动模式初始化完成";
-        system_status_pub_->publish(status_msg);
-        RCLCPP_INFO(this->get_logger(), "发布自动模式初始化完成状态，业务逻辑可以恢复执行");
-        auto_mode_init_published_ = true;
+        // Edge: False→True 时执行一次性副作用（待处理层命令 + 状态日志）
+        if (current_auto_init && !auto_mode_edge_triggered_) {
+            auto_mode_edge_triggered_ = true;
+            if (layer_processor_ && layer_processor_->has_pending_command()) {
+                RCLCPP_INFO(this->get_logger(), "自动模式初始化完成，执行待处理的层命令...");
+                layer_processor_->execute_pending_command();
+            }
+            auto status_msg = std_msgs::msg::String();
+            status_msg.data = "自动模式初始化完成";
+            system_status_pub_->publish(status_msg);
+            RCLCPP_INFO(this->get_logger(), "自动模式初始化完成，业务逻辑可以恢复执行");
+        }
+        // Edge: True→False 时复位，确保下次恢复时重新触发一次性副作用
+        else if (!current_auto_init && auto_mode_edge_triggered_) {
+            auto_mode_edge_triggered_ = false;
+        }
     }
     
     // 6. 启动后校正板宽（所有轴进入自动模式后只执行一次）
@@ -290,6 +304,23 @@ void EthercatNode::calibrate_layer_after_auto_init() {
 
 void EthercatNode::handle_py_control_command(const std_msgs::msg::String::SharedPtr msg) {
     std::string command = msg->data;
+
+    // ============================================================
+    // 暂停状态拦截：系统暂停时忽略所有启动类命令
+    // 暂停后只有通过IO启动按钮才能恢复系统运行，防止105命令绕过暂停
+    // 但放过 stop/clear_fault/reset 等安全命令
+    // ============================================================
+    if ((g_short_pause_active.load() || !g_system_running.load()) &&
+        (command == CMD_START_AUTO || command == CMD_START_MANUAL)) {
+        RCLCPP_WARN(this->get_logger(),
+            "系统处于暂停状态(g_short_pause=%d, g_system_running=%d)，忽略启动命令: %s",
+            g_short_pause_active.load(), g_system_running.load(), command.c_str());
+        // 发布暂停状态下忽略105命令的状态消息
+        auto status_msg = std_msgs::msg::String();
+        status_msg.data = "[暂停状态] 忽略启动命令: " + command;
+        system_status_pub_->publish(status_msg);
+        return;
+    }
     
 #if CONTROL_SOURCE_IO
     // IO控制模式下，禁止通过话题切换手动/自动模式（避免与IO控制冲突）
@@ -398,19 +429,20 @@ void EthercatNode::init_axes(ec_master_t* master) {
         std::string name = axis->get_name();
         if (name == "axis4") {
             axis->set_jog_speed(35.0); // 将 axis4 的点动速度初始化为 35 mm/s
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 35.0 mm/s", name.c_str());
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 初始点动速度已设为: 35.0 mm/s", name.c_str());
         } else if (name == "axis1_1" || name == "axis1_2") {
             axis->set_jog_speed(280.0); // 接驳台输送轴
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 280.0 mm/s", name.c_str());
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 初始点动速度已设为: 280.0 mm/s", name.c_str());
         } else if (name == "axis2_1" || name == "axis2_2") {
             axis->set_jog_speed(230.0); // 内部输送轴
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 230.0 mm/s", name.c_str());
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 初始点动速度已设为: 230.0 mm/s", name.c_str());
         } else if (name == "axis5") {
             axis->set_jog_speed(120.0); // 接驳台升降轴，近层默认速度
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 120.0 mm/s", name.c_str());
+            axis->configure_ramp(1, 5); // T 型速度斜坡: 加速度 1 pulse/cycle^2, 最小步长 5 pulses
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 初始点动速度已设为: 120.0 mm/s, 斜坡已启用 (accel=1, min_step=5)", name.c_str());
         } else if (name == "axis3") {
             axis->set_jog_speed(40.0);  // 板宽调整轴
-            RCLCPP_INFO(this->get_logger(), "轴 %s 初始点动速度已设为: 40.0 mm/s", name.c_str());
+            RCLCPP_DEBUG(this->get_logger(), "轴 %s 初始点动速度已设为: 40.0 mm/s", name.c_str());
         } else {
             // 其他轴保持默认速度（DEFAULT_JOG_SPEED，当前为20.0 mm/s）
             RCLCPP_DEBUG(this->get_logger(), "轴 %s 使用默认点动速度: %.1f mm/s", 
@@ -595,6 +627,9 @@ void EthercatNode::handle_control_command(const std::string& command) {
             RCLCPP_INFO(this->get_logger(), "已清除所有系统故障和告警");
         }
         
+        // +++ 停止时同步重置自动模式就绪标志，广播 False 给 Python +++
+        g_auto_mode_initialized.store(false);
+        
     } else if (command == CMD_CLEAR_FAULT) {
         // 清除故障
         for (auto& axis : servo_axes_) {
@@ -747,7 +782,7 @@ double EthercatNode::pulses_to_displacement(int32_t pulses, int32_t initial_puls
 
 void EthercatNode::handle_jog_command(const std_msgs::msg::String::SharedPtr msg) {
     std::string command = msg->data;
-    RCLCPP_INFO(this->get_logger(), "收到点动命令: %s", command.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "收到点动命令: %s", command.c_str());
     
     // 解析格式："axis1_1:forward" 或 "axis1_1:reverse" 或 "axis1_1:stop"
     size_t colon_pos = command.find(':');
@@ -830,7 +865,44 @@ void EthercatNode::stop_io_monitoring() {
     RCLCPP_INFO(this->get_logger(), "IO监控线程已停止");
 }
 
+// ================================================================
+// M540/M541 缝隙信号非对称下降沿防抖
+// 上升沿(板子到达)立即响应, 下降沿(板子离开)需持续GAP_DEBOUNCE_CYCLES
+// 个周期(300ms)确认消失, 确保PCB完全通过缝隙后才允许升降机移动
+// ================================================================
+void EthercatNode::debounce_gap_signals(DI_Interface& di) {
+    // ---- M541: conveyor_entry_gap_detect (入料缝隙) ----
+    if (di.conveyor_entry_gap_detect) {
+        // 上升沿: 板子到达, 立即确认, 清零计数器
+        gap_debounce_.m541_falling_counter = 0;
+        gap_debounce_.m541_filtered = true;
+    } else {
+        // 下降沿: 板子离开传感器, 延迟确认消失
+        if (gap_debounce_.m541_falling_counter < GAP_DEBOUNCE_CYCLES)
+            gap_debounce_.m541_falling_counter++;
+        if (gap_debounce_.m541_falling_counter >= GAP_DEBOUNCE_CYCLES)
+            gap_debounce_.m541_filtered = false;
+        // 未达阈值则保持上一个输出值(延迟消失)
+    }
+    di.conveyor_entry_gap_detect = gap_debounce_.m541_filtered;
+
+    // ---- M540: conveyor_exit_gap_detect (出料缝隙) ----
+    if (di.conveyor_exit_gap_detect) {
+        gap_debounce_.m540_falling_counter = 0;
+        gap_debounce_.m540_filtered = true;
+    } else {
+        if (gap_debounce_.m540_falling_counter < GAP_DEBOUNCE_CYCLES)
+            gap_debounce_.m540_falling_counter++;
+        if (gap_debounce_.m540_falling_counter >= GAP_DEBOUNCE_CYCLES)
+            gap_debounce_.m540_filtered = false;
+    }
+    di.conveyor_exit_gap_detect = gap_debounce_.m540_filtered;
+}
+
 void EthercatNode::handle_io_signals(DI_Interface di) {
+    // M540/M541 缝隙信号下降沿防抖 (300ms确认消失)
+    debounce_gap_signals(di);
+
     pthread_mutex_lock(&io_mutex_);
     current_di_status_ = di;
     pthread_mutex_unlock(&io_mutex_);
@@ -937,6 +1009,8 @@ void EthercatNode::publish_io_status() {
     ss << "DI23:" << (di.smema_uba ? "1" : "0") << ",";             // SMEMA上游有板待发
     ss << "DI24:" << (di.smema_dbr ? "1" : "0") << ",";             // SMEMA下游要板(OR结果)
     ss << "DI25:" << (di.smema_dbr_test ? "1" : "0");               // SMEMA下游要板测试信号
+    ss << ",DI28:" << (di.conveyor_exit_gap_detect ? "1" : "0");   // M540 接驳台出料检测(缝隙)
+    ss << ",DI29:" << (di.conveyor_entry_gap_detect ? "1" : "0");  // M541 接驳台入料检测(缝隙)
 
     ss << " | DO状态: ";
     
@@ -1170,7 +1244,7 @@ void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedP
     }
     
     std::string command = msg->data;
-    RCLCPP_INFO(this->get_logger(), "收到点动速度设置命令: %s", command.c_str());
+    RCLCPP_DEBUG(this->get_logger(), "收到点动速度设置命令: %s", command.c_str());
     
     std::string axis_name;
     double speed;
@@ -1185,13 +1259,13 @@ void EthercatNode::handle_jog_speed_command(const std_msgs::msg::String::SharedP
     for (auto& axis : servo_axes_) {
         if (axis->get_name() == axis_name) {
             if (axis->set_jog_speed(speed)) {
-                RCLCPP_INFO(this->get_logger(), "成功设置轴 %s 的点动速度为: %.1f mm/s", 
-                           axis_name.c_str(), speed);
+                // RCLCPP_INFO(this->get_logger(), "成功设置轴 %s 的点动速度为: %.1f mm/s", 
+                //            axis_name.c_str(), speed);
                 
-                // 发布系统状态
-                auto status_msg = std_msgs::msg::String();
-                status_msg.data = "轴 " + axis_name + " 点动速度设置为: " + std::to_string(speed) + " mm/s";
-                system_status_pub_->publish(status_msg);
+                // 发布系统状态 -- 已禁用
+                // auto status_msg = std_msgs::msg::String();
+                // status_msg.data = "轴 " + axis_name + " 点动速度设置为: " + std::to_string(speed) + " mm/s";
+                // system_status_pub_->publish(status_msg);
             } else {
                 print_error("设置轴 " + axis_name + " 的点动速度失败");
             }
@@ -1736,6 +1810,18 @@ void EthercatNode::handle_business_logic_fault(const std_msgs::msg::String::Shar
         else if (fault_code == 0x5202) description = "出库流程超时";
         else if (fault_code == 0x5001) description = "板宽调整超时";
 
+        // 0x9113 是事件型故障（急停），不入 fault_map 持久化
+        // 直接发布到 /fault_code 通知 parser 即可，系统恢复后自动失效
+        if (fault_code == 0x9113) {
+            if (fault_code_pub_) {
+                auto fault_msg = std_msgs::msg::String();
+                fault_msg.data = "business_logic:0x9113";
+                fault_code_pub_->publish(fault_msg);
+            }
+            RCLCPP_WARN(this->get_logger(), "急停事件: 0x9113 已发布（不入库）");
+            return;
+        }
+
         fault_manager_->add_fault("business_logic", fault_code, description);
         RCLCPP_WARN(this->get_logger(), "收到Python层故障: 0x%04X - %s", fault_code, description.c_str());
     }
@@ -1756,6 +1842,19 @@ void EthercatNode::publish_pause_state_record_request() {
     pause_state_pub_->publish(msg);
     
     RCLCPP_INFO(this->get_logger(), "已发送暂停状态记录请求");
+}
+
+// 发布系统状态消息 - 供main.cpp急停等场景通知Python层
+void EthercatNode::publish_system_status(const std::string& status) {
+    if (node_shutting_down_.load() || !rclcpp::ok()) {
+        return;
+    }
+    
+    auto msg = std_msgs::msg::String();
+    msg.data = status;
+    system_status_pub_->publish(msg);
+    
+    RCLCPP_INFO(this->get_logger(), "已发布系统状态: %s", status.c_str());
 }
 
 // 发布暂停状态恢复请求 - 携带记录的状态信息

@@ -33,6 +33,23 @@ enum class DriveBrand {
     HUICHUAN = 1
 };
 
+/* ============================================
+ * T 型速度斜坡 —— 运动控制软起动 / 软停止核心
+ * 阶段: ACCEL -> CONSTANT -> DECEL -> IDLE
+ * accel_per_cycle_=0 时禁用斜坡，完全向后兼容
+ * ============================================ */
+struct RampState {
+    enum Phase { ACCEL, CONSTANT, DECEL, IDLE };
+
+    Phase   phase{IDLE};
+    int32_t current_step_{0};           // 当前周期步长 (pulses)
+    int32_t min_step_{5};               // 启 / 停点步长, 防零速抖动
+    int32_t accel_per_cycle_{0};        // 加速度 (pulses/cycle^2), 0 = 禁用
+
+    void reset() { phase = IDLE; current_step_ = 0; }
+    bool enabled() const { return accel_per_cycle_ > 0; }
+};
+
 class ServoAxisBase {
 public:
     ServoAxisBase(const std::string& name, uint16_t position, AxisType axis_type, DriveBrand brand, uint32_t product_code, double gear_ratio = 1.0);
@@ -103,6 +120,12 @@ public:
     // 添加点动速度设置方法
     virtual bool set_jog_speed(double speed);
     virtual double get_jog_speed() const { return jog_speed_; }
+
+    // T 型速度斜坡 —— 软起动 / 软停止
+    // accel_per_cycle: 每周期加速度增量 (pulses/cycle^2)
+    // min_step: 启停最小步长 (pulses)
+    virtual void configure_ramp(int32_t accel_per_cycle, int32_t min_step);
+    virtual void reset_motion_ramp() { ramp_.reset(); }
 
 protected:
     // 保护成员变量 - 子类可以访问
@@ -181,7 +204,10 @@ protected:
     // 位移中断保护：点动中断位移时保存目标，点动结束后自动恢复
     int32_t saved_displacement_target_;  // 被点动中断的位移目标脉冲
     bool has_saved_displacement_;        // 是否有被中断的位移目标
-    
+
+    // T 型速度斜坡状态
+    RampState ramp_;
+
     void gradual_approach(int32_t target_pulses, uint8_t* domain1_pd);
     
     // 获取最大步进脉冲数（子类可重写以支持不同限速）

@@ -374,6 +374,8 @@ DI_Interface read_all_di_signals() {
     di.smema_uba = di_values[23];            // M535 上游有板待发
     di.smema_dbr_test = di_values[25];              // M537 下游要板测试信号
     di.smema_dbr = di_values[24] | di_values[25];  // M536 下游要板 = 主信号 | 测试信号(OR逻辑)
+    di.conveyor_exit_gap_detect = di_values[28];    // M540 接驳台出料检测(缝隙)
+    di.conveyor_entry_gap_detect = di_values[29];   // M541 接驳台入料检测(缝隙)
 #else
     // SMEMA禁用时提供默认值，方便调试
     di.smema_uba = false;                    // 默认无板
@@ -399,7 +401,7 @@ bool read_single_di_signal(int di_address) {
     }
     
     // 地址有效性检查
-    if (di_address < 512 || di_address > 537) {
+    if (di_address < 512 || di_address > 541) {
         fprintf(stderr, "DI地址超出范围: %d\n", di_address);
         return false;
     }

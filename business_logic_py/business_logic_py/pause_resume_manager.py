@@ -76,11 +76,14 @@ class PauseResumeManager:
                 self.restore_warehouse_state(
                     params.get('warehouse_state', 1),
                     params.get('warehouse_layer', 1))
+                # 恢复时重置超时计时器，给予完整预算，不累计暂停耗时
+                self.proc.reset_process_timeout('warehouse')
 
             if params.get('outbound_active', 0):
                 self.restore_outbound_state(
                     params.get('outbound_state', 1),
                     params.get('outbound_layer', 1))
+                self.proc.reset_process_timeout('outbound')
 
             self.proc.pause_state_reported = False
             self.proc.get_logger().info('业务逻辑状态恢复完成，继续执行')
@@ -118,7 +121,9 @@ class PauseResumeManager:
             self.proc.warehouse_state = WarehouseState.WAIT_FOR_ENTRY
             self.proc.warehouse_process_requested = True
             self.proc.warehouse_completion_published = False
-            self.proc.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件，重置完成发布标志')
+            self.proc.conveyor_in_detected = False
+            self.proc.conveyor_in_then_out_delay_started = False
+            self.proc.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件，重置完成发布标志和IO检测标志')
 
         elif state_value == WarehouseState.LIFT_MOVING.value:
             self.proc.warehouse_state = WarehouseState.LIFT_MOVING
@@ -153,10 +158,11 @@ class PauseResumeManager:
             self.proc.delay_started = False
             self.proc.delay_condition_triggered = False
             self.proc.buffer_sensor_2_detected = False
+            self.proc.conveyor_in_detected = False
             self.proc.reset_do_command_state("811")
             self.proc.reset_do_command_state("812")
             self.proc.warehouse_completion_published = False
-            self.proc.get_logger().info('从DELAY_PROCESSING恢复，将重新执行延迟处理，重置完成发布标志')
+            self.proc.get_logger().info('从DELAY_PROCESSING恢复，将重新执行延迟处理，重置完成发布标志和IO检测标志')
 
         elif state_value == WarehouseState.COMPLETED.value:
             self.proc.warehouse_state = WarehouseState.COMPLETED
@@ -221,6 +227,7 @@ class PauseResumeManager:
         elif state_value == OutboundState.POST_LIFT_PROCESSING.value:
             self.proc.outbound_process_requested = True
             self.proc.reset_do_command_state("811")
+            self.proc.outbound_conveyor_in_detected = False
             self.proc.outbound_completion_published = False
             if not self.proc.auto_mode_initialized:
                 self.proc.outbound_state = OutboundState.LIFT_MOVING
@@ -252,8 +259,10 @@ class PauseResumeManager:
             self.proc.outbound_state = OutboundState.COMPLETED
             self.proc.outbound_process_requested = True
             self.proc.outbound_completion_published = False
+            self.proc._outbound_conveyor_out_was_true = False
+            self.proc.outbound_delay_started = False
             self._reset_layer_motion_state()
-            self.proc.get_logger().info('从COMPLETED恢复，重置完成发布标志和层移动状态，确保能正确回包104并回到第1层')
+            self.proc.get_logger().info('从COMPLETED恢复，重置完成发布标志、IO检测标志和层移动状态')
 
         self.proc.resuming_from_pause = False
 

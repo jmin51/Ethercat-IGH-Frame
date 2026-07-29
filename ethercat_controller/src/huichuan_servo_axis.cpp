@@ -125,7 +125,10 @@ void HuichuanServoAxis::handle_state_machine(uint8_t* domain1_pd) {
                 
                 // 特殊处理：0x0E08错误代码完全忽略，继续初始化
                 if (huichuang_error_code == 0x0E08 || huichuang_error_code == 0x0000) {
-                    printf(" %s --", axis_name_.c_str());
+                    static int ignore_counter = 0;
+                    if (ignore_counter++ % 500 == 0) {
+                        printf("轴 %s 0x0E08通讯故障，继续等待恢复...\n", axis_name_.c_str());
+                    }
                     // 不改变current_state_，继续执行初始化序列
                 } else {
                     // 其他错误代码正常进入故障模式
@@ -407,6 +410,7 @@ void HuichuanServoAxis::handle_huichuan_manual_operation(uint8_t* domain1_pd, in
     // === 手动模式下位移指令处理（层移动等） ===
     if (displacement_updated_) {
         displacement_updated_ = false;
+        ramp_.reset();                  // 新位移指令, 重置速度剖面
         target_reached_ = false;
         {
             std::lock_guard<std::mutex> lock(flag_mutex_);
@@ -496,6 +500,7 @@ void HuichuanServoAxis::handle_huichuan_auto_operation(uint8_t* domain1_pd, int3
 
     if (displacement_updated_) {
         displacement_updated_ = false;
+        ramp_.reset();                  // 新位移指令, 重置速度剖面
         target_reached_ = false;
         {
             std::lock_guard<std::mutex> lock(flag_mutex_);

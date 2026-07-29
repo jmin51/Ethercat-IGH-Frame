@@ -100,7 +100,15 @@ class ByteMultiArrayParser(Node):
             '/fault_code',
             self.fault_callback,
             10
-        )       
+        )
+
+        # +++ 急停快照订阅: processor 急停时发布, parser 按需回 0x102/0x104/0x11D +++
+        self.emergency_stop_snapshot_sub = self.create_subscription(
+            String,
+            '/emergency_stop_snapshot',
+            self.emergency_stop_snapshot_callback,
+            10
+        )
 
         # +++ 新增：订阅轴状态话题，监听自动模式初始化完成（JSON格式）+++
         self.axis_states_sub = self.create_subscription(
@@ -139,6 +147,15 @@ class ByteMultiArrayParser(Node):
             self.layer_move_completed_callback,
             10
         )
+        
+        # 新增：订阅暂停激活信号（来自business_logic_processor）
+        self.pause_active_sub = self.create_subscription(
+            Bool,
+            '/pause_active',
+            self.pause_active_callback,
+            10
+        )
+        self.system_paused = False  # 系统暂停标志
         
         # 新增：订阅板宽调整状态话题
         self.board_width_status_sub = self.create_subscription(
@@ -342,8 +359,8 @@ class ByteMultiArrayParser(Node):
             self.get_logger().error(f'轴状态处理错误: {e}')
 
     # 板宽机械对齐补偿(mm): 物理轨道比设定值窄，下发时分别补偿
-    AXIS3_WIDTH_COMPENSATION_CM = 0.10  # 1.0mm = 0.10cm
-    AXIS4_WIDTH_COMPENSATION_CM = 0.20  # 2.0mm = 0.20cm
+    AXIS3_WIDTH_COMPENSATION_CM = 0.20  # 2.0mm = 0.20cm
+    AXIS4_WIDTH_COMPENSATION_CM = 0.10  # 1.0mm = 0.10cm
 
     def _publish_board_width_commands(self, width_cm):
         """实际下发板宽命令到axis3和axis4（含机械对齐补偿）"""
@@ -437,11 +454,15 @@ class ByteMultiArrayParser(Node):
                 # 故障变化时记录日志
                 if fault_code_combined != 0:
                     self.get_logger().warn(f'当前系统故障码: 0x{fault_code_combined:04X}')
-                    
-                    # 上报119前，先回包待处理的命令（102/104/106），带故障码
-                    self._send_pending_response_with_fault(fault_code_combined)
-                    
-                    self.publish_fault_status(fault_code_combined)
+
+                    # 急停故障码(0x9113): 流程结果由 emergency_stop_snapshot_callback 负责
+                    # 这里只发 0x119, 不重复回 0x102/0x104/0x11D
+                    if fault_code_combined == 0x9113:
+                        self.publish_fault_status(fault_code_combined)
+                    else:
+                        # 上报119前, 先回包待处理的命令 (102/104/106/11D/11F), 带故障码
+                        self._send_pending_response_with_fault(fault_code_combined)
+                        self.publish_fault_status(fault_code_combined)
                 else:
                     # 故障已清除，重置上次发布的故障码记录
                     if self.last_published_fault_code != 0x0000:
@@ -488,6 +509,11 @@ class ByteMultiArrayParser(Node):
                 self.publish_command_response(0x011F, fault_code)
                 self.pending_layer_move = False
                 self.layer_move_start_time = None
+
+            # 情况5: 有待处理的放行命令(11C)未回11D
+            elif self.pending_release_command:
+                self.get_logger().warn(f'故障时回包11D(放行结果)，故障码=0x{fault_code:04X}')
+                self.publish_release_result(fault_code)
                 
         except Exception as e:
             self.get_logger().error(f'故障时回包失败: {e}')
@@ -498,12 +524,12 @@ class ByteMultiArrayParser(Node):
             # 无故障时不上报
             if fault_code == 0x0000:
                 return
-            
-            # 检查是否与上次发布的故障码相同，相同则跳过（避免重复上报）
+
+            # 去重: 相同故障码不重复上报
             if fault_code == self.last_published_fault_code:
                 self.get_logger().debug(f'故障码0x{fault_code:04X}已发布过，跳过重复上报')
                 return
-            
+
             # 记录本次发布的故障码
             self.last_published_fault_code = fault_code
             
@@ -594,6 +620,33 @@ class ByteMultiArrayParser(Node):
                     self.pending_release_command = False
         except Exception as e:
             self.get_logger().error(f'放行完成状态处理错误: {e}')
+
+    # ================================================================
+    # 急停快照回调: 根据快照按需回 0x102/0x104/0x11D
+    # ================================================================
+    def emergency_stop_snapshot_callback(self, msg):
+        """急停快照回调: processor 急停时发布快照, parser 按需回流程结果"""
+        try:
+            snapshot = json.loads(msg.data)
+            ESTOP_FAULT = 0x9113
+
+            if snapshot.get('warehouse_active', False):
+                self.get_logger().warn(
+                    f'急停回包0x0102(入库中断), 故障码=0x{ESTOP_FAULT:04X}')
+                self.publish_command_response(0x0102, ESTOP_FAULT)
+
+            if snapshot.get('outbound_active', False):
+                self.get_logger().warn(
+                    f'急停回包0x0104(出库中断), 故障码=0x{ESTOP_FAULT:04X}')
+                self.publish_command_response(0x0104, ESTOP_FAULT)
+
+            if snapshot.get('release_active', False):
+                self.get_logger().warn(
+                    f'急停回包0x011D(放行中断), 故障码=0x{ESTOP_FAULT:04X}')
+                self.publish_release_result(ESTOP_FAULT)
+
+        except Exception as e:
+            self.get_logger().error(f'急停快照回调异常: {e}')
             
     # 添加新的回调函数
     def product_arrival_callback(self, msg):
@@ -938,6 +991,14 @@ class ByteMultiArrayParser(Node):
         except Exception as e:
             self.get_logger().error(f'消息解析错误: {e}')
 
+    def pause_active_callback(self, msg):
+        """处理暂停激活信号"""
+        self.system_paused = msg.data
+        if self.system_paused:
+            self.get_logger().warn('系统进入暂停状态，将拒绝新的开始作业(105)命令')
+        else:
+            self.get_logger().info('系统退出暂停状态，恢复接受开始作业(105)命令')
+
     def process_start_operation(self, payload):
         """处理开始作业命令 (0x0105) - /control_command -> start_auto
         
@@ -946,6 +1007,13 @@ class ByteMultiArrayParser(Node):
         # 检查负载长度：至少需要5字节
         if len(payload) < 5:
             self.get_logger().warn(f'开始作业命令负载长度不足: {len(payload)}字节，需要至少5字节')
+            return
+        
+        # +++ 暂停状态检查：系统暂停时拒绝105命令 +++
+        if self.system_paused:
+            self.get_logger().warn(
+                '系统处于暂停状态，拒绝开始作业命令(105)，返回错误码 0x5003')
+            self.publish_command_response(0x0106, 0x5003)  # 暂停拒绝错误码
             return
         
         # 解析产品宽度（前2字节，小端序）
@@ -1282,7 +1350,13 @@ class ByteMultiArrayParser(Node):
         if not hasattr(self, 'release_stop_pub'):
             self.release_stop_pub = self.create_publisher(Empty, '/release_stop', 10)
         self.release_stop_pub.publish(msg)
-        
+
+        # 通知 BusinessLogicProcessor 关闭产品到位检测周期
+        if not hasattr(self, 'end_operation_signal_pub'):
+            self.end_operation_signal_pub = self.create_publisher(
+                Empty, '/end_operation_signal', 10)
+        self.end_operation_signal_pub.publish(msg)
+
         # 记录详细信息
         self.get_logger().info(
             f'结束作业命令(107): 产品宽度={product_width}, '
@@ -1471,8 +1545,11 @@ class ByteMultiArrayParser(Node):
         # 解析出库区域（第5字节）
         outbound_area = payload[4]
         
-        # 层号映射：与0x0101一致，1-43 映射到 -15 到 30
-        if 1 <= original_layer <= 15:
+        # 层号映射：0=基准层(内部层1/0mm), 1-43 映射到 -15 到 30
+        if original_layer == 0:
+            # 第0层 -> 基准层: 内部层号1, 物理高度0mm (归位原点)
+            mapped_layer = 1
+        elif 1 <= original_layer <= 15:
             mapped_layer = original_layer - 16
         elif 16 <= original_layer <= 43:
             mapped_layer = original_layer - 13
