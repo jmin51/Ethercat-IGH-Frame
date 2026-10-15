@@ -1011,6 +1011,11 @@ void EthercatNode::publish_io_status() {
     ss << "DI25:" << (di.smema_dbr_test ? "1" : "0");               // SMEMA下游要板测试信号
     ss << ",DI28:" << (di.conveyor_exit_gap_detect ? "1" : "0");   // M540 接驳台出料检测(缝隙)
     ss << ",DI29:" << (di.conveyor_entry_gap_detect ? "1" : "0");  // M541 接驳台入料检测(缝隙)
+    ss << ",DI30:" << (di.product_in_position_detect_backup ? "1" : "0");  // M542 产品到位检测信号备用
+    ss << ",DI31:" << (di.conveyor_entry_grating ? "1" : "0");     // M543 入口处光栅
+    ss << ",DI32:" << (di.conveyor_exit_grating ? "1" : "0");      // M544 出口处光栅
+    ss << ",DI33:" << (di.computer_side_door ? "1" : "0");         // M545 电脑侧门检
+    ss << ",DI34:" << (di.aisle_side_door ? "1" : "0");            // M546 过道侧门检
 
     ss << " | DO状态: ";
     
@@ -1226,9 +1231,9 @@ void EthercatNode::handle_do_control(const std_msgs::msg::String::SharedPtr msg)
     int result = write_single_do_signal(do_address, do_cmd.state);
     
     if (result == 1) {
-        RCLCPP_INFO(this->get_logger(), "DO控制成功: %s -> %s", 
-                   do_cmd.do_address.c_str(), 
-                   do_cmd.state ? "true" : "false");
+        RCLCPP_DEBUG(this->get_logger(), "DO控制成功: %s -> %s", 
+                    do_cmd.do_address.c_str(), 
+                    do_cmd.state ? "true" : "false");
         
         // 发布状态更新
         publish_io_status();
@@ -1819,6 +1824,19 @@ void EthercatNode::handle_business_logic_fault(const std_msgs::msg::String::Shar
                 fault_code_pub_->publish(fault_msg);
             }
             RCLCPP_WARN(this->get_logger(), "急停事件: 0x9113 已发布（不入库）");
+            return;
+        }
+
+        // 0x5119 是事件型告警（产品到位超时），不入 fault_map 持久化
+        // 基准层为空时本地自动恢复, 上位机仅接收 0x0119 通知
+        if (fault_code == 0x5119) {
+            if (fault_code_pub_) {
+                auto fault_msg = std_msgs::msg::String();
+                fault_msg.data = "business_logic:0x5119";
+                fault_code_pub_->publish(fault_msg);
+            }
+            RCLCPP_WARN(this->get_logger(),
+                "产品到位超时告警: 0x5119 已发布（不入库，事件型通知）");
             return;
         }
 

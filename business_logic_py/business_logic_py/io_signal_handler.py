@@ -56,6 +56,9 @@ class IoSignalHandler:
             14: 'conveyor_out_position',
             28: 'conveyor_exit_gap_detect',   # M540 接驳台出料检测(缝隙)
             29: 'conveyor_entry_gap_detect',  # M541 接驳台入料检测(缝隙)
+            30: 'product_in_position_detect_backup',  # M542 产品到位检测信号备用
+            31: 'conveyor_entry_grating',     # M543 入口处光栅
+            32: 'conveyor_exit_grating',      # M544 出口处光栅
             19: 'gear_cylinder_1_in_position',
             21: 'gear_cylinder_2_in_position',
             23: 'smema_uba',
@@ -88,6 +91,7 @@ class IoSignalHandler:
             not self.proc.is_target_layer_reached(1))
         conveyor_occupied_by_warehouse = (
             self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING or
+            self.proc.warehouse_state == WarehouseState.GAP_VERIFY or
             warehouse_completed_but_not_home)
         conveyor_occupied_by_release = (
             self.proc.release_state == PassThroughState.CONVEYOR_RUNNING)
@@ -105,9 +109,10 @@ class IoSignalHandler:
                 self.proc.product_arrival_state = "PENDING_PUBLISH"
                 self.proc.get_logger().info(
                     '产品到位检测：IDLE检测到buffer_out已有板，跳转PENDING_PUBLISH')
-            elif feed_detect and not self.proc.feed_detected:
+            elif (feed_detect or buffer_in) and not self.proc.feed_detected:
                 self.proc.feed_detected = True
                 self.proc.product_arrival_state = "CONVEYOR_RUNNING"
+                self.proc.product_arrival_state_start_time = time.time()
                 if not conveyor_occupied and not buffer_out:
                     # 输送带空闲，启动输送带
                     self.proc.send_axis_speed("axis1_1", self.proc.DEFAULT_JOG_SPEEDS["axis1_1"])
@@ -155,6 +160,7 @@ class IoSignalHandler:
             if buffer_in and not self.proc.buffer_in_detected:
                 self.proc.buffer_in_detected = True
                 self.proc.product_arrival_state = "WAITING_BUFFER_OUT"
+                self.proc.product_arrival_state_start_time = time.time()
                 self.proc.get_logger().info(
                     '产品到位检测：检测到buffer_in，等待产品到达buffer_out')
 
@@ -367,11 +373,14 @@ class IoSignalHandler:
                 f"产品到位状态非IDLE({self.proc.product_arrival_state})")
         if self.proc.product_arrival_published_in_cycle:
             no_board_reasons.append("产品在缓存架基准层")
-        if self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING:
+        if self.proc.warehouse_state in (WarehouseState.CONVEYOR_MOVING,
+                                         WarehouseState.GAP_VERIFY):
             no_board_reasons.append("入库传输中")
         if self.proc.release_state in (PassThroughState.CONVEYOR_RUNNING,
                                         PassThroughState.WAIT_FOR_CONVEYOR_OUT):
             no_board_reasons.append("放行传输中")
+        if self.proc.product_arrival_timeout_paused:
+            no_board_reasons.append("产品到位超时告警恢复中")
 
         product_in_position = len(no_board_reasons) > 0
         can_request_board = not product_in_position
@@ -401,5 +410,14 @@ class IoSignalHandler:
         downstream_state = self.get_downstream_handshake_state()
         if downstream_state == "DOWNSTREAM_SENT":
             self.proc.get_logger().info('下游板子发送完成')
-        self.proc._last_uba = self.proc.current_io_signals.get('smema_uba', False)
-        self.proc._last_dbr = self.proc.current_io_signals.get('smema_dbr', False)
+        dbr = self.proc.current_io_signals.get('smema_dbr', False)
+        uba = self.proc.current_io_signals.get('smema_uba', False)
+
+        # DBR信号翻转追踪
+        if hasattr(self.proc, '_last_dbr') and self.proc._last_dbr != dbr:
+            self.proc.get_logger().info(
+                f'[SMEMA下游] DBR信号翻转: {dbr}'
+            )
+
+        self.proc._last_uba = uba
+        self.proc._last_dbr = dbr

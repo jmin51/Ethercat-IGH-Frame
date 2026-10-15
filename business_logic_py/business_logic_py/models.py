@@ -6,6 +6,7 @@
 from enum import Enum, auto
 
 class WarehouseState(Enum):
+    # NOTE: 枚举值跨进程透传(C++暂停记录/回传), 新状态只追加末尾, 禁止中间插入
     IDLE = auto()
     WAIT_FOR_ENTRY = auto()
     CONVEYOR_MOVING = auto()
@@ -13,6 +14,7 @@ class WarehouseState(Enum):
     POST_LIFT_PROCESSING = auto()
     DELAY_PROCESSING = auto()
     COMPLETED = auto()
+    GAP_VERIFY = auto()          # 到位停轴后的缝隙沉降复验(0.5s静止裁决M541)
 
 class OutboundState(Enum):
     IDLE = auto()
@@ -21,6 +23,7 @@ class OutboundState(Enum):
     POST_LIFT_PROCESSING = auto()
     CONVEYOR_MOVING = auto()
     COMPLETED = auto()
+    GAP_VERIFY = auto()          # 到位停轴后的缝隙沉降复验(0.5s静止裁决M541)
 
 class PassThroughState(Enum):
     """放行流程状态"""
@@ -47,6 +50,10 @@ class FaultCode(Enum):
     OUTBOUND_TIMEOUT = 0x5202
     GEAR_CYLINDER_TIMEOUT = 0x5203
     CONVEYOR_IN_TIMEOUT = 0x5204
+    WAREHOUSE_BOARD_STUCK_AT_GAP = 0x5205  # 入库板跨缝隙异常(M541未消失+conveyor_out出现)
+    OUTBOUND_BOARD_STUCK_AT_GAP = 0x5206   # 出库板跨缝隙异常(M541未消失+conveyor_out出现)
+    PRODUCT_ARRIVAL_TIMEOUT = 0x5119       # 产品到位流程超时告警(8s), 3s后自动恢复
+    BASE_LAYER_SELF_CHECK_DIRTY = 0x5120   # 基准层自检残留板告警(事件型, 4s清障后仍检测到板)
 
 class ControlAction:
     def __init__(self, cmd_type: CommandType, axis_name: str, command_value: str,

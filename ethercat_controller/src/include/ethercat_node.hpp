@@ -160,6 +160,11 @@ private:
         int  m541_falling_counter{0};    // M541 下降沿持续计数
         bool m540_filtered{false};       // M540 防抖后输出
         int  m540_falling_counter{0};    // M540 下降沿持续计数
+        // 以下 M543/M544 成员暂时停用(非对称防抖已屏蔽), 恢复时随 cpp 一同启用
+        bool m543_filtered{false};       // M543 入口光栅 防抖后输出
+        int  m543_falling_counter{0};    // M543 入口光栅 下降沿持续计数
+        bool m544_filtered{false};       // M544 出口光栅 防抖后输出
+        int  m544_falling_counter{0};    // M544 出口光栅 下降沿持续计数
     };
     GapDetectDebouncer gap_debounce_;
     static constexpr int GAP_DEBOUNCE_CYCLES = 3;  // 3周期 = 300ms @ 100ms周期

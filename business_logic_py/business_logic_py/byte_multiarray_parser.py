@@ -1614,12 +1614,6 @@ class ByteMultiArrayParser(Node):
             # 解析出库区域（第5字节）
             outbound_area = payload[4]
 
-            # 记录详细信息
-            self.get_logger().info(
-                f'放行命令(11C): 产品宽度={width_value}, '
-                f'库位={layer_num}, 出库区域={outbound_area}'
-            )
-            
             # 发布放行启动到ROS2话题
             from std_msgs.msg import Empty
             release_start_msg = Empty()
@@ -1632,8 +1626,9 @@ class ByteMultiArrayParser(Node):
             # 存储待响应的放行命令（等待流程完成后回包）
             self.pending_release_command = True
             
-            # 不立即回包，等待 PassThroughState.COMPLETED 后再回包 0x011D
-            self.get_logger().info('放行命令已接收，等待流程完成后回包0x011D')
+            self.get_logger().info(
+                f'放行命令(0x011C): 宽度={width_value}, 库位={layer_num}, '
+                f'区域={outbound_area} | 已排队')
             
         except Exception as e:
             self.get_logger().error(f'处理通知放行命令失败: {e}')

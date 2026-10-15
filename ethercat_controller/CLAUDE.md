@@ -61,14 +61,14 @@ buffer_out (DI12) ─────────────── 基准层（暂�
   │ ════════════════════════════════════════════
   │                              ┌──────────────┐
   ▼                              │  出库板路径   │
-conveyor_in (M541/DI29) ──────── │  (从缓存架    │
-  │   接驳台入料检测(缝隙)       │   经axis2     │
+conveyor_in (DI13) ──────────── │  (从缓存架    │
+  │   接驳台入料检测             │   经axis2     │
   ▼                              │   进入此段)   │
 [接驳台 axis1 下游段 + DO813]    │              │
   │                              │  DO813 控制   │
   ▼                              │  板子往下游   │
 conveyor_out (DI14) ──────────── │  释放         │
-conveyor_exit_gap (M540/DI28)    └──────────────┘
+conveyor_exit_gap (DI28)         └──────────────┘
   │   接驳台出料检测(缝隙)
   ▼
 下游设备
@@ -89,16 +89,30 @@ buffer_sensor_2 (DI10) ──────── 缓存架传感器2（板子进�
 
 | 信号 | DI编号 | Modbus地址 | 信号名 | 位置 | 用途 |
 |------|--------|-----------|--------|------|------|
-| feed_detect | DI8 | M528 | feed_product_detect | 进料口 | 上游来板检测，触发产品到位状态机 |
-| buffer_in | DI11 | M531 | buffer_in_position | 缓存架入料口 | 新板进入基准层区域 |
-| buffer_out | DI12 | M532 | buffer_out_position | 基准层 | 板子到达暂存位，触发0x0109发布 |
-| buffer_sensor_2 | DI10 | M530 | buffer_sensor_2 | 缓存架内部 | 板子进入缓存架目标层检测 |
-| conveyor_in | DI13 | M533 | conveyor_in_position | 接驳台入料 | 入库板子进入接驳台 |
-| conveyor_out | DI14 | M534 | conveyor_out_position | 接驳台出料 | 入库板子到达接驳台末端 |
-| conveyor_entry_gap | DI29 | M541 | conveyor_entry_gap_detect | 接驳台入料缝隙 | 出库板子进入接驳台检测(M541) |
-| conveyor_exit_gap | DI28 | M540 | conveyor_exit_gap_detect | 接驳台出料缝隙 | 出库板子离开接驳台检测(M540) |
+| feed_detect | DI8 | M520 | feed_product_detect | 进料口 | 上游来板检测，触发产品到位状态机 |
+| buffer_sensor_1 | DI9 | M521 | buffer_sensor_1 | 缓存架内部 | 缓存架对射传感器1 |
+| buffer_sensor_2 | DI10 | M522 | buffer_sensor_2 | 缓存架内部 | 板子进入缓存架目标层检测 |
+| buffer_in | DI11 | M523 | buffer_in_position | 缓存架入料口 | 新板进入基准层区域 |
+| buffer_out | DI12 | M524 | buffer_out_position | 基准层 | 板子到达暂存位，触发0x0109发布 |
+| conveyor_in | DI13 | M525 | conveyor_in_position | 接驳台入料 | 入库板子进入接驳台 |
+| conveyor_out | DI14 | M526 | conveyor_out_position | 接驳台出料 | 入库板子到达接驳台末端 |
+| lift_cylinder1_up | DI15 | M527 | lift_cylinder1_up | 顶升气缸 | 顶升气缸1上升到位 |
+| lift_cylinder1_down | DI16 | M528 | lift_cylinder1_down | 顶升气缸 | 顶升气缸1下降到位 |
+| lift_cylinder2_up | DI17 | M529 | lift_cylinder2_up | 顶升气缸 | 顶升气缸2上升到位 |
+| lift_cylinder2_down | DI18 | M530 | lift_cylinder2_down | 顶升气缸 | 顶升气缸2下降到位 |
+| gear_cylinder1_extend | DI19 | M531 | gear_cylinder1_extend | 齿轮对接气缸 | 齿轮对接气缸1伸出到位 |
+| gear_cylinder1_retract | DI20 | M532 | gear_cylinder1_retract | 齿轮对接气缸 | 齿轮对接气缸1缩回到位 |
+| gear_cylinder2_extend | DI21 | M533 | gear_cylinder2_extend | 齿轮对接气缸 | 齿轮对接气缸2伸出到位 |
+| gear_cylinder2_retract | DI22 | M534 | gear_cylinder2_retract | 齿轮对接气缸 | 齿轮对接气缸2缩回到位 |
 | smema_uba | DI23 | M535 | smema_uba | SMEMA上游 | 上游有板待发 |
 | smema_dbr | DI24 | M536 | smema_dbr | SMEMA下游 | 下游要板 |
+| conveyor_exit_gap | DI28 | M540 | conveyor_exit_gap_detect | 接驳台出料缝隙 | 出库板子离开接驳台检测(M540) |
+| conveyor_entry_gap | DI29 | M541 | conveyor_entry_gap_detect | 接驳台入料缝隙 | 出库板子进入接驳台检测(M541) |
+| product_in_position_backup | DI30 | M542 | product_in_position_detect_backup | 基准层 | 产品到位检测信号备用(M542) |
+| conveyor_entry_grating | DI31 | M543 | conveyor_entry_grating | 接驳台入口 | 入口处光栅(M543) |
+| conveyor_exit_grating | DI32 | M544 | conveyor_exit_grating | 接驳台出口 | 出口处光栅(M544) |
+| computer_side_door | DI33 | M545 | computer_side_door | 电脑侧 | 电脑侧门检(M545，仅C++采集) |
+| aisle_side_door | DI34 | M546 | aisle_side_door | 过道侧 | 过道侧门检(M546，仅C++采集) |
 
 ### DO 信号定义
 
@@ -219,6 +233,11 @@ board_dispatched 置位时机:
   - 0x6xxx: 模式错误（模式冲突、转换失败）
   - 0x7xxx: 警告（性能、温度、电压）
 - **遗留兼容**：保留 0x8xxx、0x9xxx、0x91xx 范围用于向后兼容
+- **生命周期语义三分类**（故障码存活时间由语义决定，修改清除行为前必须先归类）：
+  - **事件型**：消息送达即完成使命，设备侧自动复位。`0x52xx`业务故障(0x5201~0x5206)属此类——`publish_fault_code(非零)`发布后经`_shutdown_all_operations`立即自动清零(存活约ms级)。故障信息由两条即时通道送达上位机：命令响应异常码(如104带0x5204)+主动故障上报(0x0119)。ROS2同线程顺序发布保证送达先于清零，不丢信息。清障主动权在上位机0x0107。105查询在标准协议流中发生于0x0107之后，读到的必为0x0000
+  - **锁存型**：物理异常持续存在，锁存至人工清障，`fault_map_`周期镜像供105查询天然带出。`0x5120`基准层残留属此类
+  - **告警型(自动恢复)**：瞬态告警，限时自恢复。`0x5119`产品到位超时(8s告警3s自恢复)、`0x9113`急停
+- **事件型故障协议闭环**：`故障上报(104异常码+0x0119) → 上位机0x0107结束作业 → 设备归零 → 上位机105查询确认正常(回0x0000) → 才允许新作业`
 
 #### 2. 故障管理系统 (FaultManagementSystem)
 - **独立实现**：完整的故障管理功能，不依赖 SimpleFaultManager
@@ -971,6 +990,10 @@ struct GapDetectDebouncer {
     int  m541_falling_counter{0};    // M541 下降沿持续计数
     bool m540_filtered{false};       // M540 防抖后输出
     int  m540_falling_counter{0};    // M540 下降沿持续计数
+    bool m543_filtered{false};       // M543 入口光栅 防抖后输出
+    int  m543_falling_counter{0};    // M543 入口光栅 下降沿持续计数
+    bool m544_filtered{false};       // M544 出口光栅 防抖后输出
+    int  m544_falling_counter{0};    // M544 出口光栅 下降沿持续计数
 };
 static constexpr int GAP_DEBOUNCE_CYCLES = 3;  // 3周期 = 300ms @ 100ms周期
 ```
@@ -1020,6 +1043,8 @@ static constexpr int GAP_DEBOUNCE_CYCLES = 3;  // 3周期 = 300ms @ 100ms周期
 | 3 | 入库 | DELAY_PROCESSING | "板子入缓存架"判断延迟300ms（更安全） |
 | **4** | **出库** | **POST_LIFT_PROCESSING** | **axis5移动延迟300ms（防止PCB损坏）** |
 | 5 | 放行 | CONVEYOR_RUNNING | board_dispatched延迟→要板延迟300ms |
+| **6** | **入库** | **CONVEYOR_MOVING** | **矛盾态冻结: conveyor_out出现但M541未消失或M540已出现→停axis1+上报0x5205+走故障清理, 禁止axis5移动** |
+| **7** | **出库** | **POST_LIFT_PROCESSING** | **矛盾态冻结: conveyor_out出现但M541未消失或M540已出现→上报0x5206+走故障清理(停axis2/axis5+关DO811/813+状态机归IDLE), 禁止axis5移动** |
 
 #### M540 下降沿防抖（2个逻辑点）
 | # | 流程 | 状态 | 效果 |
@@ -1056,10 +1081,92 @@ C++层防抖300ms后，Python业务层的冗余延迟被精简：
 
 ---
 
-*文档最后更新：2026-07-28*
-*对应架构版本：v3.4（M540/M541缝隙信号防抖 + 业务层延迟精简）*
+*文档最后更新：2026-09-09*
+*对应架构版本：v3.10（GAP_VERIFY 缝隙沉降复验）*
 
 ### 变更日志
+
+#### v3.10 (2026-09-09): 矛盾态裁决收敛至 GAP_VERIFY——停轴沉降复验取代三处点/巡检检测
+- **问题**：连板检测存在两代方案各自的盲区。点检测（CONVEYOR_MOVING 到位瞬间查 M541）存在 TOCTOU 竞争——`add_command` 入队到轴物理停止之间板子仍在运动，板尾可惯性回滑入缝；全局巡检 `_check_gap_conflict`（v3.9）要求 `conveyor_out ∧ M541` 同时成立，板头未到限位时（M541 消失即停轴的场景）检测不到板尾回滑
+- **根因**：运动中读传感器没有物理意义。检测-停止的时间差使任何「边动边判」方案必然存在窗口漏洞
+- **修复策略**：
+  - 新增 `GAP_VERIFY` 状态（入库/出库枚举各一，追加末尾保数值稳定——枚举值跨进程透传 C++ 暂停记录）：到位 → 停轴/关 DO → 沉降 0.5s（`GAP_VERIFY_SETTLE_SEC`）→ 静止复验 M541
+  - **早失败/晚放行**：窗口内 M541 重现立即 0x5205/0x5206（出现沿无防抖，即时可信）；期满且 M541=0 才放行（每个放行读数都在物理静止之后）
+  - 删除三处旧检测：入库点检测、出库点检测、`_check_gap_conflict` 全局巡检（连同 `process_logic` 中的调用）
+  - 进入沿用 `gap_verify_start_time is None` 判定（而非 previous_state），清理点（`_shutdown_all_operations`/`_reset_all_process_counters`/暂停恢复）重置时戳即重走进入沿，停轴指令幂等
+  - 暂停恢复分支：GAP_VERIFY 恢复回 GAP_VERIFY 本身（板已静止，复验立即有结论），不回退到 CONVEYOR_MOVING 重新转轴
+  - `io_signal_handler` 输送带占用判定与 no_board_reasons 纳入 GAP_VERIFY（复验期间接驳台仍被占用，阻止误发 0x0109）
+- **异常路径审计补丁（同日）**：
+  - `reset_business_logic`（急停/stop 路径）补重置两个沉降时戳——残留非 None 会令下次进入沿跳过停轴（TOCTOU 复活）；主流程本被下轮 0x0105 的 `_reset_all_process_counters` 兜住，此为防御纵深一致性
+  - `_is_gear_cylinder_implicitly_arrived` 出库列表纳入 GAP_VERIFY——0.5s 沉降窗口挤占 2.0s 气缸超时预算，「板到位快于气缸到位」场景会误报 0x5203；GAP_VERIFY 时 811 已关，气缸真实到位无意义，隐式放行
+  - 已知权衡（不修）：GAP_VERIFY 暂停恢复后不检查 `auto_mode_initialized`，0.5s 后层指令若遇轴 UNINITIALIZED 被吞，由 30s 流程超时（0x5201）兜底；板全程静止，无安全风险
+- **设计原则**：把「检测→动作」的竞争变成「动作→静止→复验」的确定性序列。故障码语义（0x5205/0x5206）与故障清理出口不变，上位机无感知。三处重复的矛盾态停轴代码收敛为一处
+
+#### v3.9 (2026-08-31): 矛盾态巡检全局化（已被 v3.10 GAP_VERIFY 取代）
+- **问题**：入库 CONVEYOR_MOVING 的矛盾态检测是「点检测」——只在 `board_in_position` 成立的那一个周期采样一次 M541，状态切到 LIFT_MOVING 后永久失去监控。镂空 PCB 板的镂空孔让 M541 产生虚假下降沿（>300ms 防抖窗口），提前触发 `board_in_position` 误判到位，真正的连板矛盾态（conveyor_out=True 且 M541=True）在 LIFT_MOVING 状态出现时无人检测
+- **根因**：矛盾态是「持续物理不变量」（单块板不可能同时顶到出料限位又卡在入料缝隙），却被写成状态机分支里的「一次性检查」。conveyor_out 是防过冲限位（正常流程不该触发），M541 是入料缝隙（镂空板信号不可靠），两者叠加的连板信号被状态机流转绕开
+- **修复策略**：
+  - 新增 `_check_gap_conflict()` 全局巡检，在 `process_logic` 状态机驱动前执行，任何状态下持续检测 `conveyor_out ∧ M541`
+  - 门控仅出入库激活态（非 IDLE/COMPLETED）：入库→0x5205（显式停 axis1），出库→0x5206（_shutdown 已覆盖 axis2）
+  - 门控自洽防循环：`publish_fault_code` → `_shutdown_all_operations` 归 IDLE → 下一周期门控失效；物理连板残留卡住 IDLE→WAIT_FOR_ENTRY 启动条件 `not conveyor_in_gap and not conveyor_out`
+- **设计原则**：物理不变量必须持续守护，不能散落在状态机分支里做点检测。连板信号（conveyor_out ∧ M541）是「可靠的异常信号」（限位上升沿物理接触、镂空免疫），应独立于状态机全局巡检，而非作为「正常到位」的 OR 触发源
+
+#### v3.8 (2026-08-13): 基准层 4s 清障自检 0x5120
+- **问题**：设备上电后基准层可能残留断电遗留板，作业开始时无法感知，影响首次入库安全
+- **根因**：系统缺少「作业前的基准层洁净度检测」，残留板未被冲走即开始作业
+- **修复策略**：
+  - **自检动作**：首次轴就绪（`auto_mode_initialized` 首次 False→True）触发，axis1_1 正转 + axis1_2 反转 + 813 皮带反转，持续 4s
+  - **传感器判定**：5 路传感器（buffer_in/buffer_out/conveyor_in_gap/conveyor_out_gap/buffer_sensor_2）单调 OR 锁存，任一时刻出现过即 `dirty`
+  - **结果记录**：`dirty` → processor 发布 `business_logic:0x5120` → C++ `add_fault` 进 `fault_map_`（持续状态，直到人工 0x0117 清障）
+  - **回包时机**：0x5120 是普通故障码，`fault_map_` 周期镜像持续保持 `current_fault_code = 0x5120`，任意 105 回 0x0106 时天然带出；故障未清则持续报（语义 B），人工 0x0117 清障后 `fault_map_` 清空、`current_fault_code` 归 0，后续 105 回 0x0000
+  - **生命周期**：设备进程运行期仅一次，**仅急停复位**（`_reset_self_check`），stop/0x0107 不复位
+  - **清障方式**：人工走 0x0117 清除故障；自检通过（0x0000）完全静默
+- **新增故障码**：`FAULT_BUSINESS_BASE_LAYER_SELF_CHECK`(0x5120)
+- **新增状态变量**：`self_check_state`、`self_check_dirty`（单调锁存）、`self_check_result`、`SELF_CHECK_DURATION_SEC=4.0`（processor）
+- **设计原则**：0x5120 定性为「持续物理状态」（基准层有板，直到人工清），非「一次性事件」，故物归其所进 `fault_map_`。与 0x9113（瞬态急停）、0x5119（自动恢复超时）不同，0x5120 与 0x5201（人工清除的持续故障）同类。「跨周期持久」由 `fault_map_` 周期镜像免费提供，无需独立通道/变量/门控/消费清零——语义 B 是删代码而非加代码；「首次」压进设备就绪边沿让记忆自然消失。零新增 if/else 分支
+
+#### v3.8 (2026-08-28): 0x52xx故障码语义澄清——发布后自动清零是设计意图,非bug
+- **现象**：0x5204(接驳台入料超时)发布后约2ms被自动清零(`publish_fault_code(非零)`→`_shutdown_all_operations()`→`publish_fault_code(0)`)，曾被误判为"故障被吞"
+- **分析结论**：设计意图，行为保留。0x52xx为**事件型**故障——故障信息经两条即时通道送达上位机(命令响应异常码104+主动上报0x0119)，送达后设备侧自动复位。ROS2同线程顺序发布保证送达先于清零，不丢信息
+- **协议闭环**：上位机收到0x0119后必然发0x0107结束作业，处理完成后重发105，确认恢复正常(0x0000)才允许新作业。0x0107到达时设备故障码已自清(`publish_fault_code(0)`被去重跳过)，重复归零幂等无害
+- **行为变更**：无(曾尝试的锁存改造已回滚，保持生产行为不变)
+- **代码注释**：`publish_fault_code`/`_shutdown_all_operations` docstring补充事件型语义说明，防止再次误判
+- **遗留矛盾提示**：v3.7中"0x5201人工清除的持续故障"的表述与实际行为不符——0x5201与其余0x52xx同走`publish_fault_code`链，亦为事件型自动清零。以代码实际行为为准
+- **设计原则**：故障码语义必须显式归类并写进文档(见故障码表"生命周期语义三分类")——"发布后2ms自动清零"若无文档，每个读代码的人都会当成bug。三方(开发者/维护者/AI)对"故障码该存活多久"理解不一致，才是这次分析成本的根源
+
+#### v3.7 (2026-08-11): 产品到位流程超时告警 0x5119
+- **问题**：产品到位后板子在 `CONVEYOR_RUNNING`/`WAITING_BUFFER_OUT` 状态卡死超过 8s，系统无告警不恢复
+- **根因**：产品到位状态机只有事件驱动迁移，缺少时间维度守卫
+- **修复策略**：
+  - **超时检测**：`check_product_arrival_timeout()` 在 `process_logic` 主循环中检测等待态超时（8s）
+  - **轻量告警**：仅停 axis1_1/axis1_2 + 复位产品到位状态机，**不影响入库/出库/放行流程**
+  - **本地恢复**：基准层为空时直接重置 `product_arrival_cycle_active`（等价于本地重发 0x0105），3s 后自动恢复要板
+  - **事件型通知**：0x5119 照搬 0x9113 模式——C++ 发布到 `/fault_code` 但不入 `fault_map_`
+- **新增故障码**：`FAULT_BUSINESS_PRODUCT_ARRIVAL_TIMEOUT`(0x5119)
+- **新增状态变量**：`product_arrival_state_start_time`、`product_arrival_timeout_paused`、`product_arrival_timeout_pause_time`
+- **设计原则**：产品到位超时不是系统故障，是板流物流告警。物理真相（基准层空）优先于状态记忆（板子在路上）。事件型通知不入持久化容器
+
+#### v3.6 (2026-08-06): DI Modbus地址修正 + 完整DI信号表
+- **问题**：CLAUDE.md DI信号表的Modbus地址整体偏移，从M520起全部写错（M520写成M528，M523写成M531等），导致`buffer_in`被误认为与`gear_cylinder1_extend`共享M531
+- **根因**：DI信号表未与`io_interface.hpp/cpp`代码实际映射同步，属于文档滞后
+- **修复**：
+  - DI信号表全部修正为与代码一致：M520→M541 按DI编号递增排列
+  - 新增遗漏信号：buffer_sensor_1(M521)、顶升气缸4路(M527-M530)、齿轮对接气缸4路(M531-M534)
+  - 物理布局图标注同步修正：`conveyor_in(M541/DI29)`→`conveyor_in(DI13)`
+- **设计原则**：CLAUDE.md是架构的镜像，DI映射是硬件契约，文档与代码不一致等同于系统失忆
+
+#### v3.5 (2026-07-29): 矛盾态冻结防止axis5撕扯PCB
+- **问题**：出库/入库`board_in_position`的OR逻辑中，`conveyor_out`出现但板子未完全在接驳台安全区域时（M541未消失或M540已出现），系统仍推进axis5移动，导致接驳台层与缓存架层错位撕扯PCB
+- **根因**：`conveyor_out`（前端事件：板子前端到接驳台末端）与M541消失（后端事件：板子后端通过缝隙）语义错位。OR逻辑用前端事件授权了需后端事件保证安全的axis5移动；M540未检查导致板子越位（前端已到出料缝隙）时仍可移动axis5
+- **修复策略**：
+  - `board_in_position`成立后检测矛盾态（`conveyor_out=True AND (conveyor_in_gap=True OR conveyor_out_gap=True)`）
+  - **矛盾态**：停推送轴 + `publish_fault_code(0x5205/0x5206)` → 走原有`_shutdown_all_operations`故障清理流程（停axis2/axis5 + 关DO811/812/813 + 状态机归IDLE）
+  - 入库矛盾态显式停axis1（`_shutdown_all_operations`不覆盖axis1）
+  - 出库矛盾态不显式停轴（`_shutdown_all_operations`已覆盖axis2）
+  - **正常态逻辑完全不变**
+- **安全区域定义**：M541=False（后端已通过入料缝隙）AND M540=False（前端未到出料缝隙），两端确认板子完全在接驳台内
+- **新增故障码**：`WAREHOUSE_BOARD_STUCK_AT_GAP`(0x5205)、`OUTBOUND_BOARD_STUCK_AT_GAP`(0x5206)
+- **设计原则**：前端事件管停轴防冲出，后端事件+越位检测管授权axis5移动，各司其职不越权。矛盾出现时走故障清理而非冻结，复用现有`_shutdown_all_operations`统一边界，不引入新状态/标志位
 
 #### v3.4 (2026-07-28): M540/M541缝隙信号防抖 + 业务层延迟精简
 - **问题**：板子在缓存架与接驳台缝隙中时，M541信号短暂消失（111ms假消失）触发`conveyor_in_then_out`，导致axis5在板子跨缝隙时移动，PCB损坏

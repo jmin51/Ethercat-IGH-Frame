@@ -27,6 +27,7 @@ class ProcessHandlers:
         buffer_out = di['buffer_out_position']
         conveyor_in_gap = di['conveyor_entry_gap_detect']   # M541 替代 conveyor_in
         conveyor_out = di['conveyor_out_position']           # 保留原信号
+        conveyor_out_gap = di['conveyor_exit_gap_detect']    # M540 出料缝隙(矛盾态检测)
         buffer_sensor_2 = di['buffer_sensor_2']
         feed_detect = di['feed_product_detect']
 
@@ -93,8 +94,8 @@ class ProcessHandlers:
 
         # === CONVEYOR_MOVING ===
         elif self.proc.warehouse_state == WarehouseState.CONVEYOR_MOVING:
-            if buffer_out:
-                self.proc.send_do_control_once("813", True)
+            # 接驳台释放机构: 入库输送期间无条件激活, 板子到位后再关闭
+            self.proc.send_do_control_once("813", True)
 
             if conveyor_in_gap and not self.proc.conveyor_in_detected:
                 self.proc.conveyor_in_detected = True
@@ -114,17 +115,48 @@ class ProcessHandlers:
                 self.proc.get_logger().info(
                     f'检测到板子到位: 触发条件={", ".join(trigger_condition)}')
 
-                self.proc.add_command(ControlAction(
-                    CommandType.JOG, "axis1_1", "stop", description="停止轴1_1"))
-                self.proc.add_command(ControlAction(
-                    CommandType.JOG, "axis1_2", "stop", description="停止轴1_2"))
-                self.proc.send_do_control_once("813", False)
-                self.proc.conveyor_in_detected = False
-                self.proc.conveyor_in_then_out_delay_started = False
+                # M541 裁决统一移交 GAP_VERIFY: 停轴静止后复验, 消除检测-停止间的滑移竞争
+                self.proc.warehouse_state = WarehouseState.GAP_VERIFY
 
-                self.proc.send_layer_command(self.proc.target_layer)
-                self.proc.warehouse_state = WarehouseState.LIFT_MOVING
-                self._reset_layer_motion_state()
+        # === GAP_VERIFY ===
+        elif self.proc.warehouse_state == WarehouseState.GAP_VERIFY:
+            # 进入沿(仅一次): 停推送轴 + 关释放机构 + 启动沉降计时
+            # _shutdown_all_operations 不覆盖 axis1, 故在此显式停
+            if self.proc.gap_verify_start_time is None:
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_1", "stop", description="到位:停止轴1_1"))
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis1_2", "stop", description="到位:停止轴1_2"))
+                self.proc.send_do_control_once("813", False)
+                self.proc.gap_verify_start_time = time.time()
+                self.proc.get_logger().info(
+                    f'板子到位, 停轴并关813, 进入缝隙沉降复验'
+                    f'({self.proc.GAP_VERIFY_SETTLE_SEC:.1f}s)')
+                return
+
+            # 早失败: 沉降窗口内 M541 重现 = 板尾卡入料缝隙, 立即故障
+            # (M541 出现沿无防抖, 重现即时可信)
+            if conveyor_in_gap:
+                self.proc.get_logger().error(
+                    '缝隙复验失败: 停轴后M541仍为高, 板尾卡入料缝隙, '
+                    '发布0x5205并走故障清理')
+                self.proc.conveyor_in_detected = False
+                self.proc.publish_fault_code(
+                    FaultCode.WAREHOUSE_BOARD_STUCK_AT_GAP.value)
+                return
+
+            # 晚放行: 沉降期满且M541为低, 板尾确认离开缝隙
+            if (time.time() - self.proc.gap_verify_start_time
+                    < self.proc.GAP_VERIFY_SETTLE_SEC):
+                return
+
+            self.proc.conveyor_in_detected = False
+            self.proc.conveyor_in_then_out_delay_started = False
+            self.proc.gap_verify_start_time = None
+            self.proc.send_layer_command(self.proc.target_layer)
+            self.proc.warehouse_state = WarehouseState.LIFT_MOVING
+            self.proc.get_logger().info('缝隙复验通过, 板尾已离开入料缝隙, 开始层移动')
+            self._reset_layer_motion_state()
 
         # === LIFT_MOVING ===
         elif self.proc.warehouse_state == WarehouseState.LIFT_MOVING:
@@ -190,40 +222,66 @@ class ProcessHandlers:
         # === DELAY_PROCESSING ===
         elif self.proc.warehouse_state == WarehouseState.DELAY_PROCESSING:
             if not self.proc.delay_started and not self.proc.delay_condition_triggered:
-                if buffer_sensor_2:
-                    if not self.proc.buffer_sensor_2_detected:
-                        self.proc.buffer_sensor_2_detected = True
-                        self.proc.get_logger().info('检测到货物进入缓存架(buffer_sensor_2=1)')
-                elif (self.proc.buffer_sensor_2_detected and
-                      not conveyor_in_gap and not buffer_sensor_2):
+                # 主路径: M541(conveyor_entry_gap_detect) 上升沿标记板子进入入料缝隙
+                if conveyor_in_gap and not self.proc.conveyor_in_detected:
+                    self.proc.conveyor_in_detected = True
+                    self.proc.get_logger().info('检测到货物进入入料缝隙(M541=1)')
+
+                # 主路径: M541 下降沿 -> 板子穿过缝隙(M541 回落为低电平)
+                m541_passed = (self.proc.conveyor_in_detected and not conveyor_in_gap)
+
+                # 保护条件: buffer_sensor_2 低电平 -> 板子未压缓存架传感器
+                buffer_sensor_clear = not buffer_sensor_2
+
+                # 双无电平确认: M541 已回落 且 buffer_sensor_2 非高电平, 才认定板子安全进入
+                if m541_passed and buffer_sensor_clear:
                     self.proc.delay_condition_triggered = True
                     self.proc.delay_started = True
                     self.proc.delay_counter = 0
                     self.proc.buffer_sensor_2_detected = False
                     self.proc.conveyor_in_detected = False
                     self.proc.get_logger().info(
-                        f'检测到货物离开接驳台(conveyor_in=0,buffer_sensor_2=0)，'
-                        f'开始{self.proc.DELAY_BEFORE_STOP_MS // 1000}秒延迟')
+                        f'检测到货物进入缓存架(M541已回落且buffer_sensor_2低电平)，'
+                        f'开始{self.proc.DELAY_BEFORE_STOP_MS / 1000:.1f}秒延迟')
 
             if self.proc.delay_started:
                 self.proc.delay_counter += 1
                 if self.proc.delay_counter >= self.proc.DELAY_COUNTER_MAX:
-                    self.proc.warehouse_state = WarehouseState.COMPLETED
-                    self.proc.delay_started = False
-                    self.proc.delay_condition_triggered = False
-                    self.proc.buffer_sensor_2_detected = False
-                    self.proc.state_change_counter = 0
+                    # 延迟终点: 停轴 + 关DO + 启动沉降复验(仅首次进入沿)
                     self.proc.add_command(ControlAction(
                         CommandType.JOG, "axis2_1", "stop", description="轴2_1停止"))
                     self.proc.add_command(ControlAction(
                         CommandType.JOG, "axis2_2", "stop", description="轴2_2停止"))
                     self.proc.send_do_control_once("811", False)
                     self.proc.send_do_control_once("812", False)
-                    self.proc.get_logger().info('延迟结束，停止轴2并进入完成状态')
+                    self.proc.delay_started = False
+                    self.proc.delay_recheck_start_time = time.time()
+                    self.proc.get_logger().info('延迟结束停轴，进入0.5s沉降复验M541')
+                    return
                 else:
-                    if self.proc.delay_counter % 30 == 0:
-                        remaining = self.proc.DELAY_BEFORE_STOP_MS // 1000 - self.proc.delay_counter // 10
-                        self.proc.get_logger().info(f'延迟剩余时间: {remaining}秒')
+                    remaining = (self.proc.DELAY_COUNTER_MAX - self.proc.delay_counter) * 0.1
+                    self.proc.get_logger().info(f'延迟剩余时间: {remaining:.1f}秒')
+
+            # 沉降复验阶段: 停轴后静置0.5s, 让M541下降沿穿过300ms防抖显现真实状态
+            if self.proc.delay_recheck_start_time is not None:
+                if (time.time() - self.proc.delay_recheck_start_time
+                        < self.proc.DELAY_RECHECK_SETTLE_SEC):
+                    return
+                # 沉降期满单次判定: M541=1 -> 板尾卡升降机->缓存架缝隙
+                if conveyor_in_gap:
+                    self.proc.get_logger().error(
+                        '复验失败: 停轴沉降后M541仍为高, 板尾卡入料缝隙, '
+                        '发布0x5205并走故障清理')
+                    self.proc.publish_fault_code(
+                        FaultCode.WAREHOUSE_BOARD_STUCK_AT_GAP.value)
+                    return
+                # M541=0 -> 板尾已离开, 正常完成
+                self.proc.delay_recheck_start_time = None
+                self.proc.warehouse_state = WarehouseState.COMPLETED
+                self.proc.delay_condition_triggered = False
+                self.proc.buffer_sensor_2_detected = False
+                self.proc.state_change_counter = 0
+                self.proc.get_logger().info('沉降复验通过，板尾已离开入料缝隙，进入完成状态')
 
         # === COMPLETED ===
         elif self.proc.warehouse_state == WarehouseState.COMPLETED:
@@ -404,18 +462,48 @@ class ProcessHandlers:
                 self.proc.get_logger().info(
                     f'出库检测到板子到位: 触发条件={", ".join(trigger_condition)}')
 
-                self.proc.add_command(ControlAction(
-                    CommandType.JOG, "axis2_1", "stop", description="停止轴2_1"))
-                self.proc.add_command(ControlAction(
-                    CommandType.JOG, "axis2_2", "stop", description="停止轴2_2"))
-                self.proc.send_do_control_once("811", False)
-                self.proc.send_do_control_once("813", False)
-                self.proc.outbound_conveyor_in_detected = False
-                self.proc.outbound_conveyor_in_then_out_delay_started = False
+                # M541 裁决统一移交 GAP_VERIFY: 停轴静止后复验
                 self.proc.post_lift_process_start_time = None
                 self.proc.post_lift_timeout_reported = False
-                self.proc.outbound_state = OutboundState.CONVEYOR_MOVING
-                self.proc.get_logger().info('进入输送带运行状态')
+                self.proc.outbound_state = OutboundState.GAP_VERIFY
+
+        # === GAP_VERIFY ===
+        elif self.proc.outbound_state == OutboundState.GAP_VERIFY:
+            # 进入沿(仅一次): 停推送轴 + 关齿轮气缸/释放机构 + 启动沉降计时
+            if self.proc.outbound_gap_verify_start_time is None:
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis2_1", "stop", description="到位:停止轴2_1"))
+                self.proc.add_command(ControlAction(
+                    CommandType.JOG, "axis2_2", "stop", description="到位:停止轴2_2"))
+                self.proc.send_do_control_once("811", False)
+                self.proc.send_do_control_once("813", False)
+                self.proc.outbound_gap_verify_start_time = time.time()
+                self.proc.get_logger().info(
+                    f'出库板子到位, 停轴并关811/813, 进入缝隙沉降复验'
+                    f'({self.proc.GAP_VERIFY_SETTLE_SEC:.1f}s)')
+                return
+
+            # 早失败: 沉降窗口内 M541 重现 = 板尾卡入料缝隙, 立即故障
+            # (故障清理 _shutdown_all_operations 已覆盖 axis2/axis5)
+            if conveyor_in_gap:
+                self.proc.get_logger().error(
+                    '出库缝隙复验失败: 停轴后M541仍为高, 板尾卡入料缝隙, '
+                    '发布0x5206并走故障清理')
+                self.proc.outbound_conveyor_in_detected = False
+                self.proc.publish_fault_code(
+                    FaultCode.OUTBOUND_BOARD_STUCK_AT_GAP.value)
+                return
+
+            # 晚放行: 沉降期满且M541为低, 板尾确认离开缝隙
+            if (time.time() - self.proc.outbound_gap_verify_start_time
+                    < self.proc.GAP_VERIFY_SETTLE_SEC):
+                return
+
+            self.proc.outbound_conveyor_in_detected = False
+            self.proc.outbound_conveyor_in_then_out_delay_started = False
+            self.proc.outbound_gap_verify_start_time = None
+            self.proc.outbound_state = OutboundState.CONVEYOR_MOVING
+            self.proc.get_logger().info('出库缝隙复验通过, 进入输送带运行状态')
 
         # === CONVEYOR_MOVING ===
         elif self.proc.outbound_state == OutboundState.CONVEYOR_MOVING:
@@ -573,7 +661,6 @@ class ProcessHandlers:
                 self.proc.send_do_control_once("813", True)
                 self.proc.product_arrival_published_in_cycle = False
                 self.proc.release_state = PassThroughState.CONVEYOR_RUNNING
-                self.proc.get_logger().info('产品到位检测完成，输送带已启动（放行，消费产品到位标志）')
 
         # === CONVEYOR_RUNNING ===
         elif self.proc.release_state == PassThroughState.CONVEYOR_RUNNING:

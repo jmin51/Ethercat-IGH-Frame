@@ -44,6 +44,8 @@ class BusinessLogicProcessor(Node):
             'conveyor_in_position': False, 'conveyor_out_position': False,
             'buffer_sensor_2': False,
             'conveyor_entry_gap_detect': False, 'conveyor_exit_gap_detect': False,
+            'product_in_position_detect_backup': False,
+            'conveyor_exit_grating': False, 'conveyor_entry_grating': False,
         }
         self.state_change_counter = 0
 
@@ -84,6 +86,7 @@ class BusinessLogicProcessor(Node):
         self.delay_condition_triggered = False
         self.conveyor_in_detected = False  # 入库: M541(conveyor_entry_gap_detect) 信号曾出现标志
         self.buffer_sensor_2_detected = False
+        self.delay_recheck_start_time = None  # 入库延迟停轴后沉降复验M541: None=未进入复验
 
         # ========== 延迟控制 - 出库 ==========
         self.outbound_delay_started = False
@@ -108,6 +111,12 @@ class BusinessLogicProcessor(Node):
         self.POST_LIFT_PROCESS_TIMEOUT = 15.0
         self.post_lift_process_start_time = None
         self.post_lift_timeout_reported = False
+
+        # ========== GAP_VERIFY 缝隙沉降复验 ==========
+        # 到位 → 停轴 → 沉降0.5s → 静止复验M541: 早失败(重现即报), 晚放行(期满且低才过)
+        self.GAP_VERIFY_SETTLE_SEC = 0.5
+        self.gap_verify_start_time = None           # 入库: None=待进入沿
+        self.outbound_gap_verify_start_time = None  # 出库: None=待进入沿
 
         # ========== 层指令状态追踪 ==========
         self.last_layer_command = None
@@ -136,19 +145,35 @@ class BusinessLogicProcessor(Node):
         # 事件语义(单调不可伪造), 不同于 conveyor_occupied 的状态语义.
         self.board_dispatched = False
 
+        # 产品到位超时检测 — 仅停轴1_1/轴1_2, 不影响出入库/放行
+        self.PRODUCT_ARRIVAL_TIMEOUT_SEC = 8.0         # 超时阈值
+        self.PRODUCT_ARRIVAL_RECOVERY_DELAY_SEC = 3.0   # 告警后恢复要板的等待时间
+        self.product_arrival_state_start_time = None     # 进入当前等待态的时间戳
+        self.product_arrival_timeout_paused = False      # 超时告警暂停标志
+        self.product_arrival_timeout_pause_time = None   # 暂停开始时间
+
         # 产品到位信号跟踪
         self.feed_detect_was_true = False
         self.buffer_out_was_true_for_arrival = False
         self.conveyor_in_was_true_for_arrival = False
         self.conveyor_in_completed_for_arrival = False
 
+        # ========== 基准层自检（设备进程生命周期，仅急停复位） ==========
+        self.self_check_state = "IDLE"          # IDLE / RUNNING / DONE
+        self.self_check_start_time = None       # 4s 计时起点
+        self.self_check_dirty = False           # 单调锁存：任一传感器出现过即永久 True
+        self.self_check_result = 0x0000         # 0x5120 或 0x0000
+        self.SELF_CHECK_DURATION_SEC = 4.0      # 自检时长 4s
+
         # ========== 常量 ==========
-        # C++层M541防抖(300ms)修复axis5误动后, 板子姿态正常, 停稳延迟可缩短
-        self.DELAY_BEFORE_STOP_MS = 200
+        # C++层M541防抖(300ms)修复axis5误动后, 板子姿态正常, 停稳延迟3周期(300ms)
+        self.DELAY_BEFORE_STOP_MS = 300
         self.DELAY_COUNTER_MAX = self.DELAY_BEFORE_STOP_MS // 100
         # M540防抖(300ms)已确认板子完全离开, 业务延迟仅需最小余量
         self.OUTBOUND_DELAY_BEFORE_STOP_MS = 100
         self.OUTBOUND_DELAY_COUNTER_MAX = self.OUTBOUND_DELAY_BEFORE_STOP_MS // 100
+        # 入库延迟停轴后沉降复验M541: 时长需>300ms防抖, 与GAP_VERIFY一致取0.5s
+        self.DELAY_RECHECK_SETTLE_SEC = 0.5
 
         # ========== 数据 ==========
         self.pending_commands = []
@@ -160,6 +185,8 @@ class BusinessLogicProcessor(Node):
             'buffer_sensor_2': False, 'feed_product_detect': False,
             'smema_uba': False, 'smema_dbr': False,
             'conveyor_entry_gap_detect': False, 'conveyor_exit_gap_detect': False,
+            'product_in_position_detect_backup': False,
+            'conveyor_exit_grating': False, 'conveyor_entry_grating': False,
         }
 
         # 产品到位检测状态机
@@ -191,8 +218,8 @@ class BusinessLogicProcessor(Node):
         }
 
         # ========== 超时检测 ==========
-        self.WAREHOUSE_PROCESS_TIMEOUT = 60.0
-        self.OUTBOUND_PROCESS_TIMEOUT = 40.0
+        self.WAREHOUSE_PROCESS_TIMEOUT = 30.0
+        self.OUTBOUND_PROCESS_TIMEOUT = 25.0
         self.warehouse_process_start_time = None
         self.outbound_process_start_time = None
         self.warehouse_timeout_reported = False
@@ -313,6 +340,8 @@ class BusinessLogicProcessor(Node):
                 self.auto_mode_enabled = False
                 self._emergency_stop_snapshot_and_report()
                 self.reset_business_logic()
+                # +++ 急停复位自检(唯一复位源), 恢复后重新自检 +++
+                self._reset_self_check()
                 self.get_logger().info('检测到急停命令，已完成流程结果上报并退出自动模式')
         elif '执行命令: stop' in status_text:
             if self.auto_mode_enabled:
@@ -336,6 +365,9 @@ class BusinessLogicProcessor(Node):
             # 一次性副作用：恢复速度 + 消费待办 + 清除暂停残留
             self.restore_default_jog_speeds()
             self.get_logger().info('自动模式初始化完成（周期性检测），轴已就绪，已恢复默认速度')
+            # +++ 基准层自检: 首次轴就绪边沿触发(设备进程运行期仅一次) +++
+            if self.self_check_state == "IDLE":
+                self._start_self_check()
             if self.pending_resume_state is not None:
                 self.pause_resume_mgr.execute_pending_resume()
             if not self.auto_mode_enabled:
@@ -399,6 +431,9 @@ class BusinessLogicProcessor(Node):
             self.product_arrival_published_in_cycle = False
             self.product_arrival_phase = "pre_warehouse"
             self.io_handler.reset_product_arrival_state_machine()
+            # 清除产品到位超时告警残留
+            self.product_arrival_timeout_paused = False
+            self.product_arrival_timeout_pause_time = None
 
     def end_operation_signal_callback(self, msg):
         """处理结束作业信号(0x0107) — 系统安全归零，释放所有物理资源"""
@@ -543,8 +578,15 @@ class BusinessLogicProcessor(Node):
     # ================================================================
     def process_logic(self):
         """主处理逻辑 - 定时器回调"""
+        # 基准层自检: 不受暂停/自动模式冻结影响, 仅急停复位
+        self._check_self_check()
+
         # 层移动(0x011E)是独立流程，手动/自动模式均可运行
         self._check_layer_move_completion()
+
+        # 产品到位超时检测 + 恢复 — 在状态机驱动之前执行
+        # (恢复逻辑在手动/暂停模式下也要跑, 防止暂停标志永不清除)
+        self.check_product_arrival_timeout()
 
         # 暂停期间冻结所有自动化逻辑:
         #   - 产品到位检测 → 停, 不误检板子
@@ -569,6 +611,68 @@ class BusinessLogicProcessor(Node):
         self.check_gear_cylinder_position()
 
     # ================================================================
+    # 基准层自检（设备进程生命周期，仅急停复位）
+    # ================================================================
+    def _start_self_check(self):
+        """首次轴就绪 → 启动基准层 4s 清障自检
+
+        axis1_1 正转(reverse) + axis1_2 反转(forward) + 813 皮带反转,
+        三路同时启动, 4s 内锁存传感器判定基准层是否残留板。
+        """
+        self.self_check_state = "RUNNING"
+        self.self_check_start_time = time.time()
+        self.self_check_dirty = False
+        self.self_check_result = 0x0000
+        self.send_jog_command("axis1_1:reverse")   # axis1_1 正转
+        self.send_jog_command("axis1_2:forward")   # axis1_2 反转
+        self.send_do_control_once("813", True)     # 皮带反转
+        self.get_logger().info(
+            '基准层自检启动: axis1_1正转 + axis1_2反转 + 813皮带反转, 持续4s')
+
+    def _check_self_check(self):
+        """自检状态机推进: 4s 计时 + 传感器单调锁存 + 结算"""
+        if self.self_check_state != "RUNNING":
+            return
+
+        # 单调锁存: 任一传感器出现过信号即永久 dirty, 不清除
+        if not self.self_check_dirty:
+            di = self.current_io_signals
+            if (di.get('buffer_in_position') or di.get('buffer_out_position') or
+                    di.get('buffer_sensor_2') or di.get('conveyor_entry_gap_detect') or
+                    di.get('conveyor_exit_gap_detect')):
+                self.self_check_dirty = True
+                self.get_logger().warn('基准层自检检测到残留板信号')
+
+        # 4s 计时结束 → 结算
+        if time.time() - self.self_check_start_time >= self.SELF_CHECK_DURATION_SEC:
+            self._finish_self_check()
+
+    def _finish_self_check(self):
+        """自检结算: 停轴 + 813 归零 + 判定结果 + 上报 0x5120"""
+        self.send_jog_command("axis1_1:stop")
+        self.send_jog_command("axis1_2:stop")
+        self.send_do_control_once("813", False)
+        self.self_check_result = 0x5120 if self.self_check_dirty else 0x0000
+        self.self_check_state = "DONE"
+
+        if self.self_check_result == 0x5120:
+            # 0x5120 走普通故障码路径, 进 fault_map_ 持续存在, 直到人工 0x0117 清障
+            msg = String()
+            msg.data = 'business_logic:0x5120'
+            self.fault_code_pub.publish(msg)
+            self.get_logger().warn('基准层自检失败(有残留板)，已发布 0x5120 进 fault_map_')
+        else:
+            self.get_logger().info('基准层自检通过(无残留板)，静默完成')
+
+    def _reset_self_check(self):
+        """急停复位自检(唯一复位源)。stop/0x0107 一律不触发此函数"""
+        self.self_check_state = "IDLE"
+        self.self_check_start_time = None
+        self.self_check_dirty = False
+        self.self_check_result = 0x0000
+        self.get_logger().info('急停复位基准层自检状态，恢复后将重新自检')
+
+    # ================================================================
     # IO信号变化检测
     # ================================================================
     def process_io_signals(self):
@@ -588,12 +692,82 @@ class BusinessLogicProcessor(Node):
                 f'conveyor_out={self.current_io_signals["conveyor_out_position"]}, '
                 f'buffer_sensor_2={self.current_io_signals["buffer_sensor_2"]}, '
                 f'conveyor_entry_gap(M541)={self.current_io_signals["conveyor_entry_gap_detect"]}, '
-                f'conveyor_exit_gap(M540)={self.current_io_signals["conveyor_exit_gap_detect"]}')
+                f'conveyor_exit_gap(M540)={self.current_io_signals["conveyor_exit_gap_detect"]}, '
+                f'product_pos_backup(M542)={self.current_io_signals["product_in_position_detect_backup"]}, '
+                f'entry_grating(M543)={self.current_io_signals["conveyor_entry_grating"]}, '
+                f'exit_grating(M544)={self.current_io_signals["conveyor_exit_grating"]}')
         self.previous_io_signals = self.current_io_signals.copy()
 
     # ================================================================
     # 超时与故障检测
     # ================================================================
+    def check_product_arrival_timeout(self):
+        """产品到位超时检测 + 告警后自动恢复
+
+        超时触发(8s, CONVEYOR_RUNNING 或 WAITING_BUFFER_OUT):
+          - 停 axis1_1/axis1_2
+          - 复位产品到位状态机 → IDLE, 清除 product_arrival_published_in_cycle
+          - 置 product_arrival_timeout_paused (阻止要板 3s)
+          - 发布 0x5119 告警
+          - product_arrival_cycle_active 保持 True, 不翻转
+
+        恢复(3s后):
+          - 清除 product_arrival_timeout_paused → IDLE 状态下自动恢复要板
+          - 不影响入库/出库/放行流程
+        """
+        # === 恢复逻辑: 3s后自动清除暂停标志 ===
+        if self.product_arrival_timeout_paused:
+            if self.product_arrival_timeout_pause_time is not None:
+                if time.time() - self.product_arrival_timeout_pause_time >= self.PRODUCT_ARRIVAL_RECOVERY_DELAY_SEC:
+                    self.product_arrival_timeout_paused = False
+                    self.product_arrival_timeout_pause_time = None
+                    self.get_logger().info(
+                        '产品到位超时告警已自动恢复，重新开始要板')
+            return  # 暂停期间不重复检测超时
+
+        if not self.product_arrival_cycle_active:
+            return
+
+        state = self.product_arrival_state
+        if state not in ("CONVEYOR_RUNNING", "WAITING_BUFFER_OUT"):
+            return
+
+        if self.product_arrival_state_start_time is None:
+            return
+
+        elapsed = time.time() - self.product_arrival_state_start_time
+        if elapsed <= self.PRODUCT_ARRIVAL_TIMEOUT_SEC:
+            return
+
+        # === 超时触发 ===
+        fault_code = FaultCode.PRODUCT_ARRIVAL_TIMEOUT.value
+        self.get_logger().error(
+            f'产品到位流程超时({elapsed:.1f}秒>{self.PRODUCT_ARRIVAL_TIMEOUT_SEC}秒)，'
+            f'当前状态={state}，基准层为空，上报告警0x{fault_code:04X}，'
+            f'{self.PRODUCT_ARRIVAL_RECOVERY_DELAY_SEC}秒后自动恢复')
+
+        # 1. 停 axis1_1/axis1_2 (绕过命令队列, 立即停止)
+        self.send_jog_command("axis1_1:stop")
+        self.send_jog_command("axis1_2:stop")
+        self.conveyor_started_for_arrival = False
+
+        # 2. 复位产品到位状态机 → IDLE + 清除发布标志
+        self.io_handler.reset_product_arrival_state_machine()
+        self.product_arrival_published_in_cycle = False
+
+        # 3. 置暂停标志 (阻止要板 3s)
+        #    product_arrival_cycle_active 保持 True 不变, 3s 后自然恢复要板
+        self.product_arrival_timeout_paused = True
+        self.product_arrival_timeout_pause_time = time.time()
+
+        # 4. 发布告警到 /business_logic_fault
+        #    C++ 照搬 0x9113: 发布到 /fault_code 但不入 fault_map_
+        #    parser → publish_fault_status(0x5119) → 0x0119 给上位机
+        msg = String()
+        msg.data = f'business_logic:0x{fault_code:04X}'
+        self.fault_code_pub.publish(msg)
+        self.get_logger().warn(f'产品到位超时告警已发布: {msg.data}')
+
     def check_process_timeout(self):
         """检查入库/出库流程是否超时"""
         current_time = time.time()
@@ -682,7 +856,11 @@ class BusinessLogicProcessor(Node):
         """判断气缸是否隐式到位"""
         if self.warehouse_state in (WarehouseState.DELAY_PROCESSING, WarehouseState.COMPLETED):
             return True
-        if self.outbound_state in (OutboundState.CONVEYOR_MOVING, OutboundState.COMPLETED):
+        # GAP_VERIFY: 板已到位停轴, 811已关, 气缸真实到位无意义, 隐式放行
+        # (否则0.5s沉降窗口挤占2.0s气缸超时预算, 板快于气缸时误报0x5203)
+        if self.outbound_state in (OutboundState.GAP_VERIFY,
+                                   OutboundState.CONVEYOR_MOVING,
+                                   OutboundState.COMPLETED):
             return True
         return False
 
@@ -957,6 +1135,10 @@ class BusinessLogicProcessor(Node):
         self.post_lift_process_start_time = None
         self.warehouse_process_start_time = None
         self.outbound_process_start_time = None
+        # ---- GAP_VERIFY 沉降复验 ----
+        self.gap_verify_start_time = None
+        self.outbound_gap_verify_start_time = None
+        self.delay_recheck_start_time = None
         # ---- 齿轮气缸检测 ----
         self.gear_cylinder_811_checking = False
         self.gear_cylinder_811_sent_time = None
@@ -1002,18 +1184,32 @@ class BusinessLogicProcessor(Node):
         self.release_process_requested = False
         self.release_process_stop_requested = False
 
-        # 5. 清除所有超时标志
+        # 5. 清除所有超时标志 + GAP_VERIFY 沉降时戳(残留会导致下次复验跳过沉降)
         self.warehouse_timeout_reported = False
         self.outbound_timeout_reported = False
         self.post_lift_timeout_reported = False
         self.post_lift_process_start_time = None
         self.warehouse_process_start_time = None
         self.outbound_process_start_time = None
+        self.gap_verify_start_time = None
+        self.outbound_gap_verify_start_time = None
+
+        # 5.5 清除入库延迟/检测残留(历史遗漏: DELAY_PROCESSING故障会残留, 卡死下一轮)
+        self.delay_started = False
+        self.delay_counter = 0
+        self.delay_condition_triggered = False
+        self.conveyor_in_detected = False
+        self.buffer_sensor_2_detected = False
+        self.delay_recheck_start_time = None
 
         # 6. 清除齿轮气缸检测状态
         self.gear_cylinder_811_checking = False
         self.gear_cylinder_811_sent_time = None
         self.gear_cylinder_811_timeout_reported = False
+
+        # 清除产品到位超时告警残留
+        self.product_arrival_timeout_paused = False
+        self.product_arrival_timeout_pause_time = None
 
         self.get_logger().info(
             '_shutdown_all_operations: 轴已停, DO已复位, 故障码已清, 状态机归零')
@@ -1140,6 +1336,9 @@ class BusinessLogicProcessor(Node):
         self.outbound_conveyor_in_then_out_delay_counter = 0
         self.post_lift_process_start_time = None
         self.post_lift_timeout_reported = False
+        # GAP_VERIFY 沉降时戳: 残留非None会令下次进入沿跳过停轴, 必须归零
+        self.gap_verify_start_time = None
+        self.outbound_gap_verify_start_time = None
         if self.ENABLE_SMEMA:
             if hasattr(self, '_last_uba'):
                 self._last_uba = False

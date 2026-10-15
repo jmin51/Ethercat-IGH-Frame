@@ -125,6 +125,15 @@ class PauseResumeManager:
             self.proc.conveyor_in_then_out_delay_started = False
             self.proc.get_logger().info('从CONVEYOR_MOVING恢复，将重新检测入库条件，重置完成发布标志和IO检测标志')
 
+        elif state_value == WarehouseState.GAP_VERIFY.value:
+            # 板子已到位停在接驳台, 重走 GAP_VERIFY 进入沿(停轴幂等)+沉降复验
+            self.proc.warehouse_state = WarehouseState.GAP_VERIFY
+            self.proc.gap_verify_start_time = None
+            self.proc.warehouse_process_requested = True
+            self.proc.warehouse_completion_published = False
+            self.proc.conveyor_in_detected = False
+            self.proc.get_logger().info('从GAP_VERIFY恢复，重新执行缝隙沉降复验')
+
         elif state_value == WarehouseState.LIFT_MOVING.value:
             self.proc.warehouse_state = WarehouseState.LIFT_MOVING
             self.proc.warehouse_process_requested = True
@@ -239,6 +248,16 @@ class PauseResumeManager:
                 self.proc.outbound_state = OutboundState.LIFT_MOVING
                 self.proc.layer_motion_completed = True
                 self.proc.get_logger().info('从POST_LIFT_PROCESSING恢复，轴已就绪，将重新执行后续操作')
+
+        elif state_value == OutboundState.GAP_VERIFY.value:
+            # 板子已到位停在接驳台, 重走 GAP_VERIFY 进入沿(停轴幂等)+沉降复验
+            self.proc.outbound_state = OutboundState.GAP_VERIFY
+            self.proc.outbound_gap_verify_start_time = None
+            self.proc.outbound_process_requested = True
+            self.proc.outbound_completion_published = False
+            self.proc.outbound_conveyor_in_detected = False
+            self.proc.post_lift_process_start_time = None
+            self.proc.get_logger().info('出库从GAP_VERIFY恢复，重新执行缝隙沉降复验')
 
         elif state_value == OutboundState.CONVEYOR_MOVING.value:
             self.proc.outbound_state = OutboundState.CONVEYOR_MOVING

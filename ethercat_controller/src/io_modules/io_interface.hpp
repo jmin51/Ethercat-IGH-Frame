@@ -50,6 +50,11 @@ typedef struct {
     bool smema_dbr_test;         // M537 SMEMA下游要板测试信号 (OR合并至smema_dbr)
     bool conveyor_exit_gap_detect;   // M540 接驳台出料检测（缝隙）
     bool conveyor_entry_gap_detect;  // M541 接驳台入料检测（缝隙）
+    bool product_in_position_detect_backup;  // M542 产品到位检测信号备用
+    bool conveyor_exit_grating;      // M544 出口处光栅
+    bool conveyor_entry_grating;     // M543 入口处光栅
+    bool computer_side_door;         // M545 电脑侧门检
+    bool aisle_side_door;            // M546 过道侧门检
 } DI_Interface;
 
 // DO 输出信号接口定义

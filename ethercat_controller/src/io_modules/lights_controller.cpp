@@ -16,9 +16,43 @@ static bool g_reset_light_on = false;
 static bool g_pause_light_on = false;
 
 // 按钮上次状态（用于边沿检测）
+//   start/pause: 上次 stable 状态（基于消抖输出）
+//   reset/emergency: 上次 raw 状态（直接采样，无消抖）
 static bool g_last_start_button = false;
 static bool g_last_reset_button = false;
 static bool g_last_pause_button = false;
+
+// ============================================================================
+// 启动/暂停按钮消抖层（时间窗口法，30ms 稳定确认）
+//   复位按钮已有 3 秒长按确认机制，无需消抖
+//   急停按钮低电平有效且硬件稳定，无需消抖
+// ============================================================================
+struct DebouncedInput {
+    bool stable = false;                                     // 消抖后稳定状态
+    bool last_raw = false;                                   // 上次原始采样值
+    std::chrono::steady_clock::time_point last_change_time;  // raw 开始变化时间
+    int debounce_ms = 30;                                   // 消抖阈值
+};
+
+static DebouncedInput g_start_debounce;  // 启动按钮消抖实例
+static DebouncedInput g_pause_debounce;  // 暂停按钮消抖实例
+
+// 消抖更新：raw 与 stable 不同时开始计时，持续 >= debounce_ms 才承认 stable 变化
+// 抖动脉冲（典型 5~20ms）在窗口内被过滤，不会触发 stable 跳变
+static void debounce_update(DebouncedInput& di, bool raw,
+                            std::chrono::steady_clock::time_point now) {
+    if (raw != di.last_raw) {
+        di.last_raw = raw;
+        di.last_change_time = now;
+    }
+    if (raw != di.stable) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - di.last_change_time).count();
+        if (elapsed >= di.debounce_ms) {
+            di.stable = raw;
+        }
+    }
+}
 
 // 按钮灯DO上次写入值（用于变化检测）
 static bool g_last_do800 = false;
@@ -98,10 +132,16 @@ static bool g_last_emergency_stop2 = false;
 
 void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn, 
                           bool emergency_stop1, bool emergency_stop2) {
-    // 边沿检测
-    bool start_rising = start_btn && !g_last_start_button;
+    // 消抖层：启动/暂停按钮经过 30ms 时间窗口过滤
+    // 复位按钮直接使用 raw（已有 3 秒长按确认），急停按钮直接使用 raw（低电平有效）
+    auto now = std::chrono::steady_clock::now();
+    debounce_update(g_start_debounce, start_btn, now);
+    debounce_update(g_pause_debounce, pause_btn, now);
+
+    // 边沿检测：start/pause 基于 stable（消抖输出），reset 仍基于 raw
+    bool start_rising = g_start_debounce.stable && !g_last_start_button;
     bool reset_rising = reset_btn && !g_last_reset_button;
-    bool pause_rising = pause_btn && !g_last_pause_button;
+    bool pause_rising = g_pause_debounce.stable && !g_last_pause_button;
     // 急停按钮低电平检测：任意一个为低电平即触发
     bool any_emergency_active = !emergency_stop1 || !emergency_stop2;
     
@@ -201,10 +241,10 @@ void update_button_lights(bool start_btn, bool reset_btn, bool pause_btn,
     }
     last_emergency_active = any_emergency_active;
     
-    // 更新上次状态
-    g_last_start_button = start_btn;
+    // 更新上次状态：start/pause 用 stable（消抖输出），reset/emergency 用 raw
+    g_last_start_button = g_start_debounce.stable;
     g_last_reset_button = reset_btn;
-    g_last_pause_button = pause_btn;
+    g_last_pause_button = g_pause_debounce.stable;
     g_last_emergency_stop1 = emergency_stop1;
     g_last_emergency_stop2 = emergency_stop2;
     

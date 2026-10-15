@@ -120,23 +120,35 @@ static void write_ba_signal(bool state) {
     }
 }
 
-// 上游状态转换
-static void transition_upstream_state(Upstream_State new_state) {
+// 上游状态转换 (reason 可选，NULL 时不打印原因)
+static void transition_upstream_state(Upstream_State new_state, const char* reason) {
     if (ctx.status.upstream_state != new_state) {
-        printf("[SMEMA上游] 状态转换: %s → %s\n", 
-               upstream_state_names[ctx.status.upstream_state], 
-               upstream_state_names[new_state]);
+        if (reason && reason[0]) {
+            printf("[SMEMA上游] %s → %s (%s)\n", 
+                   upstream_state_names[ctx.status.upstream_state], 
+                   upstream_state_names[new_state], reason);
+        } else {
+            printf("[SMEMA上游] %s → %s\n", 
+                   upstream_state_names[ctx.status.upstream_state], 
+                   upstream_state_names[new_state]);
+        }
         ctx.status.upstream_state = new_state;
         ctx.status.upstream_state_time = time(NULL);
     }
 }
 
-// 下游状态转换
-static void transition_downstream_state(Downstream_State new_state) {
+// 下游状态转换 (reason 可选，NULL 时不打印原因)
+static void transition_downstream_state(Downstream_State new_state, const char* reason) {
     if (ctx.status.downstream_state != new_state) {
-        printf("[SMEMA下游] 状态转换: %s → %s\n", 
-               downstream_state_names[ctx.status.downstream_state], 
-               downstream_state_names[new_state]);
+        if (reason && reason[0]) {
+            printf("[SMEMA下游] %s → %s (%s)\n", 
+                   downstream_state_names[ctx.status.downstream_state], 
+                   downstream_state_names[new_state], reason);
+        } else {
+            printf("[SMEMA下游] %s → %s\n", 
+                   downstream_state_names[ctx.status.downstream_state], 
+                   downstream_state_names[new_state]);
+        }
         ctx.status.downstream_state = new_state;
         ctx.status.downstream_state_time = time(NULL);
     }
@@ -165,8 +177,7 @@ static void handle_upstream_idle(void) {
     
     // 检查产品到位信号（无板 = 要板）
     if (!ctx.product_in_position && ctx.enabled && !ctx.manual_mode_mr) {
-        printf("[SMEMA上游] 本机无板，发出要板信号\n");
-        transition_upstream_state(UPSTREAM_READY);
+        transition_upstream_state(UPSTREAM_READY, "本机无板，发出要板信号");
     }
 }
 
@@ -181,15 +192,13 @@ static void handle_upstream_ready(void) {
     
     if (uba) {
         // 上游有板要发
-        printf("[SMEMA上游] 检测到UBA=ON，上游即将发板\n");
         ctx.upstream_handshake_start = time(NULL);
-        transition_upstream_state(UPSTREAM_RECEIVING);
+        transition_upstream_state(UPSTREAM_RECEIVING, "检测到UBA=ON，上游即将发板");
     }
     
     // 检查产品到位信号变化（中途有板了）
     if (ctx.product_in_position) {
-        printf("[SMEMA上游] 本机已有板，取消要板\n");
-        transition_upstream_state(UPSTREAM_IDLE);
+        transition_upstream_state(UPSTREAM_IDLE, "本机已有板，取消要板");
     }
     
     // // 超时检测
@@ -211,16 +220,15 @@ static void handle_upstream_receiving(void) {
     
     if (!uba) {
         // UBA从ON变为OFF，板子传输完成
-        printf("[SMEMA上游] 检测到UBA=OFF，板子传输完成\n");
         ctx.status.receive_count++;
-        transition_upstream_state(UPSTREAM_BOARD_ARRIVED);
+        transition_upstream_state(UPSTREAM_BOARD_ARRIVED, "检测到UBA=OFF，板子传输完成");
     }
     
     // 超时检测
     if (is_upstream_timeout()) {
         printf("[SMEMA上游] 警告：接收超时（UBA长时间未释放）\n");
         ctx.status.receive_timeout_count++;
-        transition_upstream_state(UPSTREAM_IDLE);
+        transition_upstream_state(UPSTREAM_IDLE, NULL);
     }
 }
 
@@ -231,9 +239,8 @@ static void handle_upstream_board_arrived(void) {
     
     // 检查产品是否到位（业务层通过product_in_position信号控制）
     if (ctx.product_in_position) {
-        printf("[SMEMA上游] 产品已到位，返回IDLE\n");
         write_mr_signal(false);
-        transition_upstream_state(UPSTREAM_IDLE);
+        transition_upstream_state(UPSTREAM_IDLE, "产品已到位，返回IDLE");
     }
     
     // 超时检测（业务层处理太慢）
@@ -241,7 +248,7 @@ static void handle_upstream_board_arrived(void) {
         printf("[SMEMA上游] 警告：等待产品到位超时\n");
         ctx.status.receive_timeout_count++;
         write_mr_signal(false);
-        transition_upstream_state(UPSTREAM_IDLE);
+        transition_upstream_state(UPSTREAM_IDLE, NULL);
     }
 }
 
@@ -256,8 +263,7 @@ static void handle_downstream_idle(void) {
     
     // 检查产品到位信号（有板 = 发板）
     if (ctx.product_in_position && ctx.enabled && !ctx.manual_mode_ba) {
-        printf("[SMEMA下游] 本机有板，发出有板信号\n");
-        transition_downstream_state(DOWNSTREAM_AVAILABLE);
+        transition_downstream_state(DOWNSTREAM_AVAILABLE, "本机有板，发出有板信号");
     }
 }
 
@@ -272,15 +278,13 @@ static void handle_downstream_available(void) {
     
     if (dbr) {
         // 下游要板
-        printf("[SMEMA下游] 检测到DBR=ON，下游要板，开始发板\n");
         ctx.downstream_handshake_start = time(NULL);
-        transition_downstream_state(DOWNSTREAM_SENDING);
+        transition_downstream_state(DOWNSTREAM_SENDING, "检测到DBR=ON，下游要板，开始发板");
     }
     
     // 检查产品到位信号变化（中途无板了）
     if (!ctx.product_in_position) {
-        printf("[SMEMA下游] 本机已无板，取消有板信号\n");
-        transition_downstream_state(DOWNSTREAM_IDLE);
+        transition_downstream_state(DOWNSTREAM_IDLE, "本机已无板，取消有板信号");
     }
     
     // 注释掉超时检测：下游设备可能暂时不需要板子，BA应保持ON等待
@@ -303,9 +307,8 @@ static void handle_downstream_sending(void) {
     
     if (!dbr) {
         // DBR从ON变为OFF，板子传输完成
-        printf("[SMEMA下游] 检测到DBR=OFF，板子传输完成\n");
         ctx.status.send_count++;
-        transition_downstream_state(DOWNSTREAM_SENT);
+        transition_downstream_state(DOWNSTREAM_SENT, "检测到DBR=OFF，板子传输完成");
     }
     
     // 注释掉超时检测：下游设备可能接收慢，BA应保持ON等待
@@ -324,9 +327,8 @@ static void handle_downstream_sent(void) {
     
     // 检查产品是否离开（业务层通过product_in_position信号控制）
     if (!ctx.product_in_position) {
-        printf("[SMEMA下游] 产品已离开，返回IDLE\n");
         write_ba_signal(false);
-        transition_downstream_state(DOWNSTREAM_IDLE);
+        transition_downstream_state(DOWNSTREAM_IDLE, "产品已离开，返回IDLE");
     }
     
     // 注释掉超时检测：业务层负责移除板子，超时应由业务层处理
@@ -504,8 +506,8 @@ void smema_reset(void) {
     ctx.status.dbr_active = false;
     ctx.manual_mode_mr = false;
     ctx.manual_mode_ba = false;
-    transition_upstream_state(UPSTREAM_IDLE);
-    transition_downstream_state(DOWNSTREAM_IDLE);
+    transition_upstream_state(UPSTREAM_IDLE, NULL);
+    transition_downstream_state(DOWNSTREAM_IDLE, NULL);
     printf("[SMEMA] 状态机已复位\n");
 }
 
